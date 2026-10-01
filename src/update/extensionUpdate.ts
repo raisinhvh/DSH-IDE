@@ -3,7 +3,7 @@ import { createWriteStream } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Readable } from 'node:stream';
+import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { compareVersions, isVersion } from './version';
 
@@ -39,14 +39,30 @@ export async function latestExtensionRelease(repository: string, current: string
   return parseRelease(await response.json(), repository, current);
 }
 
+// The VSIX is large, so only abort when no data arrives for a while rather than after a fixed total time.
+const STALL_TIMEOUT_MS = 30_000;
+
+async function download(url: string, path: string): Promise<void> {
+  const controller = new AbortController();
+  let stall: NodeJS.Timeout | undefined;
+  const arm = () => { clearTimeout(stall); stall = setTimeout(() => controller.abort(new Error('The VSIX download stalled.')), STALL_TIMEOUT_MS); };
+  try {
+    arm();
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok || !response.body) throw new Error(`VSIX download returned HTTP ${response.status}.`);
+    const progress = new Transform({ transform(chunk, _encoding, done) { arm(); done(null, chunk); } });
+    await pipeline(Readable.fromWeb(response.body as import('node:stream/web').ReadableStream), progress, createWriteStream(path), { signal: controller.signal });
+  } finally {
+    clearTimeout(stall);
+  }
+}
+
 /** The temporary VSIX exists until the host finishes installing it. */
 export async function installExtensionRelease(release: ExtensionRelease, install: (path: string) => PromiseLike<unknown>): Promise<void> {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-ide-update-'));
   try {
-    const response = await fetch(release.downloadUrl, { signal: AbortSignal.timeout(120_000) });
-    if (!response.ok || !response.body) throw new Error(`VSIX download returned HTTP ${response.status}.`);
     const path = join(directory, 'update.vsix');
-    await pipeline(Readable.fromWeb(response.body as import('node:stream/web').ReadableStream), createWriteStream(path));
+    await download(release.downloadUrl, path);
     if (release.digest?.startsWith('sha256:')) {
       const hash = createHash('sha256').update(await readFile(path)).digest('hex');
       if (`sha256:${hash}` !== release.digest) throw new Error('The VSIX checksum did not match the GitHub release.');
