@@ -1,0 +1,14 @@
+await import('./review-hunks.test.mjs');
+await import('./sidebar-view.test.mjs');
+await import('./cursor-models.test.mjs');
+await import('./speed-protocol.test.mjs');
+await import('./instructions.test.mjs');
+await import('./delegation.test.mjs');
+await import('./subagent-behavior.test.mjs');
+await import('./review-controller.test.mjs');
+await import('./chat-state.test.mjs');
+await import('./cancellation.test.mjs');
+await import('./toolpacks.test.mjs');
+await import('./dsh-update.test.mjs');
+await import('./extension-update.test.mjs');
+await import('./update-plan.test.mjs');

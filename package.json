@@ -1,0 +1,291 @@
+{
+  "name": "dsh-ide",
+  "displayName": "DeepSeek Harness for IDE",
+  "description": "A native VS Code and Cursor front end for DeepSeek Harness",
+  "version": "0.4.7",
+  "publisher": "dsh-local",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/raisinhvh/DSH-IDE.git"
+  },
+  "private": true,
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:dsh.sidebar",
+    "onCommand:dsh.newChat"
+  ],
+  "main": "./dist/extension.js",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/extension.js --external:vscode --external:@deepseek-ai/dsh --external:esbuild && esbuild src/toolpacks/worker.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/toolpack-worker.js && esbuild src/mcp/delegateServer.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/delegate-server.js",
+    "build:test": "esbuild src/review/hunks.ts src/review/guards.ts src/review/renames.ts src/sidebar/view.ts src/sidebar/questions.ts src/update/version.ts src/update/plan.ts src/update/extensionUpdate.ts src/toolpacks/registry.ts src/runtime/models.ts src/instructions/store.ts --bundle --platform=node --format=esm --target=node20 --outdir=dist --out-extension:.js=.mjs && esbuild src/toolpacks/worker.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/toolpack-worker.js",
+    "test": "npm run build:test && node test/run.mjs",
+    "package": "npm run check && npm run build && vsce package --allow-missing-repository"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.2.0-rc.2",
+    "esbuild": "^0.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.96.0",
+    "@vscode/vsce": "^3.7.1",
+    "typescript": "^5.9.0"
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dsh",
+          "title": "DeepSeek Harness",
+          "icon": "media/dsh.svg"
+        }
+      ]
+    },
+    "views": {
+      "dsh": [
+        {
+          "id": "dsh.sidebar",
+          "name": "Agent",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "dsh.newChat",
+        "title": "DSH: New Chat"
+      },
+      {
+        "command": "dsh.continue",
+        "title": "DSH: Continue Chat"
+      },
+      {
+        "command": "dsh.cancel",
+        "title": "DSH: Cancel"
+      },
+      {
+        "command": "dsh.pickModel",
+        "title": "DSH: Pick Model"
+      },
+      {
+        "command": "dsh.manageModels",
+        "title": "DSH: Manage Models"
+      },
+      {
+        "command": "dsh.manageAccounts",
+        "title": "DSH: Manage Accounts"
+      },
+      {
+        "command": "dsh.applyAll",
+        "title": "DSH: Apply All Diffs"
+      },
+      {
+        "command": "dsh.rejectAll",
+        "title": "DSH: Reject All Diffs"
+      },
+      {
+        "command": "dsh.openRuntimeLogs",
+        "title": "DSH: Open Runtime Logs"
+      },
+      {
+        "command": "dsh.restartRuntime",
+        "title": "DSH: Restart Runtime"
+      },
+      {
+        "command": "dsh.checkForUpdates",
+        "title": "DSH: Check for Updates"
+      },
+      {
+        "command": "dsh.reviewNext",
+        "title": "DSH: Review Next File"
+      },
+      {
+        "command": "dsh.reviewAll",
+        "title": "DSH: Review All Files"
+      },
+      {
+        "command": "dsh.openWorkingCopyTerminal",
+        "title": "DSH: Open Working Copy Terminal"
+      },
+      {
+        "command": "dsh.applyHunk",
+        "title": "DSH: Apply Hunk"
+      },
+      {
+        "command": "dsh.rejectHunk",
+        "title": "DSH: Reject Hunk"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "dsh.newChat",
+        "key": "ctrl+alt+n",
+        "mac": "cmd+alt+n"
+      }
+    ],
+    "configuration": {
+      "title": "DeepSeek Harness",
+      "properties": {
+        "dsh.updates.check": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "Offer optional DSH-IDE and DSH updates when the editor starts. A DSH update that has a newer DSH-IDE release is always required, regardless of this setting."
+        },
+        "dsh.updates.repository": {
+          "type": "string",
+          "default": "raisinhvh/DSH-IDE",
+          "scope": "application",
+          "description": "Public GitHub repository hosting DSH-IDE releases, in owner/repository form. Leave empty to disable DSH-IDE update checks."
+        },
+        "dsh.models": {
+          "type": "array",
+          "default": [
+            {
+              "name": "DeepSeek V4 Flash",
+              "provider": "deepseek-official",
+              "backend": "deepseek-v4-flash",
+              "account": "default",
+              "enabled": true
+            },
+            {
+              "name": "Codex Default",
+              "provider": "codex-cli",
+              "backend": "default",
+              "account": "default",
+              "enabled": true
+            },
+            {
+              "name": "Claude Default",
+              "provider": "claude-cli",
+              "backend": "default",
+              "account": "default",
+              "enabled": true
+            }
+          ],
+          "description": "Named model routes. Secrets are managed by the Accounts command.",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "provider",
+              "backend"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "backend": {
+                "type": "string"
+              },
+              "account": {
+                "type": "string",
+                "default": "default"
+              },
+              "enabled": {
+                "type": "boolean",
+                "default": true
+              }
+            }
+          }
+        },
+        "dsh.runtime.nodePath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Node executable for the pinned local DSH runtime."
+        },
+        "dsh.runtime.cursorAgentPath": {
+          "type": "string",
+          "default": "agent",
+          "description": "Path to the official Cursor Agent CLI used for Cursor account models through ACP."
+        },
+        "dsh.runtime.codexPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Codex CLI executable for ChatGPT browser sign-in and model runs."
+        },
+        "dsh.runtime.claudePath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Claude Code executable for Claude subscription browser sign-in and model runs."
+        },
+        "dsh.runtime.maxWorkspaceFiles": {
+          "type": "integer",
+          "default": 4000,
+          "minimum": 1,
+          "description": "Maximum files copied into the isolated edit review workspace."
+        },
+        "dsh.runtime.maxWorkspaceBytes": {
+          "type": "integer",
+          "default": 104857600,
+          "minimum": 1024,
+          "description": "Maximum total bytes copied into the isolated edit review workspace."
+        },
+        "dsh.subagents": {
+          "type": "array",
+          "default": [],
+          "description": "Subagent profiles the main chat can delegate to (from any provider). Example: { \"name\": \"luna-low\", \"model\": \"Luna\", \"effort\": \"low\", \"speed\": \"Standard\", \"mode\": \"read-only\" }.",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "model"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Name the main chat uses to pick this subagent."
+              },
+              "description": {
+                "type": "string",
+                "description": "When the main chat should use this subagent."
+              },
+              "model": {
+                "type": "string",
+                "description": "Name of an entry from dsh.models (or a Cursor model)."
+              },
+              "effort": {
+                "type": "string",
+                "description": "Reasoning effort, e.g. low, medium, high. Must be one of the model's effort options."
+              },
+              "speed": {
+                "type": "string",
+                "description": "Speed or service tier label from the model's speed options, e.g. Standard or Fast."
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "read-only",
+                  "edit"
+                ],
+                "default": "read-only",
+                "description": "edit lets the subagent change files, but only the paths the main chat locks to it."
+              },
+              "enabled": {
+                "type": "boolean",
+                "default": true
+              }
+            }
+          }
+        },
+        "dsh.mcpServers": {
+          "type": "array",
+          "default": [],
+          "description": "ACP MCP server declarations passed to DSH sessions. Commands and URLs require workspace trust."
+        }
+      }
+    }
+  }
+}
