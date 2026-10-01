@@ -1579,7 +1579,7 @@ class ExtensionHost implements vscode.Disposable {
 
   private async removeModel(name: string): Promise<void> {
     if (!this.models.get(name)) throw new Error(`Model '${name}' is not configured.`);
-    await this.models.remove(name);
+    try { await this.models.remove(name); } catch (error) { this.sidebar.postMessage({ type: 'modelRemoveFailed', name }); this.refreshModels(); throw error; }
     if (this.selectedModel === name) {
       this.selectedModel = this.models.list(true)[0]?.name || '';
       await this.context.workspaceState.update(SELECTED_MODEL_KEY, this.selectedModel);

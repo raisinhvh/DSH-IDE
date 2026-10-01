@@ -209,27 +209,6 @@ export default {
 
 Packs are compiled with esbuild and run in their own Node child process (60s per call, output capped). They are arbitrary code, so only upload scripts you trust. New or changed packs appear in chats started afterwards.
 
-### Roblox Studio
-
-1. Upload `toolpacks/roblox.ts` in the Custom Tool Calls tab. Its card shows a pairing code. After changing the toolpack, remove and re-upload it (or restart the extension) so the bridge picks up new tools.
-2. Copy `roblox/DSHBridge.server.lua` into Studio's plugins folder, reopen Studio (or reload plugins), allow HTTP requests, and paste the pairing code into the "DSH Bridge" widget. The plugin connects only from the edit-mode DataModel. After updating the plugin, copy the new file into the plugins folder again and reload Studio.
-3. Multiple Studio places can connect at once. Use `roblox_places` to list them; pass the `place` argument to a Roblox tool to select by session, exact or partial place name, or place ID. Available tools include `roblox_tree`, `roblox_find`, `roblox_properties`, `roblox_source` (read-only), `roblox_execute`, `roblox_output_log`, `roblox_selection`, and `roblox_playtest`. The bridge listens on `127.0.0.1:34872` (override with `DSH_ROBLOX_PORT`).
-
-Example execute call (agent tool name `roblox_execute`, argument `code`):
-
-```lua
-local p = Instance.new("Part")
-p.Name = "DSHExample"
-p.Anchored = true
-p.Parent = workspace
-print("created", p:GetFullName())
-return p.Name
-```
-
-Execution targets the currently open Studio DataModel. In edit mode, changes are recorded for undo, including partial changes on runtime error; changes during Play are temporary and aren't recorded. You do **not** need to enable `LoadStringEnabled` for the bridge; the plugin runs code with its own runner. Results include captured `print`/`warn` output and stringified return values.
-
-Keep snippets short and finite. The **20-second** execute limit only interrupts code that yields (for example, with `task.wait()`). A non-yielding loop can freeze Studio.
-
 ## Questions
 
 Agents can call `ask_questions` to show single-choice questions in the chat. Every question also offers an "Other…" text answer, and the user can skip.

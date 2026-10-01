@@ -2,7 +2,7 @@
   "name": "dsh-ide",
   "displayName": "DeepSeek Harness for IDE",
   "description": "A native VS Code and Cursor front end for DeepSeek Harness",
-  "version": "0.4.7",
+  "version": "0.4.9",
   "publisher": "dsh-local",
   "license": "MIT",
   "repository": {

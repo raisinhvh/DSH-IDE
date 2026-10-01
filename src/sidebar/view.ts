@@ -181,6 +181,7 @@ export type SidebarHostMessage =
   | { type: 'questionResolved'; sessionId: string; id: string; answers: string[] | null }
   | { type: 'toolpacksState'; packs: SidebarToolpack[]; error?: string }
   | { type: 'modelSaved' }
+  | { type: 'modelRemoveFailed'; name: string }
   | { type: 'subagentProfilesState'; profiles: SidebarSubagentProfile[] }
   | { type: 'subagentSaved' }
   | { type: 'instructionsState'; items: SidebarInstruction[] }
@@ -336,7 +337,7 @@ export function getSidebarHtml(
 </section>
 <section id="toolcalls-page" class="page settings-page" hidden>
   <div class="page-heading"><button class="icon-button back" data-page="chat" title="Back to chat" aria-label="Back to chat"><span class="symbol">arrow_back</span></button><div><h1>Custom Tool Calls</h1></div></div>
-  <p class="helper">Toolpacks are TypeScript scripts that give the agent extra tools, such as a Roblox Studio bridge. Upload a .ts file to add one.</p>
+  <p class="helper">Toolpacks are TypeScript scripts that give the agent extra tools. Upload a .ts file to add one.</p>
   <div class="settings-toolbar"><button id="add-toolpack" class="secondary-button" type="button"><span class="symbol small">upload_file</span> Upload toolpack</button></div>
   <div id="toolpack-error" class="notice toolpack-error" role="status" hidden></div>
   <div id="toolpack-list" class="scroll-content"></div>

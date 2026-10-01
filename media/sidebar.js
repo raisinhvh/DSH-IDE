@@ -59,6 +59,19 @@
     if (iconName) result.appendChild(icon(iconName)); else result.textContent = label;
     result.onclick = action; return result;
   };
+  // Lists are rebuilt on every state message; only rows whose data-key is new get the entrance animation.
+  const shownKeys = new Map();
+  function rebuild(root, build) {
+    const known = shownKeys.get(root) || new Set();
+    root.textContent = ''; build();
+    const current = new Set();
+    for (const node of root.querySelectorAll('[data-key]')) {
+      current.add(node.dataset.key);
+      if (!known.has(node.dataset.key)) node.classList.add('enter');
+    }
+    shownKeys.set(root, current);
+  }
+  const keyed = (node, key) => { node.dataset.key = key; return node; };
   const providerNames = { 'codex-cli': 'Codex', 'claude-cli': 'Claude Code', 'cursor-acp': 'Cursor', 'deepseek-official': 'DeepSeek', openrouter: 'OpenRouter' };
   const accountGroups = [
     { provider: 'codex-cli', title: 'ChatGPT Accounts', icon: 'smart_toy', oauth: true },
@@ -131,23 +144,25 @@
   }
 
   function renderSessions() {
-    const root = el('sessions'); root.textContent = '';
+    const root = el('sessions');
     const menu = el('recent-menu'); menu.textContent = '';
-    if (!state.sessions.length) { const empty = document.createElement('div'); empty.className = 'session-empty'; empty.textContent = 'New chat'; root.appendChild(empty); return; }
+    if (!state.sessions.length) { rebuild(root, () => { const empty = document.createElement('div'); empty.className = 'session-empty'; empty.textContent = 'New chat'; root.appendChild(empty); }); return; }
     const openTabs = state.sessions.filter(item => !closedTabs.has(item.id) || item.id === state.activeSessionId);
     const visible = openTabs.slice(0, 2);
     const active = openTabs.find(item => item.id === state.activeSessionId);
     const third = active && !visible.some(item => item.id === active.id) ? active : openTabs[2];
     if (third) visible.push(third);
-    for (const session of visible) {
-      const row = document.createElement('div'); row.className = 'session-row';
-      const pick = button(session.name, 'Open ' + session.name, () => send({ type: 'selectSession', sessionId: session.id }), 'session-button');
-      pick.classList.toggle('active', session.id === state.activeSessionId);
-      pick.setAttribute('aria-pressed', String(session.id === state.activeSessionId));
-      if (isRunning(session.id)) pick.prepend(runDot());
-      row.append(pick, button('', 'Close ' + session.name, () => closeTab(session), 'icon-button tab-close', 'close'));
-      root.appendChild(row);
-    }
+    rebuild(root, () => {
+      for (const session of visible) {
+        const row = keyed(document.createElement('div'), 'session:' + session.id); row.className = 'session-row';
+        const pick = button(session.name, 'Open ' + session.name, () => send({ type: 'selectSession', sessionId: session.id }), 'session-button');
+        pick.classList.toggle('active', session.id === state.activeSessionId);
+        pick.setAttribute('aria-pressed', String(session.id === state.activeSessionId));
+        if (isRunning(session.id)) pick.prepend(runDot());
+        row.append(pick, button('', 'Close ' + session.name, () => closeTab(session), 'icon-button tab-close', 'close'));
+        root.appendChild(row);
+      }
+    });
     for (const session of state.sessions) {
       const row = document.createElement('div'); row.className = 'recent-row';
       const open = button(session.name, 'Open ' + session.name, () => { closedTabs.delete(session.id); saveLocal(); send({ type: 'selectSession', sessionId: session.id }); menu.hidden = true; el('recent-toggle').setAttribute('aria-expanded', 'false'); }, 'recent-item');
@@ -255,10 +270,9 @@
     const add = document.createElement('span'); add.className = 'added'; add.textContent = `+${additions}`;
     const remove = document.createElement('span'); remove.className = 'deleted'; remove.textContent = `-${deletions}`;
     total.append(add, remove);
-    const list = el('changes-list'); list.textContent = '';
-    if (!changesExpanded) return;
-    for (const diff of diffs) {
-      const row = document.createElement('div'); row.className = 'change-row';
+    const list = el('changes-list');
+    rebuild(list, () => { if (changesExpanded) for (const diff of diffs) {
+      const row = keyed(document.createElement('div'), 'diff:' + diff.id); row.className = 'change-row';
       const path = document.createElement('span'); path.className = 'change-path'; path.textContent = diff.path; path.title = diff.path;
       const counts = document.createElement('span'); counts.className = 'change-counts';
       const plus = document.createElement('span'); plus.className = 'added'; plus.textContent = `+${diff.additions || 0}`;
@@ -272,7 +286,7 @@
         row.appendChild(actions);
       }
       list.appendChild(row);
-    }
+    } });
   }
 
   function renderFeed() {
@@ -521,7 +535,7 @@
   }
 
   function accountRow(account) {
-    const row = document.createElement('div'); row.className = 'account-row';
+    const row = keyed(document.createElement('div'), 'account:' + account.id); row.className = 'account-row';
     const main = document.createElement('div'); main.className = 'row-main';
     const title = document.createElement('div'); title.className = 'row-title'; title.append(document.createTextNode(account.label + (account.email ? ' (' + account.email + ')' : '')));
     if (account.isDefault) { const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = 'Default'; title.appendChild(badge); }
@@ -537,16 +551,17 @@
   }
 
   function renderAccounts() {
-    const root = el('account-groups'); root.textContent = '';
+    const root = el('account-groups');
+    rebuild(root, () => {
     for (const group of accountGroups) {
-      const section = document.createElement('section'); section.className = 'provider-group';
+      const section = keyed(document.createElement('section'), 'group:' + group.provider); section.className = 'provider-group';
       const heading = document.createElement('div'); heading.className = 'group-heading'; heading.appendChild(icon(group.icon));
       const title = document.createElement('h2'); title.textContent = group.title; heading.appendChild(title);
       heading.appendChild(button('', 'View ' + providerNames[group.provider] + ' usage in your browser', () => send({ type: 'viewProviderUsage', provider: group.provider }), 'icon-button', 'open_in_new'));
       section.appendChild(heading);
       if (group.provider === 'cursor-acp') {
         if (state.cursor.connected) {
-          const row = document.createElement('div'); row.className = 'account-row';
+          const row = keyed(document.createElement('div'), 'account:cursor'); row.className = 'account-row';
           const main = document.createElement('div'); main.className = 'row-main';
           const line = document.createElement('div'); line.className = 'row-title'; line.append(document.createTextNode(state.cursor.label || 'Cursor account'));
           const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = 'Active'; line.appendChild(badge);
@@ -570,12 +585,13 @@
     }
     const legacy = state.accounts.filter(account => account.provider === 'openai' || account.provider === 'anthropic');
     if (legacy.length) {
-      const section = document.createElement('section'); section.className = 'provider-group';
+      const section = keyed(document.createElement('section'), 'group:legacy'); section.className = 'provider-group';
       const heading = document.createElement('div'); heading.className = 'group-heading';
       const title = document.createElement('h2'); title.textContent = 'Previous API accounts'; heading.appendChild(title); section.appendChild(heading);
       for (const account of legacy) section.appendChild(accountRow(account));
       root.appendChild(section);
     }
+    });
   }
 
   function openAccountForm(group) {
@@ -589,8 +605,18 @@
     form.scrollIntoView({ block: 'nearest' }); el('account-name').focus();
   }
 
+  // Settings writes can take seconds, so drop the row immediately and hide it from stale host state until the host confirms.
+  const removingModels = new Set();
+  function removeModelNow(name) {
+    removingModels.add(name);
+    state.models = state.models.filter(item => item.name !== name);
+    if (state.selectedModelId === name) state.selectedModelId = state.models.find(item => item.enabled !== false)?.id || '';
+    send({ type: 'removeModel', name });
+    renderModels(); renderPicker();
+  }
+
   function modelRow(model) {
-    const row = document.createElement('div'); row.className = 'model-row';
+    const row = keyed(document.createElement('div'), 'model:' + model.name); row.className = 'model-row';
     const main = document.createElement('div'); main.className = 'row-main';
     const title = document.createElement('div'); title.className = 'row-title'; title.append(document.createTextNode(model.name));
     if (model.id === state.selectedModelId) { const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = 'Selected'; title.appendChild(badge); }
@@ -601,25 +627,28 @@
     const actions = document.createElement('div'); actions.className = 'row-actions';
     actions.appendChild(button('', 'Edit model', () => openModelForm(model), 'icon-button', 'edit'));
     actions.appendChild(button('', pendingModelRemoval === model.name ? 'Confirm removal' : 'Remove model', () => {
-      if (pendingModelRemoval === model.name) { pendingModelRemoval = ''; send({ type: 'removeModel', name: model.name }); }
+      if (pendingModelRemoval === model.name) { pendingModelRemoval = ''; removeModelNow(model.name); }
       else { pendingModelRemoval = model.name; renderModels(); }
     }, 'icon-button', pendingModelRemoval === model.name ? 'delete_forever' : 'delete'));
     row.appendChild(actions); return row;
   }
 
   function renderModels() {
-    const root = el('model-list'); root.textContent = '';
+    const root = el('model-list');
     const configured = state.models;
-    if (!configured.length) { const empty = document.createElement('div'); empty.className = 'empty-row'; empty.textContent = 'No models configured'; root.appendChild(empty); }
-    else for (const model of configured) root.appendChild(modelRow(model));
+    rebuild(root, () => {
+      if (!configured.length) { const empty = document.createElement('div'); empty.className = 'empty-row'; empty.textContent = 'No models configured'; root.appendChild(empty); }
+      else for (const model of configured) root.appendChild(modelRow(model));
+    });
   }
 
   function renderSubagents() {
-    const root = el('subagent-list'); root.textContent = '';
+    const root = el('subagent-list');
     const profiles = state.subagentProfiles || [];
+    rebuild(root, () => {
     if (!profiles.length) { const empty = document.createElement('div'); empty.className = 'empty-row'; empty.textContent = 'No subagents yet'; root.appendChild(empty); return; }
     for (const profile of profiles) {
-      const row = document.createElement('div'); row.className = 'model-row';
+      const row = keyed(document.createElement('div'), 'subagent:' + profile.name); row.className = 'model-row';
       const main = document.createElement('div'); main.className = 'row-main';
       const title = document.createElement('div'); title.className = 'row-title'; title.textContent = profile.name;
       const meta = document.createElement('div'); meta.className = 'row-meta';
@@ -629,11 +658,13 @@
       actions.append(button('', 'Edit ' + profile.name, () => openSubagentForm(profile), 'icon-button', 'edit'), button('', 'Remove ' + profile.name, () => send({ type: 'removeSubagent', name: profile.name }), 'icon-button', 'delete'));
       row.append(main, actions); root.appendChild(row);
     }
+    });
   }
 
   function renderInstructions() {
-    const root = el('instruction-list'); root.textContent = '';
+    const root = el('instruction-list');
     const items = state.instructions || [];
+    rebuild(root, () => {
     if (!items.length) { const empty = document.createElement('div'); empty.className = 'empty-row'; empty.textContent = 'No rules or skills yet'; root.appendChild(empty); return; }
     const groups = [['Workspace rules', 'workspace', 'rule'], ['Workspace skills', 'workspace', 'skill'], ['Global rules', 'global', 'rule'], ['Global skills', 'global', 'skill']];
     for (const [label, scope, kind] of groups) {
@@ -641,7 +672,7 @@
       if (!members.length) continue;
       const heading = document.createElement('div'); heading.className = 'instruction-group'; heading.textContent = label; root.appendChild(heading);
       for (const item of members) {
-        const row = document.createElement('div'); row.className = 'model-row';
+        const row = keyed(document.createElement('div'), 'instruction:' + item.id); row.className = 'model-row';
         const main = document.createElement('div'); main.className = 'row-main';
         const title = document.createElement('div'); title.className = 'row-title'; title.textContent = item.name;
         const detail = document.createElement('div'); detail.className = 'row-subtitle'; detail.textContent = item.description || item.path;
@@ -659,6 +690,7 @@
         row.append(main, actions); root.appendChild(row);
       }
     }
+    });
   }
 
   function updateInstructionForm() {
@@ -687,12 +719,13 @@
   }
 
   function renderToolpacks() {
-    const root = el('toolpack-list'); root.textContent = '';
+    const root = el('toolpack-list');
     const error = el('toolpack-error'); error.hidden = !state.toolpackError; error.textContent = state.toolpackError || '';
     const packs = state.toolpacks || [];
+    rebuild(root, () => {
     if (!packs.length) { const empty = document.createElement('div'); empty.className = 'empty-row'; empty.textContent = 'No toolpacks added'; root.appendChild(empty); return; }
     for (const pack of packs) {
-      const row = document.createElement('div'); row.className = 'model-row toolpack-row';
+      const row = keyed(document.createElement('div'), 'toolpack:' + pack.id); row.className = 'model-row toolpack-row';
       const main = document.createElement('div'); main.className = 'row-main';
       const title = document.createElement('div'); title.className = 'row-title'; title.textContent = pack.id;
       const badge = document.createElement('span'); badge.className = 'badge toolpack-state toolpack-state-' + pack.state; badge.textContent = pack.state; title.appendChild(badge);
@@ -709,6 +742,7 @@
       actions.appendChild(button('', 'Remove toolpack', () => send({ type: 'toolpackAction', id: pack.id, action: 'remove' }), 'icon-button', 'delete'));
       row.append(main, actions); root.appendChild(row);
     }
+    });
   }
 
   function fillSelect(select, items, current) {
@@ -779,14 +813,14 @@
 
   function renderQueue() {
     const list = el('queue'); const items = state.queues?.[state.activeSessionId || ''] || [];
-    list.hidden = !items.length; list.textContent = '';
-    items.forEach((text, index) => {
-      const chip = document.createElement('div'); chip.className = 'queue-item'; chip.style.setProperty('--i', String(index));
+    list.hidden = !items.length;
+    rebuild(list, () => items.forEach((text, index) => {
+      const chip = keyed(document.createElement('div'), 'queue:' + text); chip.className = 'queue-item'; chip.style.setProperty('--i', String(index));
       chip.append(icon('schedule_send'));
       const label = document.createElement('span'); label.className = 'queue-text'; label.textContent = text; label.title = text; chip.appendChild(label);
       chip.appendChild(button('', 'Remove queued message', () => send({ type: 'unqueue', sessionId: state.activeSessionId, index }), 'icon-button', 'close'));
       list.appendChild(chip);
-    });
+    }));
   }
 
   function placeModelMenu() {
@@ -1039,7 +1073,15 @@
     if (!message || typeof message.type !== 'string') return;
     switch (message.type) {
       case 'sessionState': state.sessions = message.sessions || []; state.activeSessionId = message.activeSessionId; break;
-      case 'modelState': state.models = message.models || []; state.cursorBackends = message.cursorBackends || [];state.selectedModelId = message.selectedModelId; state.selectedSpeed = message.selectedSpeed; state.selectedEffort = message.selectedEffort; break;
+      case 'modelState': {
+        const incoming = message.models || [];
+        for (const name of [...removingModels]) if (!incoming.some(item => item.name === name)) removingModels.delete(name);
+        state.models = incoming.filter(item => !removingModels.has(item.name));
+        state.cursorBackends = message.cursorBackends || [];
+        if (!removingModels.has(message.selectedModelId)) state.selectedModelId = message.selectedModelId;
+        state.selectedSpeed = message.selectedSpeed; state.selectedEffort = message.selectedEffort;
+        break;
+      }
       case 'sessionDeleted':
         for (const table of [state.timeline, state.messages, state.subagents, state.runStates, state.queues]) delete table?.[message.sessionId];
         break;
@@ -1048,6 +1090,7 @@
       case 'accountsState': state.accounts = message.accounts || []; state.cursor = message.cursor || state.cursor; break;
       case 'accountSaved': el('account-form').hidden = true; el('account-key').value = ''; el('account-submit').disabled = false; state.error = undefined; break;
       case 'modelSaved': el('model-form').hidden = true; state.error = undefined; break;
+      case 'modelRemoveFailed': removingModels.delete(message.name); break;
       case 'subagentProfilesState': state.subagentProfiles = message.profiles || []; if (page === 'subagents') renderSubagents(); break;
       case 'toolpacksState': state.toolpacks = message.packs || []; state.toolpackError = message.error; if (page === 'toolcalls') renderToolpacks(); break;
       case 'subagentSaved': el('subagent-form').hidden = true; state.error = undefined; break;

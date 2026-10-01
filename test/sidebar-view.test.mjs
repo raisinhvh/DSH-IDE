@@ -118,6 +118,8 @@ test('changes panel toggles expanded class instead of hiding the list', () => {
   ]);
   vm.runInNewContext(`${renderChanges}\nstate = { diffs: [{ id: 'd1', path: 'a.ts', additions: 1, deletions: 0 }] };\nchangesExpanded = true;\nrenderChanges();`, {
     el(id) { return elements.get(id); },
+    rebuild: (_root, build) => build(),
+    keyed: node => node,
     document: { createElement: () => ({ className: '', textContent: '', append() {}, appendChild() {} }) },
     button: () => ({ appendChild() {}, append() {} }),
     state: { diffs: [{ id: 'd1', path: 'a.ts', additions: 1, deletions: 0, state: 'pending' }] },

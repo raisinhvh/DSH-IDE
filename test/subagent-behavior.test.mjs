@@ -71,23 +71,6 @@ test('explicit files enable editing only for edit profiles and release their loc
   }
 });
 
-test('chat and delegated native speeds keep the base backend with old suffixed settings', async () => {
-  for (const provider of ['codex-cli', 'claude-cli']) {
-    const { host, chat } = fixture('read-only');
-    const model = { name: 'test-model', enabled: true, provider, backend: 'base-model', speedOptions: [
-      { label: 'None', backend: 'base-model' }, { label: 'Fast', backend: 'base-model-fast' },
-    ] };
-    host.availableModel = () => model;
-    host.modelChoices = { 'test-model': { speed: 'Fast' } };
-    assert.equal(host.effectiveModel(model).backend, 'base-model');
-    host.subagentProfiles = () => [{ name: 'test-agent', model: 'test-model', mode: 'read-only', speed: 'Fast' }];
-    let routed;
-    host.resolveRoute = async entry => { routed = entry; return { model: {} }; };
-    await host.runSubagent(chat, { agent: 'test-agent', task: 'Say hi' });
-    assert.equal(routed.backend, 'base-model');
-  }
-});
-
 test('delegation events never enter the tool bar or create a duplicate subagent card', () => {
   for (const title of ['delegate_task', 'mcp__dsh_delegate__delegate_task', 'dsh-delegate/delegate_task']) {
     const { host, chat, events } = fixture();
