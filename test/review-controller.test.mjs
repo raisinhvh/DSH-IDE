@@ -56,7 +56,7 @@ const bundle = await build({
 });
 const { ReviewController } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
 
-function makeController(root, onAcknowledge, onRestore) {
+function makeController(root, onAcknowledge, onRestore, direct = false) {
   const acks = [];
   const restores = [];
   const controller = new ReviewController(uri(root), async (path, text) => {
@@ -65,7 +65,7 @@ function makeController(root, onAcknowledge, onRestore) {
   }, 'dsh-review', async (path, text) => {
     restores.push(['restore', path, text]);
     await onRestore?.(path, text, controller);
-  });
+  }, direct);
   controller._acks = acks;
   controller._restores = restores;
   return controller;
@@ -278,6 +278,28 @@ test('rename apply succeeds when the workspace already reflects the rename', asy
     await fs.access(join(root, 'old.ts')).then(() => assert.fail('old path should be gone')).catch(error => assert.equal(error.code, 'ENOENT'));
   } finally {
     controller?.dispose();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('direct mode records agent edits as applied without rewriting the workspace, and Reject still undoes them', async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), 'dsh-review-test-'));
+  let controller;
+  try {
+    // The user kept typing after the agent's write; recording the edit must not roll that back.
+    await fs.writeFile(join(root, 'direct.txt'), 'agent edit plus user typing');
+    controller = makeController(root, undefined, undefined, true);
+    controller.update([{ path: 'direct.txt', base: 'original', proposed: 'agent edit' }]);
+    await controller.queue;
+    assert.equal(await fs.readFile(join(root, 'direct.txt'), 'utf8'), 'agent edit plus user typing');
+    assert.equal(controller.list()[0].state, 'applied');
+    assert.deepEqual(controller._acks, [['ack', 'direct.txt', 'agent edit']]);
+    await controller.rejectAll();
+    assert.equal(await fs.readFile(join(root, 'direct.txt'), 'utf8'), 'original');
+    assert.deepEqual(controller._restores.at(-1), ['restore', 'direct.txt', 'original']);
+  } finally {
+    controller?.dispose();
+    documents.splice(0, documents.length);
     await fs.rm(root, { recursive: true, force: true });
   }
 });

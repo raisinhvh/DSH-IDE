@@ -12,7 +12,7 @@ const bundle = await build({
   logOverride: { 'import-is-undefined': 'silent' },
   plugins: [{ name: 'vscode-stub', setup(builder) {
     builder.onResolve({ filter: /^vscode$/ }, () => ({ path: 'vscode', namespace: 'stub' }));
-    builder.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({ contents: 'export const workspace = {}; export const window = {}; export const Uri = { file: path => ({ fsPath: path }) };' }));
+    builder.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({ contents: 'export const workspace = { getConfiguration: () => ({ get: (_key, fallback) => fallback }) }; export const window = {}; export const Uri = { file: path => ({ fsPath: path }) };' }));
   } }],
 });
 const { ExtensionHost, DshSidebarProvider, WorkspaceMirror } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
@@ -48,7 +48,7 @@ function promptChat(record, calls = []) {
   return {
     record, running: false, cancelRequested: false, queue: [], turnEntryId: '', segment: 0,
     startedTools: new Set(), subagentIds: new Set(), delegationToolIds: new Set(), subagentText: new Map(),
-    turnReply: '', handoffPending: false, ownerId: 'owner', mirror: { cwd: '/workspace', scan: async () => { calls.push('scan'); } },
+    turnReply: '', handoffPending: false, ownerId: 'owner', mirror: { cwd: '/workspace', beginTurn: async () => {}, endTurn: async () => { calls.push('scan'); } },
     runtime: { isRunning: true, prompt: async (_id, prompt) => { calls.push(['runtime prompt', prompt]); } },
   };
 }

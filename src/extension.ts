@@ -11,6 +11,8 @@ import { WindowsDependencies } from './runtime/dependencies';
 import { ReviewController, ReviewProposal } from './review/controller';
 import { DelegateAgentInfo, DelegateHost, DelegateResult, DelegateToolInfo } from './delegate/host';
 import { InstructionItem, InstructionRoots, listInstructions, locateInstruction, readInstruction, removeInstruction, saveInstruction } from './instructions/store';
+import { shareInstructions } from './instructions/share';
+import { chatTitlePrompt, cleanChatTitle, firstMessageTitle } from './runtime/naming';
 import { ToolpackRegistry } from './toolpacks/registry';
 import { currentVersion, installVersion, latestVersion, updatedRoot } from './update/dshUpdate';
 import { installExtensionRelease, latestExtensionRelease } from './update/extensionUpdate';
@@ -22,12 +24,14 @@ import { AcpRuntime, RuntimeEvent } from './runtime/acp';
 import { OAuthCliRuntime } from './runtime/oauthCli';
 import { MirrorChange, WorkspaceMirror } from './runtime/shadow';
 import { DshSidebarProvider, SidebarWebviewMessage } from './sidebar/provider';
-import { ApprovalMode, CursorAccountState, SidebarImage, SidebarTimelineItem, SidebarSubagent } from './sidebar/view';
+import { ApprovalMode, CursorAccountState, SidebarAccessibility, SidebarFeatureKey, SidebarFeatures, SidebarImage, SidebarNameModel, SidebarTimelineItem, SidebarSubagent, defaultFeatures, normalizeAccessibility } from './sidebar/view';
 
 interface SessionRecord {
   id: string;
   mirrorId: string;
   name: string;
+  /** The user renamed this chat, so automatic titles must not replace the name. */
+  renamed?: boolean;
   modelName: string;
   provider: string;
   backend: string;
@@ -35,6 +39,8 @@ interface SessionRecord {
   cliSessionId?: string;
   runtimeId?: string;
   pendingMirror?: boolean;
+  /** The agent edits the real workspace instead of a private copy (dsh.runtime.mirror off when the chat was created). */
+  direct?: boolean;
   effort?: string;
   updatedAt: number;
 }
@@ -61,6 +67,11 @@ const IMAGE_TYPES: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 
 const MAX_IMAGES = 8;
 const MAX_IMAGE_BASE64 = 14_000_000;
 type ModelChoice = { speed?: string; effort?: string };
+/** Customize page switches and the `dsh` settings that store them. */
+const FEATURE_SETTINGS: Record<SidebarFeatureKey, string> = {
+  activityRail: 'features.activityRail', autoName: 'features.autoName', shareRules: 'features.shareRules', editorContext: 'features.editorContext',
+  reduceMotion: 'features.reduceMotion', updateChecks: 'updates.check',
+};
 type ResolvedRoute = ResolvedModel | { model: ModelEntry } | { model: ModelEntry; oauthAccount: OAuthCliAccount };
 
 function isOAuthProvider(value: string): value is OAuthCliProvider { return value === 'codex-cli' || value === 'claude-cli'; }
@@ -129,6 +140,8 @@ class ExtensionHost implements vscode.Disposable {
   private readonly promptStarts = new Map<string, Promise<void>>();
   private readonly deletedSessions = new Set<string>();
   private readonly childRuns = new Set<ChildRun>();
+  /** Text listeners for tool-less ACP runs such as chat naming, keyed by `${runtimeKey}\n${sessionId}`. */
+  private readonly oneShots = new Map<string, (update: Record<string, unknown>) => void>();
   private readonly delegateHost = new DelegateHost();
   private readonly toolpacks: ToolpackRegistry;
   private active?: SessionRecord;
@@ -184,7 +197,11 @@ class ExtensionHost implements vscode.Disposable {
       vscode.workspace.onDidChangeConfiguration(event => {
         if (event.affectsConfiguration('dsh.models')) this.refreshModels();
         if (event.affectsConfiguration('dsh.subagents')) this.refreshSubagents();
+        if (['dsh.features', 'dsh.nameModel', 'dsh.updates.check', 'dsh.accessibility'].some(key => event.affectsConfiguration(key))) this.refreshCustomize();
       }),
+      // Before the write, so a watcher scan cannot see the save first; after it, for format-on-save output.
+      vscode.workspace.onWillSaveTextDocument(event => this.adoptSave(event.document)),
+      vscode.workspace.onDidSaveTextDocument(document => this.adoptSave(document)),
     );
     this.registerCommands();
     this.delegateHost.start({
@@ -199,6 +216,7 @@ class ExtensionHost implements vscode.Disposable {
       void vscode.window.showErrorMessage(`DSH setup failed: ${error instanceof Error ? error.message : String(error)}`);
     });
     this.sidebar.postMessage({ type: 'approvalState', mode: this.approvalMode });
+    this.refreshCustomize();
     this.refreshModels();
     this.refreshSessions();
     void this.refreshAccount();
@@ -846,6 +864,8 @@ class ExtensionHost implements vscode.Disposable {
     // provider only when the chat is used, rather than blocking the New button.
     const record: SessionRecord = {
       id: randomUUID(), mirrorId: randomUUID(), pendingMirror: true, name: 'New chat',
+      // Fixed per chat: the provider session is tied to its working directory.
+      direct: vscode.workspace.getConfiguration('dsh').get<boolean>('runtime.mirror', true) ? undefined : true,
       modelName: model.name, provider: model.provider, backend: model.backend,
       effort: this.choiceFor(selected).effort, accountId: account?.id || 'cursor-login', updatedAt: Date.now(),
     };
@@ -867,8 +887,17 @@ class ExtensionHost implements vscode.Disposable {
     return chat;
   }
 
+  /** Direct-mode chats treat files the user saves during a turn as the user's edits. */
+  private adoptSave(document: vscode.TextDocument): void {
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (document.uri.scheme !== 'file' || !folder) return;
+    const path = relative(folder.uri.fsPath, document.uri.fsPath);
+    if (!path || path.startsWith('..') || isAbsolute(path)) return;
+    for (const chat of this.chats.values()) void chat.mirror.adopt(path, document.getText()).catch(() => undefined);
+  }
+
   private createReview(root: vscode.Uri, mirror: WorkspaceMirror, chatId: string): ReviewController {
-    const review = new ReviewController(root, (path, text) => mirror.acknowledge(path, text), 'dsh-review', (path, text) => mirror.restore(path, text));
+    const review = new ReviewController(root, (path, text) => mirror.acknowledge(path, text), 'dsh-review', (path, text) => mirror.restore(path, text), mirror.direct);
     this.disposables.push(review.onProposalsChanged(items => this.onProposalsChanged(chatId, items)));
     return review;
   }
@@ -927,8 +956,8 @@ class ExtensionHost implements vscode.Disposable {
     };
     const fresh = !!record.pendingMirror;
     const mirror = fresh
-      ? await WorkspaceMirror.create(root.uri, this.context.globalStorageUri.fsPath, onChanges, record.mirrorId)
-      : await WorkspaceMirror.reopen(root.uri, this.context.globalStorageUri.fsPath, record.mirrorId, onChanges);
+      ? await WorkspaceMirror.create(root.uri, this.context.globalStorageUri.fsPath, onChanges, record.mirrorId, !!record.direct)
+      : await WorkspaceMirror.reopen(root.uri, this.context.globalStorageUri.fsPath, record.mirrorId, onChanges, !!record.direct);
     holder.review = this.createReview(root.uri, mirror, record.id);
     if (holder.changes) holder.review.update(holder.changes);
     const ownerId = randomUUID();
@@ -1218,10 +1247,13 @@ class ExtensionHost implements vscode.Disposable {
     started();
     this.postRun(record.id, 'thinking', 'Thinking…');
     this.updateStatus();
-    record.name = record.name === 'New chat' ? (prompt.trim() || 'Image').slice(0, 48) : record.name;
+    const firstTurn = record.name === 'New chat' && !record.renamed;
+    if (firstTurn) record.name = firstMessageTitle(prompt);
     record.updatedAt = Date.now();
+    if (firstTurn && prompt.trim()) void this.autoName(record.id, prompt, chat.mirror.cwd);
     try {
       await this.saveSession(record);
+      await chat.mirror.beginTurn();
       if (chat.cancelRequested) return;
       if (!isOAuthProvider(record.provider) && !chat.runtime?.isRunning) {
         const configured = this.availableModel(record.modelName);
@@ -1236,10 +1268,12 @@ class ExtensionHost implements vscode.Disposable {
       chat.handoffPending = false;
       history.push({ role: 'user', text: shown + (fileContext.length ? '\nContext files:\n' + fileContext.join('\n') : '') });
       chat.turnReply = '';
-      const fullPrompt = `${handoff}${this.editorContext()}\n\n${delegationInstructions(!!this.delegateConfig(chat.ownerId))}\n\n${fileContext.length ? 'Attached context files (read as needed):\n' + fileContext.join('\n') + '\n\n' : ''}User request:\n${prompt}`;
+      const fullPrompt = `${handoff}${this.editorContext(chat.mirror.direct)}\n\n${delegationInstructions(!!this.delegateConfig(chat.ownerId))}\n\n${fileContext.length ? 'Attached context files (read as needed):\n' + fileContext.join('\n') + '\n\n' : ''}User request:\n${prompt}`;
       if (isOAuthProvider(record.provider)) {
         const account = this.oauthAccounts.get(record.accountId);
         if (!account) throw new Error('The selected OAuth account is missing. Connect it again.');
+        await this.shareGlobalInstructions(account);
+        if (chat.cancelRequested) return;
         record.cliSessionId = await chat.cli.prompt({ account, cwd: chat.mirror.cwd, backend: record.backend,
           prompt: fullPrompt, sessionId: record.cliSessionId, effort: record.effort, fullAccess: this.approvalMode === 'full', speed: this.choiceFor(this.availableModel(record.modelName)).speed,
           onText: postText,
@@ -1262,7 +1296,7 @@ class ExtensionHost implements vscode.Disposable {
       if (chat.turnReply.trim()) this.transcripts.get(record.id)?.push({ role: 'assistant', text: chat.turnReply.trim() });
       chat.turnReply = '';
       await this.saveTranscripts();
-      await chat.mirror.scan().catch(error => this.output.appendLine(`Mirror scan failed: ${String(error)}`));
+      await chat.mirror.endTurn().catch(error => this.output.appendLine(`Mirror scan failed: ${String(error)}`));
       chat.running = false;
       this.postRun(record.id, 'idle', 'Ready');
       this.updateStatus();
@@ -1272,8 +1306,14 @@ class ExtensionHost implements vscode.Disposable {
     }
   }
 
-  private editorContext(): string {
+  private editorContext(direct: boolean): string {
     const folder = this.root();
+    const scope = direct
+      ? 'You are editing the user\'s workspace directly. The user and other agents may change files between turns, so re-read a file before editing it.'
+      : 'Work within this working copy. Proposed edits will be reviewed in the IDE before they reach the source workspace.';
+    if (!this.feature('editorContext')) {
+      return ['IDE context:', scope, `Workspace: ${folder.name}`].join('\n');
+    }
     const editor = vscode.window.activeTextEditor;
     const tabs = vscode.window.tabGroups.all.flatMap(group => group.tabs).map(tab => {
       const input = tab.input;
@@ -1281,7 +1321,7 @@ class ExtensionHost implements vscode.Disposable {
     }).filter((item): item is string => !!item && !item.startsWith('..')).slice(0, 20);
     const parts = [
       'IDE context (paths are relative to the working copy):',
-      'Work within this working copy. Proposed edits will be reviewed in the IDE before they reach the source workspace.',
+      scope,
       `Workspace: ${folder.name}`,
       `Open files: ${tabs.join(', ') || '(none)'}`,
     ];
@@ -1332,6 +1372,127 @@ class ExtensionHost implements vscode.Disposable {
     const others = this.subagentProfiles().filter(item => item.name !== name && item.name !== message.originalName);
     await this.writeSubagents([...others, next]);
     this.sidebar.postMessage({ type: 'subagentSaved' });
+  }
+
+  private feature(key: SidebarFeatureKey): boolean {
+    return vscode.workspace.getConfiguration('dsh').get<boolean>(FEATURE_SETTINGS[key], defaultFeatures()[key]) !== false;
+  }
+
+  private nameModelSetting(): SidebarNameModel {
+    const value = vscode.workspace.getConfiguration('dsh').get<unknown>('nameModel');
+    if (!value || typeof value !== 'object') return {};
+    const { model, effort, speed } = value as Record<string, unknown>;
+    const text = (item: unknown): string | undefined => typeof item === 'string' && item.trim() ? item.trim() : undefined;
+    return { model: text(model), effort: text(effort), speed: text(speed) };
+  }
+
+  private refreshCustomize(): void {
+    const features = Object.fromEntries((Object.keys(FEATURE_SETTINGS) as SidebarFeatureKey[]).map(key => [key, this.feature(key)])) as SidebarFeatures;
+    this.sidebar.postMessage({ type: 'customizeState', features, nameModel: this.nameModelSetting(),
+      accessibility: normalizeAccessibility(vscode.workspace.getConfiguration('dsh').get<unknown>('accessibility')) });
+  }
+
+  private async saveAccessibility(value: SidebarAccessibility): Promise<void> {
+    await vscode.workspace.getConfiguration('dsh').update('accessibility', normalizeAccessibility(value), vscode.ConfigurationTarget.Global);
+    this.refreshCustomize();
+  }
+
+  /** Deletes every chat that is not running. The open chat goes last so earlier deletions never switch to a chat about to be removed. */
+  private async deleteAllSessions(): Promise<void> {
+    const activeId = this.active?.id || this.context.workspaceState.get<string>(ACTIVE_SESSION_KEY);
+    const ids = this.sessions().map(item => item.id).filter(id => !this.chats.get(id)?.running)
+      .sort((a, b) => Number(a === activeId) - Number(b === activeId));
+    for (const id of ids) await this.deleteSession(id);
+  }
+
+  private async setFeature(key: SidebarFeatureKey, enabled: boolean): Promise<void> {
+    if (!Object.hasOwn(FEATURE_SETTINGS, key)) throw new Error('Unknown feature.');
+    await vscode.workspace.getConfiguration('dsh').update(FEATURE_SETTINGS[key], enabled === true, vscode.ConfigurationTarget.Global);
+    this.refreshCustomize();
+  }
+
+  private async saveNameModel(value: SidebarNameModel): Promise<void> {
+    const name = String(value?.model || '').trim();
+    let next: SidebarNameModel | undefined;
+    if (name) {
+      const model = this.availableModel(name);
+      if (!model) throw new Error(`Model "${name}" is not available.`);
+      const effort = value.effort || undefined;
+      const speed = value.speed || undefined;
+      if (effort && !model.effortOptions?.includes(effort)) throw new Error(`Effort "${effort}" is not offered by ${model.name}.`);
+      if (speed && !model.speedOptions?.some(item => item.label === speed)) throw new Error(`Speed "${speed}" is not offered by ${model.name}.`);
+      next = { model: model.name, effort, speed };
+    }
+    await vscode.workspace.getConfiguration('dsh').update('nameModel', next, vscode.ConfigurationTarget.Global);
+    this.refreshCustomize();
+  }
+
+  /** Copies global rules and skills into a Claude/Codex account directory, or removes earlier copies when sharing is off. */
+  private async shareGlobalInstructions(account: OAuthCliAccount): Promise<void> {
+    try {
+      const { dshHome, agentsHome } = this.instructionRoots();
+      await shareInstructions(account.provider, account.directory, { dshHome, agentsHome }, this.feature('shareRules'));
+    }
+    catch (error) { this.output.appendLine(`Could not share global rules with ${runtimeLabel(account.provider)}: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+
+  /** Replaces a chat's first-message title with one from the configured name model. Failures keep the provisional title. */
+  private async autoName(sessionId: string, prompt: string, cwd: string): Promise<void> {
+    let choice: SidebarNameModel = {};
+    try {
+      choice = this.nameModelSetting();
+      if (!this.feature('autoName') || !choice.model) return;
+      const title = cleanChatTitle(await this.runOneShot({ ...choice, model: choice.model }, cwd, chatTitlePrompt(prompt)));
+      const record = this.chats.get(sessionId)?.record ?? this.sessions().find(item => item.id === sessionId);
+      if (!title || !record || record.renamed || this.deletedSessions.has(sessionId)) return;
+      record.name = title;
+      await this.saveSession(record, false);
+    } catch (error) {
+      this.output.appendLine(`Naming a chat with "${choice.model}" failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /** Runs one prompt on a configured model with tools denied, and returns the reply text. */
+  private async runOneShot(choice: { model: string; effort?: string; speed?: string }, cwd: string, prompt: string, timeoutMs = 120_000): Promise<string> {
+    const entry = this.availableModel(choice.model);
+    if (!entry || entry.enabled === false) throw new Error(`Model "${choice.model}" is not available.`);
+    const backend = entry.speedOptions?.find(item => item.label === choice.speed)?.backend || entry.backend;
+    const route = await this.resolveRoute({ ...entry, backend });
+    let reply = '';
+    let timer: NodeJS.Timeout | undefined;
+    const limit = (cancel: () => void): void => { timer = setTimeout(cancel, timeoutMs); };
+    try {
+      if ('oauthAccount' in route) {
+        const cli = new OAuthCliRuntime();
+        limit(() => cli.cancel());
+        await cli.prompt({ account: route.oauthAccount, cwd, backend, effort: choice.effort, speed: choice.speed, readOnly: true, prompt,
+          onText: text => { reply += text; }, onTool: () => undefined, onApproval: async () => 'Tools are not available for this request.' });
+        return reply;
+      }
+      const slot = await this.ensureRuntime(route, cwd, `oneshot:${randomUUID()}`);
+      if (!slot) throw new Error('No runtime is available for this model.');
+      try {
+        const sessionId = await slot.runtime.newSession(cwd, []);
+        const listener = `${slot.key}\n${sessionId}`;
+        this.oneShots.set(listener, update => {
+          const content = update.content as Record<string, unknown> | undefined;
+          if (update.sessionUpdate === 'agent_message_chunk' && content?.type === 'text' && typeof content.text === 'string') reply += content.text;
+        });
+        limit(() => slot.runtime.cancel(sessionId));
+        try {
+          if (route.model.provider === 'cursor-acp') {
+            await this.refreshCursorModels(slot.runtime, sessionId);
+            if (backend !== 'auto' || slot.runtime.models(sessionId).some(option => option.value === 'auto')) await slot.runtime.setModel(sessionId, backend);
+          }
+          if (choice.effort) await slot.runtime.setConfigOption(sessionId, 'reasoning_effort', choice.effort);
+          await slot.runtime.prompt(sessionId, prompt);
+        } finally {
+          this.oneShots.delete(listener);
+          await slot.runtime.closeSession(sessionId).catch(() => undefined);
+        }
+      } finally { await this.releaseRuntime(slot.key); }
+      return reply;
+    } finally { if (timer) clearTimeout(timer); }
   }
 
   private subagentInfos(): DelegateAgentInfo[] {
@@ -1418,6 +1579,7 @@ class ExtensionHost implements vscode.Disposable {
       if ('oauthAccount' in route) {
         const cli = new OAuthCliRuntime();
         run.cancel = () => { cancelled = true; cli.cancel(); };
+        await this.shareGlobalInstructions(route.oauthAccount);
         if (cancelled) throw new Error('Cancelled.');
         await cli.prompt({ account: route.oauthAccount, cwd: chat.mirror.cwd, backend, effort, speed, readOnly, fullAccess: this.approvalMode === 'full',
           prompt, onText, onTool, onApproval: (description, info) => this.decideApproval(chat, { owner, label: profile.name, readOnly }, description, info) });
@@ -1646,7 +1808,9 @@ class ExtensionHost implements vscode.Disposable {
   private onRuntimeUpdate(event: RuntimeEvent, key: string): void {
     const chat = this.chatForRuntime(event.sessionId, key);
     if (!chat) {
-      [...this.childRuns].find(run => run.runtimeKey === key && run.sessionId === event.sessionId)?.onUpdate?.(event.update);
+      const oneShot = this.oneShots.get(`${key}\n${event.sessionId}`);
+      if (oneShot) oneShot(event.update);
+      else [...this.childRuns].find(run => run.runtimeKey === key && run.sessionId === event.sessionId)?.onUpdate?.(event.update);
       return;
     }
     const chatId = chat.record.id;
@@ -1805,7 +1969,7 @@ class ExtensionHost implements vscode.Disposable {
         case 'checkDependencies': await this.refreshDependencies(); break;
         case 'installProvider': await this.installProvider(message.provider); break;
         case 'pageChanged': this.sidebar.setPage(message.page); if (message.page === 'instructions') await this.refreshInstructions(); break;
-        case 'ready': await this.refreshInstructions(); this.postToolpacks(); this.sidebar.postMessage({ type: 'approvalState', mode: this.approvalMode }); this.refreshSubagents(); this.refreshModels(); this.refreshSessions(); await this.refreshAccount(); await this.refreshAccounts(); break;
+        case 'ready': await this.refreshInstructions(); this.postToolpacks(); this.sidebar.postMessage({ type: 'approvalState', mode: this.approvalMode }); this.refreshCustomize(); this.refreshSubagents(); this.refreshModels(); this.refreshSessions(); await this.refreshAccount(); await this.refreshAccounts(); break;
         case 'sendPrompt': await this.sendPrompt(message.prompt, message.images, undefined, undefined, message.mode === 'queue' ? 'queue' : 'interrupt'); break;
         case 'unqueue': { const target = this.chats.get(message.sessionId); if (target && Number.isInteger(message.index)) { target.queue.splice(message.index, 1); this.postQueue(target); } break; }
         case 'editMessage': await this.editMessage(message.sessionId, message.entryId, message.text); break;
@@ -1816,6 +1980,10 @@ class ExtensionHost implements vscode.Disposable {
         case 'approvalResponse': this.settleApproval(message.id, message.allow === true); break;
         case 'questionResponse': this.settleQuestion(message.id, Array.isArray(message.answers) ? message.answers.map(item => String(item)) : null); break;
         case 'pickToolpack': await this.addToolpack(); break;
+        case 'setFeature': await this.setFeature(message.key, message.enabled); break;
+        case 'saveNameModel': await this.saveNameModel(message.nameModel); break;
+        case 'saveAccessibility': await this.saveAccessibility(message.accessibility); break;
+        case 'deleteAllSessions': await this.deleteAllSessions(); break;
         case 'toolpackAction':
           if (message.action === 'remove') await this.toolpacks.remove(message.id);
           else if (message.action === 'reload') await this.toolpacks.reload(message.id);
@@ -1834,10 +2002,11 @@ class ExtensionHost implements vscode.Disposable {
         case 'selectSession': await this.continueChat(message.sessionId); break;
         case 'deleteSession': await this.deleteSession(message.sessionId); break;
         case 'renameSession': {
-          const record = this.sessions().find(item => item.id === message.sessionId);
+          // Prefer the loaded chat's record so a later turn save does not restore the old name.
+          const record = this.chats.get(message.sessionId)?.record ?? this.sessions().find(item => item.id === message.sessionId);
           if (record) {
             const name = message.name.trim() || await vscode.window.showInputBox({ prompt: 'Session name', value: record.name });
-            if (name?.trim()) { record.name = name.trim().slice(0, 100); await this.saveSession(record, false); }
+            if (name?.trim()) { record.name = name.trim().slice(0, 100); record.renamed = true; await this.saveSession(record, false); }
           }
           break;
         }

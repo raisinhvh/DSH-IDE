@@ -36,6 +36,8 @@ export class ReviewController implements vscode.TextDocumentContentProvider, vsc
     private readonly acknowledge: (path: string, text?: string) => Promise<void>,
     private readonly scheme = 'dsh-review',
     private readonly restore?: (path: string, text?: string) => Promise<void>,
+    /** The agent edits the real workspace, so changes are already on disk and only need recording. */
+    private readonly direct = false,
   ) {
     this.registration = vscode.workspace.registerTextDocumentContentProvider(this.scheme, this);
   }
@@ -67,6 +69,14 @@ export class ReviewController implements vscode.TextDocumentContentProvider, vsc
         catch (error) { void vscode.window.showWarningMessage(`DSH could not auto-apply ${proposal.path}: ${error instanceof Error ? error.message : String(error)}`); }
       }
     });
+  }
+
+  private async markApplied(proposal: ReviewProposal): Promise<void> {
+    proposal.state = 'applied';
+    this.settled.add(proposal.id);
+    if (proposal.fromPath) await this.acknowledge(proposal.fromPath, undefined);
+    await this.acknowledge(proposal.path, proposal.proposed);
+    this.proposalsChanged.fire(this.list());
   }
 
   private rebaseSnapshot(path: string, base: string | undefined): string | undefined {
@@ -255,6 +265,7 @@ export class ReviewController implements vscode.TextDocumentContentProvider, vsc
 
   private async applyBatch(proposals: ReviewProposal[]): Promise<void> {
     if (!proposals.length) return;
+    if (this.direct) { for (const proposal of proposals) await this.markApplied(proposal); return; }
     if (!vscode.workspace.isTrusted) throw new Error('Trust this workspace before applying DSH edits.');
     const edit = new vscode.WorkspaceEdit();
     const newParents = new Set<string>();

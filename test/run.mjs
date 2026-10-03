@@ -1,8 +1,12 @@
 await import('./review-hunks.test.mjs');
 await import('./sidebar-view.test.mjs');
+await import('./activity-rail.test.mjs');
+await import('./accessibility.test.mjs');
 await import('./cursor-models.test.mjs');
 await import('./speed-protocol.test.mjs');
 await import('./instructions.test.mjs');
+await import('./instructions-share.test.mjs');
+await import('./naming.test.mjs');
 await import('./delegation.test.mjs');
 await import('./subagent-behavior.test.mjs');
 await import('./review-controller.test.mjs');

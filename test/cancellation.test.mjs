@@ -169,3 +169,46 @@ test('filesystem event bursts queue one watcher scan and preserve the explicit f
   await final;
   assert.equal(scans, 2);
 });
+
+test('direct mode edits the real workspace and only attributes changes made during a turn', async () => {
+  const { promises: fs } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { tmpdir } = await import('node:os');
+  globalThis.__dshCancellationSpawn = () => { throw new Error('git unavailable'); };
+  const root = await fs.mkdtemp(join(tmpdir(), 'dsh-direct-root-'));
+  const storage = await fs.mkdtemp(join(tmpdir(), 'dsh-direct-storage-'));
+  const reports = [];
+  let mirror;
+  try {
+    await fs.writeFile(join(root, 'a.txt'), 'one');
+    await fs.writeFile(join(root, 'b.txt'), 'two');
+    mirror = await WorkspaceMirror.create({ scheme: 'file', fsPath: root }, storage, changes => reports.push(changes),
+      '11111111-1111-4111-8111-111111111111', true);
+    assert.equal(mirror.cwd, root);
+    assert.deepEqual(await fs.readdir(storage), [], 'nothing is copied');
+
+    await fs.writeFile(join(root, 'a.txt'), 'user before turn');
+    await mirror.scan();
+    assert.equal(reports.length, 0, 'edits between turns are not the agent\'s');
+
+    await mirror.beginTurn();
+    await fs.writeFile(join(root, 'a.txt'), 'agent');
+    await fs.writeFile(join(root, 'c.txt'), 'created');
+    await mirror.adopt('b.txt', 'user saved'); // onWillSaveTextDocument runs before the write
+    await fs.writeFile(join(root, 'b.txt'), 'user saved');
+    await mirror.endTurn();
+    const last = Object.fromEntries(reports.at(-1).map(change => [change.path, change]));
+    assert.deepEqual(Object.keys(last).sort(), ['a.txt', 'c.txt']);
+    assert.deepEqual(last['a.txt'], { path: 'a.txt', base: 'user before turn', proposed: 'agent' });
+    assert.deepEqual(last['c.txt'], { path: 'c.txt', base: undefined, proposed: 'created' });
+
+    const count = reports.length;
+    await fs.writeFile(join(root, 'a.txt'), 'user after turn');
+    await mirror.scan();
+    assert.equal(reports.length, count, 'recording stops when the turn ends');
+  } finally {
+    mirror?.dispose();
+    await fs.rm(root, { recursive: true, force: true });
+    await fs.rm(storage, { recursive: true, force: true });
+  }
+});

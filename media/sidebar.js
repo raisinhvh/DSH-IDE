@@ -11,13 +11,19 @@
   state.runStates ||= {};
   state.subagentProfiles ||= [];
   state.instructions ||= [];
+  state.features ||= { activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true };
+  state.nameModel ||= {};
+  state.accessibility ||= {};
   boot.remove();
   const local = vscode.getState() || {};
-  const pages = ['chat', 'accounts', 'models', 'subagents', 'instructions', 'toolcalls'];
+  const pages = ['chat', 'accounts', 'models', 'subagents', 'instructions', 'toolcalls', 'customize', 'accessibility'];
+  const settingsPages = ['instructions', 'models', 'subagents', 'toolcalls', 'customize', 'accessibility'];
   let page = pages.includes(state.page) && state.page !== 'chat' ? state.page
     : pages.includes(local.page) ? local.page : 'chat';
   const closedTabs = new Set(Array.isArray(local.closedTabs) ? local.closedTabs : []);
-  const saveLocal = () => vscode.setState({ page, closedTabs: [...closedTabs] });
+  // Chats that finished while you were looking elsewhere, by finish time. They stay blue on the rail until opened.
+  const unread = new Map(Object.entries(local.unread && typeof local.unread === 'object' ? local.unread : {}));
+  const saveLocal = () => vscode.setState({ page, closedTabs: [...closedTabs], unread: Object.fromEntries(unread) });
   let pendingAccountRemoval = '';
   let pendingModelRemoval = '';
   let pendingInstructionRemoval = '';
@@ -81,8 +87,11 @@
     { provider: 'openrouter', title: 'OpenRouter Accounts', icon: 'hub' },
   ];
 
+  function closeSettings() { el('settings-menu').hidden = true; el('settings-toggle').setAttribute('aria-expanded', 'false'); }
+
   function showPage(next) {
     page = next; state.page = next; saveLocal(); send({ type: 'pageChanged', page });
+    closeSettings();
     el('model-menu').hidden = true; el('model-picker').setAttribute('aria-expanded', 'false');
     for (const name of pages) el(name + '-page').hidden = name !== page;
     el('accounts').setAttribute('aria-pressed', String(page === 'accounts'));
@@ -143,10 +152,253 @@
     renderSessions();
   }
 
+  const calm = () => document.body.classList.contains('reduce-motion') || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  const railStatus = id => {
+    if ((state.timeline[id] || []).some(item => (item.kind === 'approval' || item.kind === 'question') && item.status === 'pending')) return 'blocked';
+    if (isRunning(id)) return 'running';
+    return unread.has(id) ? 'done' : '';
+  };
+  const railRank = { blocked: 0, done: 1, running: 2 };
+  const railSince = new Map();
+  const railTabs = new Map();
+  let railClock = 0;
+
+  function railDetail(id, status) {
+    if (status === 'blocked') {
+      const pending = (state.timeline[id] || []).find(item => (item.kind === 'approval' || item.kind === 'question') && item.status === 'pending');
+      return pending?.kind === 'question' ? 'Waiting for your answer' : 'Waiting for your approval';
+    }
+    return status === 'done' ? 'Finished. Open to read' : state.runStates[id]?.label || 'Running';
+  }
+
+  function openFromRail(id) {
+    if (unread.delete(id)) saveLocal();
+    if (page !== 'chat') showPage('chat');
+    send({ type: 'selectSession', sessionId: id });
+    renderRail();
+  }
+
+  // Rail motion uses the Web Animations API so every move can be interrupted from wherever it is on screen.
+  const railSpring = 'cubic-bezier(.3, 1.45, .45, 1)';
+  let railReady = false;
+  const play = (node, frames, options, done) => {
+    const animation = node.animate?.(frames, options);
+    if (done) { if (animation) animation.onfinish = done; else done(); }
+    return animation;
+  };
+
+  function setRailVisible(rail, visible) {
+    const shown = !rail.hidden && !rail.dataset.hiding;
+    if (visible === shown) return;
+    rail.toggleAnimation?.cancel();
+    delete rail.dataset.hiding;
+    // The rail's width follows text size and click-target settings, so slide by whatever it measures.
+    const offset = () => `-${rail.offsetWidth || 38}px`;
+    if (visible) {
+      rail.hidden = false;
+      if (railReady && !calm()) rail.toggleAnimation = play(rail, [{ marginLeft: offset(), opacity: 0 }, { marginLeft: '0px', opacity: 1 }], { duration: 460, easing: railSpring });
+    } else if (!railReady || calm()) rail.hidden = true;
+    else {
+      rail.dataset.hiding = 'true';
+      rail.toggleAnimation = play(rail, [{ marginLeft: '0px', opacity: 1 }, { marginLeft: offset(), opacity: 0 }],
+        { duration: 260, easing: 'cubic-bezier(.5, 0, .9, .4)', fill: 'forwards' }, () => { rail.hidden = true; delete rail.dataset.hiding; rail.toggleAnimation?.cancel(); });
+    }
+  }
+
+  /** A tab that is no longer needed is pulled out of the flow at its current spot and flicked off to the left. */
+  function leaveRail(rail, tab, box) {
+    railTabs.delete(tab.dataset.key);
+    tab.onclick = null;
+    if (calm() || !box?.height) { tab.remove(); return; }
+    const frame = rail.getBoundingClientRect();
+    tab.getAnimations?.().forEach(animation => animation.cancel());
+    tab.classList.add('leaving');
+    Object.assign(tab.style, { position: 'absolute', top: `${box.top - frame.top + rail.scrollTop}px`, left: `${box.left - frame.left}px`, height: `${box.height}px` });
+    play(tab, [
+      { translate: '0 0', scale: '1', opacity: 1, easing: 'cubic-bezier(.3, 0, .5, 1)' },
+      { translate: '4px 0', scale: '1.06', opacity: 1, offset: .2, easing: 'cubic-bezier(.55, 0, .9, .45)' },
+      { translate: '-150% 0', scale: '.7', opacity: 0 },
+    ], { duration: 320, fill: 'forwards' }, () => tab.remove());
+    // Backstop in case the view is hidden and the finish event is delayed.
+    setTimeout(() => tab.remove(), 600);
+  }
+
+  function pulseRailTab(tab) {
+    const tone = window.getComputedStyle?.(tab).getPropertyValue('--rail-tone').trim() || '#3794ff';
+    tab.pulseAnimation?.cancel();
+    // No closing box-shadow keyframe: the ring fades into whatever the tab already shows, such as the active outline.
+    tab.pulseAnimation = play(tab, [
+      { scale: '1', boxShadow: `0 0 0 0 color-mix(in srgb, ${tone} 75%, transparent)` },
+      { scale: '1.12', boxShadow: `0 0 0 4px color-mix(in srgb, ${tone} 35%, transparent)`, offset: .3 },
+      { scale: '.97', offset: .62 },
+      { scale: '1' },
+    ], { duration: 700, easing: 'cubic-bezier(.25, .8, .35, 1)' });
+  }
+
+  /** Reuses tab nodes so color and width changes transition, and animates every arrival, departure, move and state change. */
+  function renderRail() {
+    const rail = el('rail');
+    setRailVisible(rail, !!state.features.activityRail);
+    if (!state.features.activityRail) return;
+    if (page === 'chat' && unread.delete(state.activeSessionId || '')) saveLocal();
+    const items = [];
+    for (const session of state.sessions) {
+      const status = railStatus(session.id);
+      const since = railSince.get(session.id);
+      if (!status) { railSince.delete(session.id); continue; }
+      // The most recent state change sorts first within its group.
+      if (since?.status !== status) railSince.set(session.id, { status, at: ++railClock });
+      items.push({ session, status, at: railSince.get(session.id).at });
+    }
+    items.sort((a, b) => railRank[a.status] - railRank[b.status] || b.at - a.at);
+    const motion = !calm();
+    // Measure on-screen positions first, including any move still in flight, so new motion starts where the eye is.
+    const before = new Map([...railTabs].map(([id, node]) => [id, node.getBoundingClientRect()]));
+    const keep = new Set(items.map(item => item.session.id));
+    for (const [id, node] of [...railTabs]) if (!keep.has(id)) leaveRail(rail, node, before.get(id));
+    for (const node of railTabs.values()) { node.moveAnimation?.cancel(); node.moveAnimation = undefined; node.style.zIndex = ''; }
+    let head = rail.querySelector('.rail-head');
+    if (!head) {
+      head = icon('dynamic_feed'); head.className = 'symbol rail-head'; head.title = 'Running chats, chats waiting on you, and finished chats you have not opened appear here.';
+      rail.insertBefore(head, rail.firstChild || null);
+    }
+    const applyTab = (tab, session, status) => {
+      const detail = railDetail(session.id, status);
+      tab.dataset.status = status;
+      tab.className = ['rail-tab', status, session.id === state.activeSessionId ? 'active' : ''].filter(Boolean).join(' ');
+      tab.title = session.name + ': ' + detail;
+      tab.setAttribute('aria-label', session.name + '. ' + detail);
+      tab.firstChild.textContent = session.name;
+    };
+    // Put tabs in order, moving only the ones out of place: a moved node loses its running CSS transitions.
+    const changes = [];
+    let cursor = head.nextSibling;
+    for (const { session, status } of items) {
+      let tab = railTabs.get(session.id);
+      const fresh = !tab;
+      if (fresh) {
+        tab = document.createElement('button'); tab.type = 'button'; tab.dataset.key = session.id;
+        const label = document.createElement('span'); label.className = 'rail-label';
+        const bar = document.createElement('span'); bar.className = 'rail-bar'; bar.setAttribute('aria-hidden', 'true');
+        tab.append(label, bar);
+        tab.onclick = () => openFromRail(session.id);
+        railTabs.set(session.id, tab);
+        applyTab(tab, session, status);
+      }
+      while (cursor?.classList?.contains('leaving')) cursor = cursor.nextSibling;
+      if (cursor === tab) cursor = tab.nextSibling;
+      else rail.insertBefore(tab, cursor || null);
+      changes.push({ id: session.id, tab, fresh, session, status });
+    }
+    // Flush styles so moved tabs keep their old look for a frame; the class change below then transitions instead of snapping.
+    void rail.offsetHeight;
+    for (const change of changes) {
+      if (change.fresh) continue;
+      change.changed = change.tab.dataset.status !== change.status;
+      change.renamed = change.tab.firstChild.textContent !== change.session.name;
+      applyTab(change.tab, change.session, change.status);
+    }
+    if (!motion) { railReady = true; return; }
+    let arrivals = 0;
+    for (const { id, tab, fresh, changed, renamed } of changes) {
+      if (fresh) {
+        // Springs in from the rail edge with a little overshoot; tabs present on first load arrive one after another.
+        play(tab, [
+          { translate: '-150% 0', scale: '.55', opacity: 0, easing: 'cubic-bezier(.2, .9, .35, 1)' },
+          { translate: '5px 0', scale: '1.08', opacity: 1, offset: .55, easing: 'cubic-bezier(.4, 0, .5, 1)' },
+          { translate: '-1px 0', scale: '.97', offset: .8, easing: 'ease-in-out' },
+          { translate: '0 0', scale: '1' },
+        ], { duration: 640, delay: railReady ? 0 : arrivals++ * 55, fill: 'backwards' });
+        continue;
+      }
+      const old = before.get(id);
+      const now = tab.getBoundingClientRect();
+      // A zero-size rect means the chat page was hidden; sliding from there would sweep in from the top.
+      const shift = old?.height ? old.top - now.top : 0;
+      if (Math.abs(shift) > .5) {
+        // Tabs rising toward the top pass over the ones making room for them.
+        tab.style.zIndex = shift > 0 ? '2' : '';
+        const move = play(tab, [{ translate: `0 ${shift}px` }, { translate: '0 0' }], { duration: 560, easing: railSpring, composite: 'add' });
+        tab.moveAnimation = move;
+        if (move) move.onfinish = () => { if (tab.moveAnimation === move) tab.style.zIndex = ''; };
+      }
+      if (renamed) {
+        play(tab.firstChild, [{ opacity: 0, filter: 'blur(2px)' }, { opacity: 1, filter: 'blur(0px)' }], { duration: 320, easing: 'ease-out' });
+        if (old?.height && now.height > old.height) play(tab, [{ clipPath: `inset(0 0 ${now.height - old.height}px 0 round 11px)` }, { clipPath: 'inset(0 0 0px 0 round 11px)' }], { duration: 420, easing: railSpring });
+      }
+      if (changed) pulseRailTab(tab);
+    }
+    railReady = true;
+  }
+
   function renderSessions() {
     const root = el('sessions');
     const menu = el('recent-menu'); menu.textContent = '';
+    renderRail();
     if (!state.sessions.length) { rebuild(root, () => { const empty = document.createElement('div'); empty.className = 'session-empty'; empty.textContent = 'New chat'; root.appendChild(empty); }); return; }
+    if (state.features.activityRail) {
+      // The rail tracks active work, so the top shows only the open chat's name.
+      const active = state.sessions.find(item => item.id === state.activeSessionId);
+      rebuild(root, () => {
+        const title = keyed(document.createElement('div'), 'title:' + (active?.id || '')); title.className = 'session-title';
+        title.textContent = active?.name || 'New chat'; title.title = title.textContent;
+        if (active && isRunning(active.id)) title.prepend(runDot());
+        root.appendChild(title);
+      });
+    } else renderTabs(root);
+    for (const session of state.sessions) {
+      const row = document.createElement('div'); row.className = 'recent-row';
+      const open = button(session.name, 'Open ' + session.name, () => { closedTabs.delete(session.id); unread.delete(session.id); saveLocal(); send({ type: 'selectSession', sessionId: session.id }); menu.hidden = true; el('recent-toggle').setAttribute('aria-expanded', 'false'); }, 'recent-item');
+      if (isRunning(session.id)) open.prepend(runDot());
+      row.appendChild(open);
+      row.appendChild(button('', 'Rename ' + session.name, () => send({ type: 'renameSession', sessionId: session.id, name: '' }), 'icon-button', 'edit'));
+      if (!isRunning(session.id)) {
+        const remove = button('', 'Delete ' + session.name, () => {
+          if (remove.classList.contains('confirming')) { send({ type: 'deleteSession', sessionId: session.id }); return; }
+          remove.classList.add('confirming'); remove.title = 'Click again to delete'; remove.querySelector('.symbol').textContent = 'delete_forever';
+          setTimeout(() => { if (remove.isConnected) { remove.classList.remove('confirming'); remove.title = 'Delete ' + session.name; remove.querySelector('.symbol').textContent = 'delete'; } }, 2800);
+        }, 'icon-button recent-delete', 'delete');
+        row.appendChild(remove);
+      }
+      menu.appendChild(row);
+    }
+    menu.appendChild(deleteAllRow());
+  }
+
+  // Armed state lives outside the menu because the menu is rebuilt whenever any chat changes.
+  let deleteAllArmed = 0;
+  function deleteAllRow() {
+    const deletable = state.sessions.filter(session => !isRunning(session.id)).length;
+    const running = state.sessions.length - deletable;
+    const footer = document.createElement('div'); footer.className = 'recent-footer';
+    const title = deletable ? `Delete ${deletable} chat${deletable === 1 ? '' : 's'} and their unapplied changes${running ? `; ${running} running chat${running === 1 ? ' is' : 's are'} kept` : ''}` : 'Only running chats are left; cancel them to delete';
+    const glyph = icon('delete_sweep'); const text = document.createTextNode('');
+    const action = button('', title, () => {
+      if (deleteAllArmed > Date.now()) {
+        deleteAllArmed = 0;
+        el('recent-menu').hidden = true; el('recent-toggle').setAttribute('aria-expanded', 'false');
+        send({ type: 'deleteAllSessions' });
+        return;
+      }
+      // Updated in place: replacing the clicked node would make the outside-click handler close the menu.
+      deleteAllArmed = Date.now() + 3000;
+      show();
+      setTimeout(() => { if (deleteAllArmed && deleteAllArmed <= Date.now()) deleteAllArmed = 0; if (action.isConnected) show(); }, 3050);
+    }, 'recent-delete-all');
+    const show = () => {
+      const armed = deleteAllArmed > Date.now() && deletable > 0;
+      action.classList.toggle('confirming', armed);
+      glyph.textContent = armed ? 'delete_forever' : 'delete_sweep';
+      text.textContent = armed ? `Click again to delete ${deletable} chat${deletable === 1 ? '' : 's'}` : 'Delete all';
+    };
+    action.append(glyph, text);
+    action.disabled = !deletable;
+    show();
+    footer.appendChild(action);
+    return footer;
+  }
+
+  function renderTabs(root) {
     const openTabs = state.sessions.filter(item => !closedTabs.has(item.id) || item.id === state.activeSessionId);
     const visible = openTabs.slice(0, 2);
     const active = openTabs.find(item => item.id === state.activeSessionId);
@@ -163,22 +415,6 @@
         root.appendChild(row);
       }
     });
-    for (const session of state.sessions) {
-      const row = document.createElement('div'); row.className = 'recent-row';
-      const open = button(session.name, 'Open ' + session.name, () => { closedTabs.delete(session.id); saveLocal(); send({ type: 'selectSession', sessionId: session.id }); menu.hidden = true; el('recent-toggle').setAttribute('aria-expanded', 'false'); }, 'recent-item');
-      if (isRunning(session.id)) open.prepend(runDot());
-      row.appendChild(open);
-      row.appendChild(button('', 'Rename ' + session.name, () => send({ type: 'renameSession', sessionId: session.id, name: '' }), 'icon-button', 'edit'));
-      if (!isRunning(session.id)) {
-        const remove = button('', 'Delete ' + session.name, () => {
-          if (remove.classList.contains('confirming')) { send({ type: 'deleteSession', sessionId: session.id }); return; }
-          remove.classList.add('confirming'); remove.title = 'Click again to delete'; remove.querySelector('.symbol').textContent = 'delete_forever';
-          setTimeout(() => { if (remove.isConnected) { remove.classList.remove('confirming'); remove.title = 'Delete ' + session.name; remove.querySelector('.symbol').textContent = 'delete'; } }, 2800);
-        }, 'icon-button recent-delete', 'delete');
-        row.appendChild(remove);
-      }
-      menu.appendChild(row);
-    }
   }
 
   const markdown = window.markdownit?.({ html: false, linkify: true, breaks: true });
@@ -939,27 +1175,205 @@
     renderNotice();
   }
 
+  const featureInfo = [
+    { key: 'activityRail', icon: 'view_sidebar', title: 'Activity rail', desc: 'A rail left of the chat: gray while a chat runs, amber when it needs you, blue when it finished while you were elsewhere. When off, the top chat tabs return.' },
+    { key: 'autoName', icon: 'title', title: 'Name chats automatically', desc: 'A name model turns your first message into a short title. Renaming a chat yourself keeps your name.' },
+    { key: 'shareRules', icon: 'share', title: 'Share global rules and skills', desc: 'Before each Claude or Codex turn, copies your all-workspace rules and skills into that account. DSH already reads them.' },
+    { key: 'editorContext', icon: 'code', title: 'Send editor context', desc: 'Adds your open files, cursor position, selection and diagnostics to each message.' },
+    { key: 'updateChecks', icon: 'update', title: 'Offer optional updates', desc: 'Checks for DSH-IDE and DSH updates at startup. Required updates still apply.' },
+  ];
+  let customizeKey = '';
+
+  function nameModelFields() {
+    const models = state.models.filter(item => item.enabled !== false);
+    const current = state.nameModel || {};
+    const model = models.find(item => item.id === current.model);
+    const detail = document.createElement('div'); detail.className = 'feature-detail';
+    const field = (label, items, value, onchange) => {
+      const wrap = document.createElement('label'); wrap.textContent = label;
+      const select = document.createElement('select'); fillSelect(select, items, value); select.onchange = () => onchange(select.value);
+      wrap.appendChild(select); detail.appendChild(wrap); return wrap;
+    };
+    const save = next => { state.nameModel = next; customizeKey = ''; renderCustomize(); send({ type: 'saveNameModel', nameModel: next }); };
+    field('Name model', [{ value: '', label: 'None (use the first message)' }, ...models.map(item => ({ value: item.id, label: item.name }))], current.model || '',
+      value => save({ model: value || undefined }));
+    if (model) {
+      if (model.effortOptions?.length) field('Effort', [{ value: '', label: 'Default' }, ...model.effortOptions.map(value => ({ value, label: value }))], current.effort || '',
+        value => save({ ...current, effort: value || undefined }));
+      if (model.speedOptions?.length) field('Speed', [{ value: '', label: 'Default' }, ...model.speedOptions.map(item => ({ value: item.label, label: item.label }))], current.speed || '',
+        value => save({ ...current, speed: value || undefined }));
+    }
+    const help = document.createElement('p'); help.className = 'helper';
+    help.textContent = model ? 'Pick a fast, cheap model. It only sees your first message.' : 'Without a name model, chats are named after the first message.';
+    detail.appendChild(help);
+    return detail;
+  }
+
+  function renderCustomize() {
+    const root = el('feature-list');
+    // Skip identical rebuilds so an open select is not reset by unrelated state messages.
+    const key = JSON.stringify([state.features, state.nameModel, state.models.map(item => [item.id, item.enabled, item.effortOptions, item.speedOptions])]);
+    if (key === customizeKey && root.childElementCount) return;
+    customizeKey = key;
+    rebuild(root, () => {
+      for (const feature of featureInfo) {
+        const enabled = !!state.features[feature.key];
+        const row = settingRow('feature:' + feature.key, feature, enabled, () => {
+          state.features = { ...state.features, [feature.key]: !enabled };
+          if (feature.key === 'activityRail') renderSessions();
+          renderCustomize();
+          send({ type: 'setFeature', key: feature.key, enabled: !enabled });
+        });
+        if (feature.key === 'autoName' && enabled) row.appendChild(nameModelFields());
+        root.appendChild(row);
+      }
+    });
+  }
+
+  /** A titled row with an icon and, when `onToggle` is given, an on/off switch. */
+  function settingRow(key, info, enabled, onToggle) {
+    const row = keyed(document.createElement('div'), key); row.className = 'feature-row';
+    const main = document.createElement('div'); main.className = 'row-main';
+    const title = document.createElement('div'); title.className = 'row-title'; title.textContent = info.title;
+    const desc = document.createElement('div'); desc.className = 'row-subtitle'; desc.textContent = info.desc;
+    main.append(title, desc);
+    const head = document.createElement('div'); head.className = 'feature-head';
+    const glyph = icon(info.icon); glyph.classList.add('feature-icon');
+    head.append(glyph, main);
+    if (onToggle) {
+      const toggle = button('', (enabled ? 'Turn off: ' : 'Turn on: ') + info.title, onToggle, 'switch');
+      toggle.setAttribute('role', 'switch'); toggle.setAttribute('aria-checked', String(enabled));
+      const thumb = document.createElement('span'); thumb.className = 'switch-thumb'; toggle.appendChild(thumb);
+      head.appendChild(toggle);
+    }
+    row.appendChild(head);
+    return row;
+  }
+
+  // Mirrors accessibilityStyle() in src/sidebar/view.ts, which sets the same values before first paint.
+  const a11yDefaults = { textScale: 1, lineSpacing: 'normal', spacing: 'default', letterSpacing: 'normal', highContrast: false, largeTargets: false, underlineLinks: false };
+  const lineScales = { normal: 1, relaxed: 1.2, loose: 1.4 };
+  const spaceScales = { compact: 0.75, default: 1, roomy: 1.35 };
+  const letterSpacings = { normal: 'normal', wide: '0.04em' };
+  function applyAccessibility(value) {
+    const a = { ...a11yDefaults, ...value };
+    const root = document.documentElement.style;
+    root.setProperty('--text-scale', String(a.textScale));
+    root.setProperty('--line-scale', String(lineScales[a.lineSpacing] ?? 1));
+    root.setProperty('--space-scale', String(spaceScales[a.spacing] ?? 1));
+    root.setProperty('--letter-spacing', letterSpacings[a.letterSpacing] ?? 'normal');
+    document.body.classList.toggle('a11y-contrast', !!a.highContrast);
+    document.body.classList.toggle('a11y-targets', !!a.largeTargets);
+    document.body.classList.toggle('a11y-underline', !!a.underlineLinks);
+    document.body.classList.toggle('reduce-motion', !!state.features.reduceMotion);
+  }
+
+  let a11yKey = '';
+  function setAccessibility(patch, save = true) {
+    state.accessibility = { ...a11yDefaults, ...state.accessibility, ...patch };
+    applyAccessibility(state.accessibility);
+    if (save) send({ type: 'saveAccessibility', accessibility: state.accessibility });
+  }
+
+  function segmented(label, options, current, onPick) {
+    const group = document.createElement('div'); group.className = 'segmented'; group.setAttribute('role', 'radiogroup'); group.setAttribute('aria-label', label);
+    for (const [value, text] of options) {
+      const choice = button(text, label + ': ' + text, () => onPick(value));
+      choice.className = ''; choice.setAttribute('role', 'radio'); choice.setAttribute('aria-checked', String(value === current));
+      group.appendChild(choice);
+    }
+    return group;
+  }
+
+  function renderAccessibility() {
+    const root = el('a11y-list');
+    const a = { ...a11yDefaults, ...state.accessibility };
+    // Skip identical rebuilds so a slider being dragged keeps its pointer capture.
+    const key = JSON.stringify([a, state.features.reduceMotion]);
+    if (key === a11yKey && root.childElementCount) return;
+    a11yKey = key;
+    const choose = patch => { setAccessibility(patch); renderAccessibility(); };
+    rebuild(root, () => {
+      const size = settingRow('a11y:text', { icon: 'format_size', title: 'Text size', desc: 'Scales text, icons and controls across the sidebar.' });
+      const sizeControl = document.createElement('div'); sizeControl.className = 'a11y-control';
+      const scaleRow = document.createElement('div'); scaleRow.className = 'scale-row';
+      const small = icon('text_decrease'); const large = icon('text_increase');
+      const slider = document.createElement('input'); slider.type = 'range'; slider.min = '85'; slider.max = '160'; slider.step = '5';
+      slider.value = String(Math.round(a.textScale * 100)); slider.setAttribute('aria-label', 'Text size');
+      const value = document.createElement('span'); value.className = 'scale-value'; value.textContent = slider.value + '%';
+      slider.oninput = () => {
+        value.textContent = slider.value + '%';
+        setAccessibility({ textScale: Number(slider.value) / 100 }, false);
+        a11yKey = JSON.stringify([state.accessibility, state.features.reduceMotion]);
+      };
+      slider.onchange = () => send({ type: 'saveAccessibility', accessibility: state.accessibility });
+      scaleRow.append(small, slider, large, value);
+      const sample = document.createElement('p'); sample.className = 'a11y-sample'; sample.textContent = 'The quick brown fox reviews three pending edits.';
+      sizeControl.append(scaleRow, sample);
+      size.appendChild(sizeControl);
+
+      const choice = (rowKey, info, label, options, current, field) => {
+        const row = settingRow(rowKey, info);
+        const control = document.createElement('div'); control.className = 'a11y-control';
+        control.appendChild(segmented(label, options, current, picked => choose({ [field]: picked })));
+        row.appendChild(control);
+        return row;
+      };
+      const toggle = (rowKey, info, field) => settingRow(rowKey, info, !!a[field], () => choose({ [field]: !a[field] }));
+      const motion = settingRow('a11y:motion', { icon: 'animation', title: 'Reduce motion', desc: 'Turns off sidebar animations, including the activity rail.' }, !!state.features.reduceMotion, () => {
+        const enabled = !state.features.reduceMotion;
+        state.features = { ...state.features, reduceMotion: enabled };
+        applyAccessibility(state.accessibility);
+        renderAccessibility();
+        send({ type: 'setFeature', key: 'reduceMotion', enabled });
+      });
+      const reset = button('Reset to defaults', 'Reset accessibility settings to defaults', () => choose({ ...a11yDefaults }), 'secondary-button a11y-reset');
+      root.append(
+        size,
+        choice('a11y:line', { icon: 'format_line_spacing', title: 'Line spacing', desc: 'Space between lines in chat messages.' }, 'Line spacing',
+          [['normal', 'Normal'], ['relaxed', 'Relaxed'], ['loose', 'Loose']], a.lineSpacing, 'lineSpacing'),
+        choice('a11y:spacing', { icon: 'density_medium', title: 'Spacing', desc: 'Room between messages, rows and controls.' }, 'Spacing',
+          [['compact', 'Compact'], ['default', 'Default'], ['roomy', 'Roomy']], a.spacing, 'spacing'),
+        choice('a11y:letters', { icon: 'format_letter_spacing', title: 'Letter spacing', desc: 'Wider letters can be easier to read, including with dyslexia.' }, 'Letter spacing',
+          [['normal', 'Normal'], ['wide', 'Wide']], a.letterSpacing, 'letterSpacing'),
+        toggle('a11y:contrast', { icon: 'contrast', title: 'Higher contrast', desc: 'Full-strength secondary text, stronger borders and thicker focus outlines.' }, 'highContrast'),
+        toggle('a11y:targets', { icon: 'touch_app', title: 'Larger click targets', desc: 'Bigger buttons, menu items and rail tabs.' }, 'largeTargets'),
+        toggle('a11y:underline', { icon: 'format_underlined', title: 'Underline links', desc: 'Underlines links and text buttons so they do not rely on color alone.' }, 'underlineLinks'),
+        motion,
+        reset,
+      );
+    });
+  }
+
   function render() {
-    el('view-title').textContent = { chat: 'Chats', accounts: 'Accounts', models: 'Models', subagents: 'Subagents', instructions: 'Rules & Skills', toolcalls: 'Custom Tool Calls' }[page];
-    for (const name of ['accounts', 'models', 'subagents', 'instructions', 'toolcalls']) el(name).setAttribute('aria-pressed', String(page === name));
+    el('view-title').textContent = { chat: 'Chats', accounts: 'Accounts', models: 'Models', subagents: 'Subagents', instructions: 'Behavior', toolcalls: 'Toolpacks', customize: 'Customize', accessibility: 'Accessibility' }[page];
+    for (const name of settingsPages) el(name).classList.toggle('current', page === name);
+    el('settings-toggle').setAttribute('aria-pressed', String(settingsPages.includes(page)));
+    el('accounts').setAttribute('aria-pressed', String(page === 'accounts'));
     renderNotice(); renderPicker(); renderApproval(); renderSessions(); renderFeed();
     if (page === 'accounts') renderAccounts();
     if (page === 'subagents') renderSubagents();
     if (page === 'instructions') renderInstructions();
     if (page === 'models') { renderModels(); if (!el('model-form').hidden) updateModelSources(); }
     if (page === 'toolcalls') renderToolpacks();
+    if (page === 'customize') renderCustomize();
+    if (page === 'accessibility') renderAccessibility();
   }
 
   el('recent-toggle').onclick = () => { const menu = el('recent-menu'); menu.hidden = !menu.hidden; el('recent-toggle').setAttribute('aria-expanded', String(!menu.hidden)); };
   for (const [buttonId, menuId] of [['model-picker', 'model-menu'], ['speed-picker', 'speed-options'], ['effort-picker', 'effort-options']]) {
     el(buttonId).onclick = () => { const wasHidden = el(menuId).hidden; closeMenus(); el(menuId).hidden = !wasHidden; el(buttonId).setAttribute('aria-expanded', String(wasHidden)); if (menuId === 'model-menu') placeModelMenu(); };
   }
+  el('settings-toggle').onclick = () => { const menu = el('settings-menu'); menu.hidden = !menu.hidden; el('settings-toggle').setAttribute('aria-expanded', String(!menu.hidden)); };
+  el('customize').onclick = () => showPage(page === 'customize' ? 'chat' : 'customize');
+  el('accessibility').onclick = () => showPage(page === 'accessibility' ? 'chat' : 'accessibility');
   document.addEventListener('click', event => {
+    if (!event.target.closest('.settings-wrap')) closeSettings();
     if (!event.target.closest('.recent-wrap')) { el('recent-menu').hidden = true; el('recent-toggle').setAttribute('aria-expanded', 'false'); }
     if (!event.target.closest('.model-picker-wrap') && !event.target.closest('.option-wrap')) closeMenus();
     if (!event.target.closest('.send-wrap')) closeSendMenu();
   });
-  document.addEventListener('keydown', event => { if (event.key === 'Escape') { el('recent-menu').hidden = true; el('recent-toggle').setAttribute('aria-expanded', 'false'); closeMenus(); closeSendMenu(); } });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeSettings(); el('recent-menu').hidden = true; el('recent-toggle').setAttribute('aria-expanded', 'false'); closeMenus(); closeSendMenu(); } });
   el('apply-all').onclick = () => send({ type: 'applyAll' });
   el('reject-all').onclick = () => send({ type: 'rejectAll' });
   el('changes-toggle').onclick = () => { changesExpanded = !changesExpanded; renderChanges(); };
@@ -1083,6 +1497,7 @@
         break;
       }
       case 'sessionDeleted':
+        if (unread.delete(message.sessionId)) saveLocal();
         for (const table of [state.timeline, state.messages, state.subagents, state.runStates, state.queues]) delete table?.[message.sessionId];
         break;
       case 'queueState': (state.queues ||= {})[message.sessionId] = message.items || []; renderQueue(); break;
@@ -1095,6 +1510,11 @@
       case 'toolpacksState': state.toolpacks = message.packs || []; state.toolpackError = message.error; if (page === 'toolcalls') renderToolpacks(); break;
       case 'subagentSaved': el('subagent-form').hidden = true; state.error = undefined; break;
       case 'instructionsState': state.instructions = message.items || []; break;
+      case 'customizeState':
+        state.features = message.features || state.features; state.nameModel = message.nameModel || {};
+        state.accessibility = message.accessibility || state.accessibility;
+        applyAccessibility(state.accessibility);
+        break;
       case 'instructionContent': {
         const form = el('instruction-form');
         if (!form.hidden && form.dataset.id === message.id) { const content = el('instruction-content'); content.value = message.content; content.disabled = false; content.focus(); }
@@ -1115,6 +1535,12 @@
           if (message.sessionId === state.activeSessionId) state.tools = state.tools.map(tool => tool.state === 'running' ? { ...tool, state: 'cancelled' } : tool);
           for (const entry of state.timeline[message.sessionId] || []) if (entry.kind === 'tool' && entry.event.state === 'running') entry.event = { ...entry.event, state: 'cancelled' };
           for (const agent of Object.values(state.subagents[message.sessionId] || {})) if (agent.state === 'running') agent.state = 'cancelled';
+        }
+        {
+          // A turn that ends on its own while you are looking elsewhere stays unread; cancelling is your own doing.
+          const wasBusy = state.runStates[message.sessionId]?.state || 'idle';
+          const unseen = message.sessionId !== state.activeSessionId || page !== 'chat' || document.hidden;
+          if (message.state === 'idle' && wasBusy !== 'idle' && wasBusy !== 'cancelling' && unseen) { unread.set(message.sessionId, Date.now()); saveLocal(); }
         }
         state.runStates[message.sessionId] = { state: message.state, label: message.label };
         if (message.state === 'thinking') state.error = undefined;
@@ -1182,9 +1608,14 @@
       }
       case 'error': state.error = message.message; el('account-submit').disabled = false; if (el('account-form').dataset.oauth === 'true') el('account-submit').textContent = 'Continue in browser'; break;
     }
-    if (['userMessage', 'assistantDelta', 'assistantMessage', 'toolEvent', 'subagentEvent', 'toolState', 'diff', 'diffState', 'runState', 'approvalRequest', 'approvalResolved', 'questionRequest', 'questionResolved', 'timelineState'].includes(message.type)) { renderFeed(); if (message.type === 'runState') renderNotice(); }
+    if (['userMessage', 'assistantDelta', 'assistantMessage', 'toolEvent', 'subagentEvent', 'toolState', 'diff', 'diffState', 'runState', 'approvalRequest', 'approvalResolved', 'questionRequest', 'questionResolved', 'timelineState'].includes(message.type)) {
+      renderFeed();
+      if (message.type === 'runState') renderNotice();
+      if (/^(approval|question)(Request|Resolved)$|^timelineState$/.test(message.type)) renderRail();
+    }
     else render();
   });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) renderRail(); });
   showPage(page);
   send({ type: 'ready' });
 })();

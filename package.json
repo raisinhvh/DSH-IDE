@@ -2,7 +2,7 @@
   "name": "dsh-ide",
   "displayName": "DeepSeek Harness for IDE",
   "description": "A native VS Code and Cursor front end for DeepSeek Harness",
-  "version": "0.5.0",
+  "version": "0.5.2",
   "publisher": "dsh-local",
   "license": "MIT",
   "repository": {
@@ -26,7 +26,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "build": "esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/extension.js --external:vscode --external:@deepseek-ai/dsh --external:esbuild && esbuild src/toolpacks/worker.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/toolpack-worker.js && esbuild src/mcp/delegateServer.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/delegate-server.js",
-    "build:test": "esbuild src/review/hunks.ts src/review/guards.ts src/review/renames.ts src/sidebar/view.ts src/sidebar/questions.ts src/update/version.ts src/update/plan.ts src/update/extensionUpdate.ts src/toolpacks/registry.ts src/runtime/models.ts src/instructions/store.ts --bundle --platform=node --format=esm --target=node20 --outdir=dist --out-extension:.js=.mjs && esbuild src/toolpacks/worker.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/toolpack-worker.js",
+    "build:test": "esbuild src/review/hunks.ts src/review/guards.ts src/review/renames.ts src/sidebar/view.ts src/sidebar/questions.ts src/update/version.ts src/update/plan.ts src/update/extensionUpdate.ts src/toolpacks/registry.ts src/runtime/models.ts src/runtime/naming.ts src/instructions/store.ts src/instructions/share.ts --bundle --platform=node --format=esm --target=node20 --outdir=dist --out-extension:.js=.mjs && esbuild src/toolpacks/worker.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/toolpack-worker.js",
     "test": "npm run build:test && node test/run.mjs",
     "package": "npm run check && npm run build && vsce package --allow-missing-repository"
   },
@@ -147,6 +147,115 @@
           "scope": "application",
           "description": "Public GitHub repository hosting DSH-IDE releases, in owner/repository form. Leave empty to disable DSH-IDE update checks."
         },
+        "dsh.features.activityRail": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "Show the activity rail to the left of the chat: running chats stay gray, chats waiting on you turn amber, and chats that finished while you were elsewhere turn blue until you open them. When off, the top chat tabs return."
+        },
+        "dsh.features.autoName": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "Name new chats with the model in dsh.nameModel. Without a name model, or when off, chats are named after the first message."
+        },
+        "dsh.features.shareRules": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "Before each Claude Code or Codex turn, copy global rules (~/.dsh/AGENTS.md) and global skills into that account's private configuration directory. Turning this off removes the copies on the next turn."
+        },
+        "dsh.features.editorContext": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "Add open files, cursor position, selection and diagnostics to each message."
+        },
+        "dsh.features.reduceMotion": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "description": "Turn off sidebar animations."
+        },
+        "dsh.accessibility": {
+          "type": "object",
+          "default": {},
+          "scope": "application",
+          "description": "Sidebar display preferences from Settings → Accessibility. Reduce motion is dsh.features.reduceMotion.",
+          "properties": {
+            "textScale": {
+              "type": "number",
+              "minimum": 0.85,
+              "maximum": 1.6,
+              "default": 1,
+              "description": "Text size multiplier for the sidebar."
+            },
+            "lineSpacing": {
+              "type": "string",
+              "enum": [
+                "normal",
+                "relaxed",
+                "loose"
+              ],
+              "default": "normal",
+              "description": "Line spacing in chat messages."
+            },
+            "spacing": {
+              "type": "string",
+              "enum": [
+                "compact",
+                "default",
+                "roomy"
+              ],
+              "default": "default",
+              "description": "Space between messages, rows and controls."
+            },
+            "letterSpacing": {
+              "type": "string",
+              "enum": [
+                "normal",
+                "wide"
+              ],
+              "default": "normal",
+              "description": "Wider letter and word spacing for easier reading."
+            },
+            "highContrast": {
+              "type": "boolean",
+              "default": false,
+              "description": "Full-strength secondary text and stronger borders."
+            },
+            "largeTargets": {
+              "type": "boolean",
+              "default": false,
+              "description": "Larger buttons and menu items."
+            },
+            "underlineLinks": {
+              "type": "boolean",
+              "default": false,
+              "description": "Underline links and file references in messages."
+            }
+          }
+        },
+        "dsh.nameModel": {
+          "type": "object",
+          "default": {},
+          "scope": "application",
+          "description": "Model that writes chat titles from the first message. Example: { \"model\": \"DeepSeek V4 Flash\", \"effort\": \"low\" }.",
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "Name of an entry from dsh.models (or a Cursor model)."
+            },
+            "effort": {
+              "type": "string",
+              "description": "Reasoning effort from the model's effort options."
+            },
+            "speed": {
+              "type": "string",
+              "description": "Speed label from the model's speed options."
+            }
+          }
+        },
         "dsh.models": {
           "type": "array",
           "default": [
@@ -232,6 +341,11 @@
           "default": 104857600,
           "minimum": 1024,
           "description": "Maximum total bytes copied into the isolated edit review workspace."
+        },
+        "dsh.runtime.mirror": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Give each new chat a private copy of the workspace to edit. Turn off to let agents edit the real workspace directly, so they always see your changes and each other's. Edits made during a turn are still listed for review and can be undone with Reject. Applies to chats created after the change."
         },
         "dsh.subagents": {
           "type": "array",

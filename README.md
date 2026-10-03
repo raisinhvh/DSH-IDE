@@ -9,12 +9,12 @@ DeepSeek Harness (DSH) for VS Code and Cursor. The extension runs inside the edi
 - The default model route is `DeepSeek V4 Flash` / `deepseek-official` / `deepseek-v4-flash`.
 - `Cursor Auto` starts the official Cursor Agent CLI. After a Cursor session starts, the sidebar lists models advertised by the CLI and switches them through ACP. Cursor sign-in stays with the CLI; the extension does not copy Cursor tokens into SecretStorage.
 - `Codex Default` and `Claude Default` use the respective CLIs with browser sign-in. Each connected account has its own CLI configuration directory so work and personal logins can coexist. No API key is requested for these routes.
-- The sidebar has compact chat tabs and a Recent dropdown, grouped account lists, a provider-aware model editor, an in-sidebar model menu, speed routes and effort choices, prompts, cancellation, tool activity, and pending edit cards. The header actions use a bundled Google Material Symbols font. **Rules** and **Skills** open native AGENTS/CLAUDE rules and SKILL.md entries plus workspace `AGENTS/` and `.agents/skills`. Access control sits in the former image-attachment slot; provider usage links open each provider's usage website.
+- The sidebar has compact chat tabs and a Recent dropdown, grouped account lists, a provider-aware model editor, an in-sidebar model menu, speed routes and effort choices, prompts, cancellation, tool activity, and pending edit cards. The header actions use a bundled Google Material Symbols font. The **Settings** dropdown in the header opens **Behavior** (rules and skills), **Models**, **Subagents**, **Toolpacks**, **Customize** and **Accessibility**. **Behavior** opens native AGENTS/CLAUDE rules and SKILL.md entries plus workspace `AGENTS/` and `.agents/skills`. Access control sits in the former image-attachment slot; provider usage links open each provider's usage website.
 - User message **Edit**/**Save** starts a fresh backend session that keeps earlier conversational context and removes later timeline entries.
 - Attachments accept up to 8 files (10 MiB each, 20 MiB total). Text and binary files are copied into `.dsh/context` and referenced in the prompt path; supported images are sent to the provider natively.
 - DSH automatic context compaction is enabled. The sidebar keeps the full visible message timeline. New activity persists tool, approval, and subagent output in that timeline; older text-only saved chats cannot recover tool data that was never saved.
 - While a turn is running the send button becomes a split button with two options. **Interrupt & send** cancels the turn and starts the new request after cancellation settles. **Queue message** waits for the turn to finish and sends automatically; queued messages show above the composer and can be removed. **Cancel task** stops the current turn and clears the queue without sending anything.
-- The Recent menu can delete a chat (click the trash icon twice). Deleting removes the saved timeline and the chat's private working copy, including any unapplied proposals.
+- The Recent menu can delete a chat (click the trash icon twice). Deleting removes the saved timeline and the chat's private working copy, including any unapplied proposals. **Delete all** at the bottom of the menu does the same for every chat that is not running (click it twice; running chats are kept).
 - Subagents run in parallel. `delegate_tasks` runs several profiles in one call; Claude Code and Codex may also issue several `delegate_task` calls at once. Parallel edit subagents must lock disjoint files, and each DSH-routed subagent gets its own runtime process.
 - Updates use one flow. Five seconds after startup (or from **DSH: Check for Updates**) the extension checks the npm registry for a newer `@deepseek-ai/dsh` and GitHub (`dsh.updates.repository`, default `raisinhvh/DSH-IDE`) for a newer DSH-IDE release. If a DSH update exists and a newer DSH-IDE release is published, the DSH-IDE update is **required**: a modal prompt offers only **Update now**, chats are blocked until it is installed, and the window must be reloaded afterward. The DSH runtime is installed into extension storage first and is preferred over the bundled pin until the bundle catches up. If only one of the two has an update, it is offered as an optional prompt (**Update**, **Later**, and for DSH alone **Skip this version**). Set `dsh.updates.check` to `false` to silence optional prompts; required updates still apply. Failed or offline checks are logged to the DeepSeek Harness output channel and never block chats.
 
@@ -22,6 +22,7 @@ To publish an extension update, increase `package.json`'s version, run `npm run 
 - Diffs are computed with a Myers line diff, so one-line edits stay small in large files, and line-ending-only rewrites (for example LF written over a CRLF file) are aligned to the reviewed file's style instead of showing as a whole-file change.
 - The review controller opens native `vscode.diff` views and a multi-file changes editor, supports apply/reject for a file, apply/reject all, and apply/reject one selected hunk. Unambiguous content-preserving moves are applied as VS Code rename edits. Reject restores the mirror baseline and clears pending proposal animations.
 - Applying a proposal checks the live file against its review base, rejects workspace escaping and symlink targets, and updates the mirror baseline only after VS Code accepts the `WorkspaceEdit`.
+- With `dsh.runtime.mirror` off, there is no private copy. At the start of each turn DSH snapshots the workspace's text files (skipping gitignored ones), and anything that changes during the turn is listed as already applied. Files you save in the editor during a turn count as your edits, not the agent's. Changes made between turns are never attributed to the agent.
 
 ## Requirements
 
@@ -143,7 +144,37 @@ The extension contributes:
 | `dsh.runtime.claudePath` | Optional Claude Code executable | `claude`; auto-detects standard Windows npm install |
 | `dsh.runtime.maxWorkspaceFiles` | Maximum files copied into a mirror | `4000` |
 | `dsh.runtime.maxWorkspaceBytes` | Maximum bytes copied into a mirror | `104857600` |
+| `dsh.runtime.mirror` | Give each new chat a private copy of the workspace. When off, agents edit the real workspace, see your edits and other agents' edits right away, and each turn's changes are listed for review with Reject to undo. Set per chat when the chat is created. | `true` |
 | `dsh.mcpServers` | MCP declarations passed to DSH `session/new` and `session/resume` | `[]` |
+| `dsh.features.activityRail` | Show the activity rail left of the chat (the top chat tabs return when off) | `true` |
+| `dsh.features.autoName` | Name new chats with `dsh.nameModel` | `true` |
+| `dsh.nameModel` | Model (and optional effort/speed) that writes chat titles from the first message | `{}` (first-message titles) |
+| `dsh.features.shareRules` | Copy global rules and skills into Claude Code and Codex account directories before each turn | `true` |
+| `dsh.features.editorContext` | Add open files, cursor, selection and diagnostics to each message | `true` |
+| `dsh.features.reduceMotion` | Turn off sidebar animations (shown on the Accessibility page) | `false` |
+| `dsh.accessibility` | Text size, line spacing, spacing, letter spacing, higher contrast, larger click targets, underlined links | `{}` (defaults) |
+
+## Accessibility
+
+**Settings → Accessibility** changes how the sidebar reads. Every change shows immediately and is saved to `dsh.accessibility` in your user settings.
+
+- **Text size** (85–160%) scales text, icons, buttons, rows and the activity rail together, so nothing clips at larger sizes.
+- **Line spacing** (Normal, Relaxed, Loose) applies to chat messages and help text.
+- **Spacing** (Compact, Default, Roomy) changes the room between messages, list rows and controls.
+- **Letter spacing** (Normal, Wide) can make text easier to read, including for people with dyslexia.
+- **Higher contrast** shows secondary text at full strength and uses stronger borders and thicker focus outlines.
+- **Larger click targets** makes buttons, menu items and rail tabs bigger.
+- **Underline links** underlines links and text buttons so they do not rely on color alone.
+- **Reduce motion** turns off sidebar animations. A system-wide reduced-motion preference is always respected.
+- **Reset to defaults** restores everything except Reduce motion.
+
+## Customize
+
+**Settings → Customize** turns features on or off. Switches write the user-level settings above, so they follow VS Code Settings Sync.
+
+- **Activity rail**: a narrow rail left of the chat holds one vertical tab per chat that needs tracking. Running chats are gray with a loading bar. A chat waiting for an approval or an answer turns amber and moves to the top. A chat that finished while you were looking at another chat, a settings page, or another view turns blue, moves up and widens. Opening a blue tab removes it from the rail. Idle chats you have already seen stay in **Recent**. With the rail on, the top of the chat shows only the open chat's name and **Recent**.
+- **Name chats automatically**: a chat first shows its first message as its name. When a name model is selected, it runs once in the background on that first message and replaces the name with a short title. Tools are denied for that run, and it stops after two minutes. Renaming a chat yourself keeps your name.
+- **Share global rules and skills**: Claude Code and Codex run with a private configuration directory per account, so they do not read `~/.dsh/AGENTS.md` or `~/.agents/skills`. Before each Claude or Codex turn (including subagents), DSH copies the global rules into a marked block in that account's `CLAUDE.md` or `AGENTS.md`. It also copies global skills into the account's `skills/` folder and records them in `skills/.dsh-shared.json`. Codex already reads `~/.agents/skills` itself, so only `~/.dsh/skills` is copied for Codex. Files outside the marked block and skills DSH did not copy are never changed. Turning the switch off removes the copies on the next turn.
 
 MCP command and URL entries require workspace trust. The extension passes this setting through to DSH; it does not implement MCP servers itself.
 
