@@ -70,7 +70,7 @@ type ModelChoice = { speed?: string; effort?: string };
 /** Customize page switches and the `dsh` settings that store them. */
 const FEATURE_SETTINGS: Record<SidebarFeatureKey, string> = {
   activityRail: 'features.activityRail', autoName: 'features.autoName', shareRules: 'features.shareRules', editorContext: 'features.editorContext',
-  reduceMotion: 'features.reduceMotion', updateChecks: 'updates.check',
+  reduceMotion: 'features.reduceMotion', updateChecks: 'updates.check', mirror: 'runtime.mirror',
 };
 type ResolvedRoute = ResolvedModel | { model: ModelEntry } | { model: ModelEntry; oauthAccount: OAuthCliAccount };
 

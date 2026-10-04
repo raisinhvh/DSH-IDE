@@ -11,7 +11,7 @@
   state.runStates ||= {};
   state.subagentProfiles ||= [];
   state.instructions ||= [];
-  state.features ||= { activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true };
+  state.features ||= { activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true };
   state.nameModel ||= {};
   state.accessibility ||= {};
   boot.remove();
@@ -1180,6 +1180,7 @@
     { key: 'autoName', icon: 'title', title: 'Name chats automatically', desc: 'A name model turns your first message into a short title. Renaming a chat yourself keeps your name.' },
     { key: 'shareRules', icon: 'share', title: 'Share global rules and skills', desc: 'Before each Claude or Codex turn, copies your all-workspace rules and skills into that account. DSH already reads them.' },
     { key: 'editorContext', icon: 'code', title: 'Send editor context', desc: 'Adds your open files, cursor position, selection and diagnostics to each message.' },
+    { key: 'mirror', icon: 'content_copy', title: 'Private workspace copy', desc: 'Each new chat edits its own copy of the workspace. Turn off to let agents edit your real files, so they see your changes and each other\'s. Applies to new chats.' },
     { key: 'updateChecks', icon: 'update', title: 'Offer optional updates', desc: 'Checks for DSH-IDE and DSH updates at startup. Required updates still apply.' },
   ];
   let customizeKey = '';

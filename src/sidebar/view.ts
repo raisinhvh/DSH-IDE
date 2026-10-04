@@ -49,7 +49,7 @@ export function accessibilityStyle(value: SidebarAccessibility): { vars: Record<
     classes: [value.highContrast ? 'a11y-contrast' : '', value.largeTargets ? 'a11y-targets' : '', value.underlineLinks ? 'a11y-underline' : ''].filter(Boolean),
   };
 }
-export type SidebarFeatureKey = 'activityRail' | 'autoName' | 'shareRules' | 'editorContext' | 'reduceMotion' | 'updateChecks';
+export type SidebarFeatureKey = 'activityRail' | 'autoName' | 'shareRules' | 'editorContext' | 'reduceMotion' | 'updateChecks' | 'mirror';
 export type SidebarFeatures = Record<SidebarFeatureKey, boolean>;
 /** Model that writes chat titles; an empty model keeps the first-message title. */
 export interface SidebarNameModel { model?: string; effort?: string; speed?: string }
@@ -286,7 +286,7 @@ export interface SidebarViewState {
   error?: string;
 }
 
-export const defaultFeatures = (): SidebarFeatures => ({ activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true });
+export const defaultFeatures = (): SidebarFeatures => ({ activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true });
 
 export const initialSidebarState = (): SidebarViewState => ({
   page: 'chat', approvalMode: 'ask', subagentProfiles: [], instructions: [], toolpacks: [], features: defaultFeatures(), nameModel: {}, accessibility: defaultAccessibility(), sessions: [], models: [], providerLabel: 'No provider', accountLabel: 'No account connected',
