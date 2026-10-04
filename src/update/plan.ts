@@ -1,6 +1,7 @@
 import type { ExtensionRelease } from './extensionUpdate';
 
 export interface DshOffer { current: string; latest: string }
+export interface UpdateOffer { extension?: ExtensionRelease; dsh?: DshOffer }
 export interface UpdatePlan {
   /** A DSH update is out and a newer plugin release exists, so the plugin must update before DSH-IDE is usable. */
   required: boolean;
@@ -10,7 +11,7 @@ export interface UpdatePlan {
 
 /** One decision for both updaters. Returns undefined when there is nothing to offer. */
 export function planUpdates(
-  offer: { extension?: ExtensionRelease; dsh?: DshOffer },
+  offer: UpdateOffer,
   options: { promptOptional: boolean; skippedDsh?: string },
 ): UpdatePlan | undefined {
   const { extension, dsh } = offer;

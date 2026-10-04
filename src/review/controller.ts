@@ -16,6 +16,8 @@ export interface ReviewProposal {
   proposed?: string;
   state: ProposalState;
   hunks: DiffHunk[];
+  /** Workspace text when `base` is older than the last applied edit; set until the proposal is applied. */
+  checkpoint?: { text?: string };
 }
 
 const keyOf = (path: string, base?: string, proposed?: string): string => createHash('sha256').update(path).update('\0').update(base ?? '<new>').update('\0').update(proposed ?? '<deleted>').digest('hex');
@@ -72,11 +74,24 @@ export class ReviewController implements vscode.TextDocumentContentProvider, vsc
   }
 
   private async markApplied(proposal: ReviewProposal): Promise<void> {
+    await this.recordApplied(proposal);
+    this.proposalsChanged.fire(this.list());
+  }
+
+  private async recordApplied(proposal: ReviewProposal): Promise<void> {
     proposal.state = 'applied';
+    proposal.checkpoint = undefined;
     this.settled.add(proposal.id);
+    // Edits that cancel each other out leave nothing to review.
+    if (!proposal.fromPath && proposal.base === proposal.proposed && this.proposals.get(proposal.path) === proposal) this.proposals.delete(proposal.path);
     if (proposal.fromPath) await this.acknowledge(proposal.fromPath, undefined);
     await this.acknowledge(proposal.path, proposal.proposed);
-    this.proposalsChanged.fire(this.list());
+  }
+
+  /** The text the mirror baseline holds for a proposal's path. */
+  private static acknowledged(proposal: ReviewProposal): string | undefined {
+    if (proposal.state === 'applied') return proposal.proposed;
+    return proposal.checkpoint ? proposal.checkpoint.text : proposal.base;
   }
 
   private rebaseSnapshot(path: string, base: string | undefined): string | undefined {
@@ -105,20 +120,27 @@ export class ReviewController implements vscode.TextDocumentContentProvider, vsc
     for (const change of changes) {
       if (handled.has(change.path)) continue;
       const path = this.validatePath(change.path);
-      const rebased = { ...change, base: this.rebaseSnapshot(path, change.base) };
-      if (rebased.base === rebased.proposed) {
+      let base = this.rebaseSnapshot(path, change.base);
+      const { proposed } = change;
+      if (base === proposed) {
         // Acknowledgement advances the mirror baseline. Keep the applied diff
         // visible so Accept/Reject can still settle or undo it.
         if (this.proposals.get(path)?.state !== 'applied' && this.proposals.delete(path)) modified = true;
         continue;
       }
-      const id = keyOf(path, rebased.base, rebased.proposed);
-      if (this.settled.has(id)) continue;
+      // Another edit to a file whose earlier edits are still under review extends
+      // that review, so the diff covers every edit since the last Accept/Reject.
       const existing = this.proposals.get(path);
-      if (existing?.id === id && existing.base === rebased.base) continue;
-      const hunks = rebased.base !== undefined && rebased.proposed !== undefined
-        ? computeHunks(rebased.base, rebased.proposed) : [];
-      this.proposals.set(path, { id, path, base: rebased.base, proposed: rebased.proposed, state: 'pending', hunks });
+      let checkpoint: ReviewProposal['checkpoint'];
+      if (existing && !existing.fromPath && base === ReviewController.acknowledged(existing)) {
+        if (base !== existing.base) checkpoint = { text: base };
+        base = existing.base;
+      }
+      const id = keyOf(path, base, proposed);
+      if (this.settled.has(id)) continue;
+      if (existing?.id === id && existing.base === base) continue;
+      const hunks = base !== undefined && proposed !== undefined ? computeHunks(base, proposed) : [];
+      this.proposals.set(path, { id, path, base, proposed, state: 'pending', hunks, checkpoint });
       this.fireDocs(path);
       modified = true;
     }
@@ -132,7 +154,7 @@ export class ReviewController implements vscode.TextDocumentContentProvider, vsc
       edit.renameFile(target, await this.safeTarget(proposal.fromPath), { overwrite: false });
     } else if (proposal.base === undefined) {
       edit.deleteFile(target, { ignoreIfNotExists: true });
-    } else if (proposal.proposed === undefined) {
+    } else if (!await this.exists(target)) {
       edit.createFile(target, { ignoreIfExists: true });
       edit.insert(target, new vscode.Position(0, 0), proposal.base);
     } else {
@@ -143,6 +165,17 @@ export class ReviewController implements vscode.TextDocumentContentProvider, vsc
     await this.saveDocs([proposal.fromPath ?? proposal.path]);
     if (proposal.fromPath) { await this.syncMirror(proposal.path, undefined); await this.syncMirror(proposal.fromPath, proposal.base); }
     else await this.syncMirror(proposal.path, proposal.base);
+  }
+
+  private async exists(target: vscode.Uri): Promise<boolean> {
+    try { await fs.lstat(target.fsPath); return true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+  }
+
+  /** Undo a proposal in the workspace if any part of it was applied, otherwise only rewind the mirror. */
+  private async undo(proposal: ReviewProposal): Promise<void> {
+    if (proposal.state === 'applied' || proposal.checkpoint) await this.revert(proposal);
+    else if (proposal.state === 'pending') await this.restoreBaseline(proposal);
   }
 
   private async saveDocs(paths: string[]): Promise<void> {
@@ -197,8 +230,7 @@ export class ReviewController implements vscode.TextDocumentContentProvider, vsc
     return this.enqueue(async () => {
       const proposal = this.get(id);
       if (!proposal) return;
-      if (proposal.state === 'applied') await this.revert(proposal);
-      else if (proposal.state === 'pending') await this.restoreBaseline(proposal);
+      await this.undo(proposal);
       this.dismiss(proposal);
       this.proposalsChanged.fire(this.list());
     });
@@ -207,8 +239,7 @@ export class ReviewController implements vscode.TextDocumentContentProvider, vsc
   public rejectAll(): Promise<void> {
     return this.enqueue(async () => {
       for (const proposal of [...this.list()]) {
-        if (proposal.state === 'applied') await this.revert(proposal);
-        else if (proposal.state === 'pending') await this.restoreBaseline(proposal);
+        await this.undo(proposal);
         this.dismiss(proposal);
       }
       this.proposalsChanged.fire(this.list());
@@ -306,7 +337,8 @@ export class ReviewController implements vscode.TextDocumentContentProvider, vsc
       let live: string | undefined;
       try { live = document?.getText() ?? (await fs.readFile(target.fsPath)).toString('utf8'); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-      assertApplyPrecondition(proposal.path, proposal.base, live, !!document?.isDirty, proposal.proposed === undefined);
+      const expected = proposal.checkpoint ? proposal.checkpoint.text : proposal.base;
+      assertApplyPrecondition(proposal.path, expected, live, !!document?.isDirty, proposal.proposed === undefined);
       if (proposal.proposed === undefined) {
         if (live === undefined) continue;
         edit.deleteFile(target, { ignoreIfNotExists: false });
@@ -323,12 +355,7 @@ export class ReviewController implements vscode.TextDocumentContentProvider, vsc
     const applied = await vscode.workspace.applyEdit(edit, { isRefactoring: false });
     if (!applied) throw new Error('VS Code could not apply the review. No item was marked applied; inspect the workspace before retrying.');
     await this.saveDocs(proposals.map(proposal => proposal.path));
-    for (const proposal of proposals) {
-      proposal.state = 'applied';
-      this.settled.add(proposal.id);
-      if (proposal.fromPath) await this.acknowledge(proposal.fromPath, undefined);
-      await this.acknowledge(proposal.path, proposal.proposed);
-    }
+    for (const proposal of proposals) await this.recordApplied(proposal);
     this.proposalsChanged.fire(this.list());
   }
 

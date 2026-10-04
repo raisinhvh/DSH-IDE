@@ -16,7 +16,7 @@ import { chatTitlePrompt, cleanChatTitle, firstMessageTitle } from './runtime/na
 import { ToolpackRegistry } from './toolpacks/registry';
 import { currentVersion, installVersion, latestVersion, updatedRoot } from './update/dshUpdate';
 import { installExtensionRelease, latestExtensionRelease } from './update/extensionUpdate';
-import { planUpdates } from './update/plan';
+import { planUpdates, UpdateOffer, UpdatePlan } from './update/plan';
 import { compareVersions } from './update/version';
 import { formatAnswers, parseQuestions } from './sidebar/questions';
 import { delegationInstructions, isDelegationTool, isNativeSubagentTool } from './runtime/delegation';
@@ -123,7 +123,8 @@ interface Chat {
 class ExtensionHost implements vscode.Disposable {
   private readonly dependencies: WindowsDependencies;
   private nodeReady?: Promise<string>;
-  private updating?: Promise<void>;
+  private updateCheck?: Promise<UpdateOffer & { failures: string[] }>;
+  private updateInstall?: Promise<unknown>;
   private updateRequired?: string;
   private reloadPending = false;
   private readonly providerInstalls = new Set<string>();
@@ -378,7 +379,11 @@ class ExtensionHost implements vscode.Disposable {
   }
 
   private checkUpdates(manual = false): Promise<void> {
-    return this.updating ??= this.runUpdates(manual).finally(() => { this.updating = undefined; });
+    return this.runUpdates(manual).catch(error => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.output.appendLine(`DSH update failed: ${message}`);
+      if (manual) void vscode.window.showErrorMessage(`DSH update failed: ${message}`);
+    });
   }
 
   private requireCurrent(): void {
@@ -393,75 +398,120 @@ class ExtensionHost implements vscode.Disposable {
     if (reload) await vscode.commands.executeCommand('workbench.action.reloadWindow');
   }
 
-  private async runUpdates(manual: boolean): Promise<void> {
-    const config = vscode.workspace.getConfiguration('dsh');
-    const repository = config.get<string>('updates.repository', '').trim();
-    const storage = this.context.globalStorageUri.fsPath;
-    const current = this.context.extension.packageJSON.version as string;
-    const settled = async <T>(label: string, task: Promise<T>): Promise<T | undefined> => {
-      try { return await task; }
-      catch (error) { this.output.appendLine(`${label} update check failed: ${error instanceof Error ? error.message : String(error)}`); return undefined; }
-    };
-    let installing = false;
-    try {
+  /** Overlapping checks share one lookup, but each caller applies its own manual flag. */
+  private findUpdates(): Promise<UpdateOffer & { failures: string[] }> {
+    return this.updateCheck ??= (async () => {
+      const repository = vscode.workspace.getConfiguration('dsh').get<string>('updates.repository', '').trim();
+      const storage = this.context.globalStorageUri.fsPath;
+      const current = this.context.extension.packageJSON.version as string;
+      const failures: string[] = [];
+      const settled = async <T>(label: string, task: Promise<T>): Promise<T | undefined> => {
+        try { return await task; }
+        catch (error) {
+          const message = `${label} update check failed: ${error instanceof Error ? error.message : String(error)}`;
+          this.output.appendLine(message);
+          failures.push(message);
+          return undefined;
+        }
+      };
       const [extension, installed, latest] = await Promise.all([
         repository ? settled('DSH-IDE', latestExtensionRelease(repository, current)) : undefined,
         settled('DSH', currentVersion(storage)),
         settled('DSH', latestVersion()),
       ]);
       const dsh = installed && latest && compareVersions(latest, installed) > 0 ? { current: installed, latest } : undefined;
-      const plan = planUpdates({ extension, dsh }, {
-        promptOptional: manual || config.get<boolean>('updates.check', true),
-        skippedDsh: this.context.globalState.get<string>('dsh.ide.skippedDshVersion'),
-      });
-      if (!plan) {
-        if (manual) void vscode.window.showInformationMessage('DSH-IDE and DSH are up to date.');
-        return;
+      return { extension, dsh, failures };
+    })().finally(() => { this.updateCheck = undefined; });
+  }
+
+  // Prompts are never awaited while holding updateCheck or updateInstall: an ignored
+  // notification would otherwise block every later check until the window reloads.
+  private async runUpdates(manual: boolean): Promise<void> {
+    if (this.updateInstall) {
+      if (manual) void vscode.window.showInformationMessage('A DSH update is already installing.');
+      return;
+    }
+    const config = vscode.workspace.getConfiguration('dsh');
+    const current = this.context.extension.packageJSON.version as string;
+    const { extension, dsh, failures } = await this.findUpdates();
+    const plan = planUpdates({ extension, dsh }, {
+      promptOptional: manual || config.get<boolean>('updates.check', true),
+      skippedDsh: this.context.globalState.get<string>('dsh.ide.skippedDshVersion'),
+    });
+    if (!plan) {
+      if (manual && failures.length) void vscode.window.showWarningMessage(`Could not finish checking for updates. ${failures.join(' ')}`);
+      else if (manual) void vscode.window.showInformationMessage('DSH-IDE and DSH are up to date.');
+      return;
+    }
+    const parts = [plan.extension && `DSH-IDE ${plan.extension.version}`, plan.dsh && `DSH ${plan.dsh.latest}`].filter(Boolean).join(' and ');
+    if (plan.required) {
+      this.updateRequired = `DSH ${plan.dsh!.latest} is available, so DSH-IDE ${plan.extension!.version} must be installed before you can keep using it. Run "DSH: Check for Updates" to continue.`;
+      const choice = await vscode.window.showWarningMessage(`${parts} must be installed to keep using DSH-IDE.`,
+        { modal: true, detail: `You have DSH-IDE ${current} and DSH ${plan.dsh!.current}. Chats are disabled until the update is installed.` }, 'Update now');
+      if (!choice) return;
+    } else {
+      const buttons = plan.dsh && !plan.extension ? ['Update', 'Later', 'Skip this version'] : ['Update', 'Later'];
+      const choice = await vscode.window.showInformationMessage(`${parts} ${plan.extension && plan.dsh ? 'are' : 'is'} available.`, ...buttons);
+      if (choice === 'Skip this version') { await this.context.globalState.update('dsh.ide.skippedDshVersion', plan.dsh!.latest); return; }
+      if (choice !== 'Update') return;
+    }
+    // Another prompt may have started the same install while this one was open.
+    if (this.updateInstall) return;
+    const install = this.installUpdates(plan, parts);
+    this.updateInstall = install.finally(() => { this.updateInstall = undefined; }).catch(() => undefined);
+    let dshError: unknown;
+    try { ({ dshError } = await install); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.output.appendLine(`DSH update failed: ${message}`);
+      void vscode.window.showErrorMessage(`DSH update failed: ${message}`);
+      return;
+    }
+    if (dshError) {
+      const message = dshError instanceof Error ? dshError.message : String(dshError);
+      this.output.appendLine(`DSH update failed: ${message}`);
+      void vscode.window.showErrorMessage(`DSH-IDE ${plan.extension!.version} installed, but DSH ${plan.dsh!.latest} failed: ${message} Reload, then run "DSH: Check for Updates" to retry.`);
+    }
+    if (plan.extension) {
+      if (plan.required) await this.promptReload();
+      else {
+        this.updateRequired = undefined;
+        const installed = dshError ? `DSH-IDE ${plan.extension.version}` : parts;
+        const reload = await vscode.window.showInformationMessage(`${installed} installed. Reload the window to use the update.`, 'Reload Window', 'Later');
+        if (reload) await vscode.commands.executeCommand('workbench.action.reloadWindow');
       }
-      const parts = [plan.extension && `DSH-IDE ${plan.extension.version}`, plan.dsh && `DSH ${plan.dsh.latest}`].filter(Boolean).join(' and ');
-      if (plan.required) {
-        this.updateRequired = `DSH ${plan.dsh!.latest} is available, so DSH-IDE ${plan.extension!.version} must be installed before you can keep using it. Run "DSH: Check for Updates" to continue.`;
-        const choice = await vscode.window.showWarningMessage(`${parts} must be installed to keep using DSH-IDE.`,
-          { modal: true, detail: `You have DSH-IDE ${current} and DSH ${plan.dsh!.current}. Chats are disabled until the update is installed.` }, 'Update now');
-        if (!choice) return;
-      } else {
-        const buttons = plan.dsh && !plan.extension ? ['Update', 'Later', 'Skip this version'] : ['Update', 'Later'];
-        const choice = await vscode.window.showInformationMessage(`${parts} ${plan.extension && plan.dsh ? 'are' : 'is'} available.`, ...buttons);
-        if (choice === 'Skip this version') { await this.context.globalState.update('dsh.ide.skippedDshVersion', plan.dsh!.latest); return; }
-        if (choice !== 'Update') return;
-      }
-      installing = true;
-      await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Updating ${parts}…` }, async progress => {
-        if (plan.dsh) {
-          progress.report({ message: `Downloading DSH ${plan.dsh.latest}` });
-          await this.ensureNode();
-          await installVersion(storage, plan.dsh.latest);
-        }
-        if (plan.extension) {
-          progress.report({ message: `Downloading DSH-IDE ${plan.extension.version}` });
-          await installExtensionRelease(plan.extension, path => vscode.commands.executeCommand('workbench.extensions.installExtension', vscode.Uri.file(path)));
-        }
-      });
+    } else {
+      this.updateRequired = undefined;
+      const restart = await vscode.window.showInformationMessage(`DSH ${plan.dsh!.latest} is installed. Restart the runtime to use it.`, 'Restart runtime');
+      if (restart) await this.guarded(() => this.restartRuntime());
+    }
+  }
+
+  /** The VSIX is small and is what unblocks a required update, so it installs before the much larger npm download. */
+  private async installUpdates(plan: UpdatePlan, parts: string): Promise<{ dshError?: unknown }> {
+    const storage = this.context.globalStorageUri.fsPath;
+    return vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Updating ${parts}…` }, async progress => {
       if (plan.extension) {
+        progress.report({ message: `Downloading DSH-IDE ${plan.extension.version}` });
+        await installExtensionRelease(plan.extension, path => vscode.commands.executeCommand('workbench.extensions.installExtension', vscode.Uri.file(path)));
         if (plan.required) {
           this.reloadPending = true;
           this.updateRequired = 'DSH-IDE was updated. Reload the window to continue.';
-          await this.promptReload();
-        } else {
-          this.updateRequired = undefined;
-          const reload = await vscode.window.showInformationMessage(`${parts} installed. Reload the window to use the update.`, 'Reload Window', 'Later');
-          if (reload) await vscode.commands.executeCommand('workbench.action.reloadWindow');
         }
-      } else {
-        this.updateRequired = undefined;
-        const restart = await vscode.window.showInformationMessage(`DSH ${plan.dsh!.latest} is installed. Restart the runtime to use it.`, 'Restart runtime');
-        if (restart) await this.guarded(() => this.restartRuntime());
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.output.appendLine(`DSH update failed: ${message}`);
-      if (installing || manual) void vscode.window.showErrorMessage(`DSH update failed: ${message}`);
-    }
+      if (!plan.dsh) return {};
+      const latest = plan.dsh.latest;
+      try {
+        progress.report({ message: `Downloading DSH ${latest}` });
+        const node = await this.ensureNode();
+        await installVersion(storage, latest, node, downloads => progress.report({ message: `Downloading DSH ${latest} (${downloads} files)` }));
+        return {};
+      } catch (error) {
+        // Keep a finished extension install usable; the caller reports the DSH failure.
+        if (plan.extension) return { dshError: error };
+        throw error;
+      }
+    });
   }
 
   private async deleteSession(id: string): Promise<void> {

@@ -282,6 +282,80 @@ test('rename apply succeeds when the workspace already reflects the rename', asy
   }
 });
 
+for (const direct of [false, true]) {
+  test(`repeated edits to one file accumulate into one diff (${direct ? 'direct' : 'mirror'} mode)`, async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'dsh-review-test-'));
+    let controller;
+    try {
+      await fs.writeFile(join(root, 'multi.txt'), 'one\ntwo\nthree\n');
+      // Acknowledgement advances the mirror baseline, and its rescan reports no change.
+      controller = makeController(root, (path, text, ctrl) => ctrl.update([{ path, base: text, proposed: text }]), undefined, direct);
+      const edits = ['ONE\ntwo\nthree\n', 'ONE\ntwo\nTHREE\n', 'ONE\nTWO\nTHREE\n'];
+      let previous = 'one\ntwo\nthree\n';
+      for (const edit of edits) {
+        if (direct) await fs.writeFile(join(root, 'multi.txt'), edit);
+        controller.update([{ path: 'multi.txt', base: previous, proposed: edit }]);
+        await controller.queue;
+        previous = edit;
+      }
+      assert.equal(controller.list().length, 1);
+      const [proposal] = controller.list();
+      assert.equal(proposal.state, 'applied');
+      assert.equal(proposal.base, 'one\ntwo\nthree\n', 'diff starts from the text before the first edit');
+      assert.equal(proposal.proposed, 'ONE\nTWO\nTHREE\n');
+      assert.equal(await fs.readFile(join(root, 'multi.txt'), 'utf8'), 'ONE\nTWO\nTHREE\n');
+      await controller.rejectAll();
+      assert.equal(await fs.readFile(join(root, 'multi.txt'), 'utf8'), 'one\ntwo\nthree\n', 'Reject undoes every edit');
+    } finally {
+      controller?.dispose();
+      documents.splice(0, documents.length);
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test('edits that cancel out leave nothing to review', async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), 'dsh-review-test-'));
+  let controller;
+  try {
+    await fs.writeFile(join(root, 'undo.txt'), 'original');
+    controller = makeController(root, (path, text, ctrl) => ctrl.update([{ path, base: text, proposed: text }]));
+    controller.update([{ path: 'undo.txt', base: 'original', proposed: 'changed' }]);
+    await controller.queue;
+    controller.update([{ path: 'undo.txt', base: 'changed', proposed: 'original' }]);
+    await controller.queue;
+    assert.equal(controller.list().length, 0);
+    assert.equal(await fs.readFile(join(root, 'undo.txt'), 'utf8'), 'original');
+  } finally {
+    controller?.dispose();
+    documents.splice(0, documents.length);
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('edit followed by deletion keeps the original as the diff base and applies the delete', async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), 'dsh-review-test-'));
+  let controller;
+  try {
+    await fs.writeFile(join(root, 'gone.txt'), 'original');
+    controller = makeController(root, (path, text, ctrl) => ctrl.update([{ path, base: text, proposed: text }]));
+    controller.update([{ path: 'gone.txt', base: 'original', proposed: 'edited' }]);
+    await controller.queue;
+    controller.update([{ path: 'gone.txt', base: 'edited', proposed: undefined }]);
+    await controller.queue;
+    assert.equal(controller.list().length, 1);
+    assert.equal(controller.list()[0].state, 'applied');
+    assert.equal(controller.list()[0].base, 'original');
+    await fs.access(join(root, 'gone.txt')).then(() => assert.fail('file should be deleted')).catch(error => assert.equal(error.code, 'ENOENT'));
+    await controller.rejectAll();
+    assert.equal(await fs.readFile(join(root, 'gone.txt'), 'utf8'), 'original');
+  } finally {
+    controller?.dispose();
+    documents.splice(0, documents.length);
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('direct mode records agent edits as applied without rewriting the workspace, and Reject still undoes them', async () => {
   const root = await fs.mkdtemp(join(tmpdir(), 'dsh-review-test-'));
   let controller;

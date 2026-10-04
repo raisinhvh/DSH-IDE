@@ -1231,6 +1231,26 @@
     });
   }
 
+  // Settings lists are rebuilt on every toggle, so the flip is replayed on the fresh switch, resuming
+  // from the position and colors captured off the old one. Later rebuilds mid-flip pick up where it left off.
+  const switchFlips = new Map();
+  const flipLength = 640;
+  function flipSwitch(toggle, flip) {
+    const elapsed = performance.now() - flip.start;
+    if (!toggle.isConnected) return;
+    if (flip.focused && (!document.activeElement || document.activeElement === document.body)) toggle.focus({ preventScroll: true });
+    if (calm()) return;
+    const thumb = toggle.firstChild;
+    const track = getComputedStyle(toggle), dot = getComputedStyle(thumb);
+    const run = (node, frames, options) => { const animation = play(node, frames, options); if (animation) animation.currentTime = elapsed; };
+    run(thumb, [{ translate: flip.translate }, { translate: dot.translate }], { duration: 560, easing: 'cubic-bezier(.34, 1.56, .5, 1)' });
+    // Stretch along the slide, squash on landing, then wobble back to round.
+    run(thumb, [{ transform: 'scale(1)' }, { transform: 'scale(1.4, .72)', offset: .22 }, { transform: 'scale(.84, 1.16)', offset: .5 },
+      { transform: 'scale(1.06, .95)', offset: .74 }, { transform: 'scale(1)' }], { duration: flipLength, easing: 'ease-out' });
+    run(thumb, [{ backgroundColor: flip.dot }, { backgroundColor: dot.backgroundColor }], { duration: 420, easing: 'ease-in-out' });
+    run(toggle, [{ backgroundColor: flip.track, borderColor: flip.border }, { backgroundColor: track.backgroundColor, borderColor: track.borderColor }], { duration: 420, easing: 'ease-in-out' });
+  }
+
   /** A titled row with an icon and, when `onToggle` is given, an on/off switch. */
   function settingRow(key, info, enabled, onToggle) {
     const row = keyed(document.createElement('div'), key); row.className = 'feature-row';
@@ -1242,10 +1262,22 @@
     const glyph = icon(info.icon); glyph.classList.add('feature-icon');
     head.append(glyph, main);
     if (onToggle) {
-      const toggle = button('', (enabled ? 'Turn off: ' : 'Turn on: ') + info.title, onToggle, 'switch');
+      const toggle = button('', (enabled ? 'Turn off: ' : 'Turn on: ') + info.title, () => {
+        // Read the old switch before onToggle rebuilds the list; mid-flip reads pick up the animated values.
+        const track = getComputedStyle(toggle), dot = getComputedStyle(thumb);
+        switchFlips.set(key, { start: performance.now(), translate: dot.translate, dot: dot.backgroundColor, track: track.backgroundColor, border: track.borderColor,
+          hot: toggle.matches(':hover'), focused: document.activeElement === toggle });
+        onToggle();
+      }, 'switch');
       toggle.setAttribute('role', 'switch'); toggle.setAttribute('aria-checked', String(enabled));
       const thumb = document.createElement('span'); thumb.className = 'switch-thumb'; toggle.appendChild(thumb);
       head.appendChild(toggle);
+      const flip = switchFlips.get(key);
+      if (flip && performance.now() - flip.start < flipLength) {
+        toggle.classList.toggle('hot', flip.hot);
+        toggle.onmouseleave = () => { toggle.classList.remove('hot'); flip.hot = false; };
+        queueMicrotask(() => flipSwitch(toggle, flip));
+      } else switchFlips.delete(key);
     }
     row.appendChild(head);
     return row;
