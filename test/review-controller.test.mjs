@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { build } from 'esbuild';
 
 const documents = [];
+const schemes = [];
 const uri = path => ({ fsPath: path, toString: () => path });
 class WorkspaceEdit {
   operations = [];
@@ -23,7 +24,7 @@ globalThis.__dshReviewTestVscode = {
   window: { showWarningMessage() {} },
   workspace: {
     isTrusted: true, textDocuments: documents,
-    registerTextDocumentContentProvider() { return { dispose() {} }; },
+    registerTextDocumentContentProvider(scheme) { schemes.push(scheme); return { dispose() {} }; },
     fs: { createDirectory: target => fs.mkdir(target.fsPath, { recursive: true }) },
     async openTextDocument(target) {
       const existing = documents.find(doc => doc.uri.fsPath === target.fsPath);
@@ -70,6 +71,15 @@ function makeController(root, onAcknowledge, onRestore, direct = false) {
   controller._restores = restores;
   return controller;
 }
+
+test('each controller serves diffs from its own scheme so other chats cannot blank them', () => {
+  const before = schemes.length;
+  makeController(tmpdir()); makeController(tmpdir());
+  const added = schemes.slice(before);
+  assert.equal(added.length, 2);
+  assert.notEqual(added[0], added[1]);
+  assert.ok(added.every(scheme => scheme.startsWith('dsh-review-')));
+});
 
 test('review overwrites manual edits and keeps all applied files visible after acknowledgement', async () => {
   const root = await fs.mkdtemp(join(tmpdir(), 'dsh-review-test-'));

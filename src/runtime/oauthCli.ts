@@ -24,6 +24,8 @@ export interface CliTurn {
   onTool(id: string, title: string, detail: string | undefined, state: 'running' | 'complete' | 'error'): void;
   onSubagent?(event: { id: string; title?: string; model?: string; prompt?: string; state?: 'running' | 'complete' | 'error'; text?: string; messageId?: string; role?: 'assistant' | 'tool' }): void;
   onApproval?(description: string, info?: { tool: string; input: Record<string, unknown>; autoAllowEdits?: boolean }): Promise<boolean | string>;
+  /** Shows Claude's AskUserQuestion in the chat. Resolves to answers keyed by question text, or a message explaining why there are none. */
+  onQuestions?(input: Record<string, unknown>): Promise<Record<string, string> | string>;
   /** Files the agent finished editing, reported even when the sandbox allowed the write without an approval. */
   onFileChange?(paths: string[]): void;
 }
@@ -122,6 +124,13 @@ export class OAuthCliRuntime {
                   continue;
                 }
                 const input = (request.input && typeof request.input === 'object' ? request.input : {}) as Record<string, unknown>;
+                // In print mode AskUserQuestion only gets answers through the permission callback; approving it plainly returns none.
+                if (request.tool_name === 'AskUserQuestion') {
+                  void (turn.onQuestions ? turn.onQuestions(input) : Promise.resolve('Asking the user is not available here. Continue with your best judgement.')).then(
+                    answers => respond(typeof answers === 'string' ? { behavior: 'deny', message: answers } : { behavior: 'allow', updatedInput: { ...input, answers } }),
+                    () => respond({ behavior: 'deny', message: 'Could not show the questions to the user.' }));
+                  continue;
+                }
                 const description = `${String(request.tool_name || 'Tool')}: ${typeof input.command === 'string' ? input.command : JSON.stringify(input).slice(0, 1500)}`;
                 const info = { tool: String(request.tool_name || ''), input, autoAllowEdits: true };
                 void (turn.onApproval ? turn.onApproval(description, info) : Promise.resolve(false)).then(

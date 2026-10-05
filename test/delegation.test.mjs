@@ -134,6 +134,32 @@ test('Claude denies native agents before approval callbacks and preserves the de
   }
 });
 
+test('Claude AskUserQuestion is answered in the chat instead of as a permission prompt', async () => {
+  const questions = [{ question: 'Which bridge?', header: 'Bridge', options: [{ label: 'HTTP' }, { label: 'WebSocket' }], multiSelect: false }];
+  for (const [onQuestions, expected] of [
+    [() => Promise.resolve({ 'Which bridge?': 'HTTP' }), { behavior: 'allow', updatedInput: { questions, answers: { 'Which bridge?': 'HTTP' } } }],
+    [() => Promise.resolve('The user skipped these questions.'), { behavior: 'deny', message: 'The user skipped these questions.' }],
+    [undefined, { behavior: 'deny', message: 'Asking the user is not available here. Continue with your best judgement.' }],
+  ]) {
+    let approvals = 0;
+    const result = new OAuthCliRuntime().prompt(turn('claude-cli', { onQuestions, onApproval() { approvals++; return Promise.resolve(true); } }));
+    const launch = launches.at(-1);
+    const responses = [];
+    launch.child.stdin.on('data', chunk => {
+      const response = JSON.parse(String(chunk));
+      if (response.type === 'control_response') responses.push(response);
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    launch.child.stdout.write(JSON.stringify({ type: 'control_request', request_id: 'ask', request: { subtype: 'can_use_tool', tool_name: 'AskUserQuestion', input: { questions } } }) + '\n');
+    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(approvals, 0);
+    assert.deepEqual(responses.at(-1).response.response, expected);
+    launch.child.emit('close', 0);
+    await result;
+  }
+});
+
 test('Codex marks each agent message so text around hidden tool lookups is never joined', async () => {
   const events = [];
   codexItems = [

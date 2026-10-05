@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { transform } from 'esbuild';
 import { ToolpackRegistry } from '../dist/toolpacks/registry.mjs';
-import { formatAnswers, parseQuestions } from '../dist/sidebar/questions.mjs';
+import { answersByQuestion, formatAnswers, parseQuestions } from '../dist/sidebar/questions.mjs';
 
 
 const dir = await mkdtemp(join(tmpdir(), 'dsh-toolpacks-'));
@@ -69,4 +69,12 @@ test('parses and formats ask_questions input', () => {
   assert.ok('error' in parseQuestions({ questions: Array.from({ length: 5 }, () => ({ question: 'q', options: [{ label: 'a' }, { label: 'b' }] })) }));
   assert.equal(formatAnswers(parsed.questions, ['HTTP']), '1. Which bridge?\n   Answer: HTTP');
   assert.match(formatAnswers(parsed.questions, null), /skipped/);
+  assert.equal(parsed.questions[0].multiSelect, undefined);
+});
+
+test('maps chat answers onto Claude AskUserQuestion input', () => {
+  const input = { questions: [{ question: ' Which bridge? ', options: [{ label: 'HTTP' }, { label: 'WebSocket' }], multiSelect: true }, { question: 'Port?', options: [{ label: '80' }, { label: '443' }] }] };
+  const parsed = parseQuestions(input);
+  assert.equal(parsed.questions[0].multiSelect, true);
+  assert.deepEqual(answersByQuestion(input, ['HTTP, WebSocket', '443']), { ' Which bridge? ': 'HTTP, WebSocket', 'Port?': '443' });
 });

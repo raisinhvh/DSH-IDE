@@ -109,6 +109,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .segmented button:hover { color: var(--vscode-foreground); }
 .segmented button[aria-checked="true"] { background: var(--accent); color: var(--accent-text); }
 .a11y-reset { align-self: flex-start; margin-top: 2px; }
+.sync-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 9px 0 0 26px; }
+.sync-note { margin: 7px 0 0 26px; color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); }
+.sync-note.sync-error { color: var(--vscode-errorForeground); overflow-wrap: anywhere; }
 .a11y-sample { margin: 0; padding: 7px 9px; border-radius: 7px; background: var(--quiet-surface); line-height: calc(1.45 * var(--line-scale, 1)); }
 body.a11y-contrast { --muted: var(--vscode-foreground); --line: color-mix(in srgb, var(--vscode-foreground) 45%, transparent); --quiet-line: color-mix(in srgb, var(--vscode-foreground) 35%, transparent); --quiet-surface: color-mix(in srgb, var(--vscode-foreground) 9%, transparent); }
 body.a11y-contrast button:focus-visible, body.a11y-contrast input:focus-visible, body.a11y-contrast select:focus-visible, body.a11y-contrast textarea:focus-visible { outline-width: 3px; }
@@ -434,6 +437,7 @@ select, input { min-height: calc(30px * var(--text-scale, 1)); padding: 5px 8px;
 .question-option.question-selected { border-color: color-mix(in srgb, var(--vscode-focusBorder, var(--accent)) 55%, var(--line)); background: color-mix(in srgb, var(--vscode-focusBorder, var(--accent)) 12%, transparent); }
 .question-option.question-selected .question-radio { border-color: var(--vscode-focusBorder, var(--accent)); }
 .question-option.question-selected .question-radio::after { transform: scale(1); }
+.question-multi .question-radio, .question-multi .question-radio::after { border-radius: 3px; }
 .question-option:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 1px; }
 .question-other-expand { display: grid; grid-template-rows: 0fr; opacity: 0; }
 .question-other-expand.open { grid-template-rows: 1fr; opacity: 1; }

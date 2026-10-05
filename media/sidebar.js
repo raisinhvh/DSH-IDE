@@ -14,10 +14,11 @@
   state.features ||= { activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true };
   state.nameModel ||= {};
   state.accessibility ||= {};
+  state.sync ||= { connected: false, auto: true };
   boot.remove();
   const local = vscode.getState() || {};
-  const pages = ['chat', 'accounts', 'models', 'subagents', 'instructions', 'toolcalls', 'customize', 'accessibility'];
-  const settingsPages = ['instructions', 'models', 'subagents', 'toolcalls', 'customize', 'accessibility'];
+  const pages = ['chat', 'accounts', 'models', 'subagents', 'instructions', 'toolcalls', 'customize', 'accessibility', 'sync'];
+  const settingsPages = ['instructions', 'models', 'subagents', 'toolcalls', 'customize', 'accessibility', 'sync'];
   let page = pages.includes(state.page) && state.page !== 'chat' ? state.page
     : pages.includes(local.page) ? local.page : 'chat';
   const closedTabs = new Set(Array.isArray(local.closedTabs) ? local.closedTabs : []);
@@ -671,26 +672,29 @@
           const draftKey = sessionId + '\0' + qid;
           const drafts = questionDrafts.get(draftKey) || [];
           if (entry.status === 'pending') {
-            const ready = () => {
-              for (let i = 0; i < entry.questions.length; i++) {
-                const draft = drafts[i];
-                if (!draft || (draft.option === undefined && !(typeof draft.other === 'string' && draft.other.trim()))) return false;
-              }
-              return true;
-            };
+            // Single-choice drafts are { option } or { other }; multi-select drafts are { picked, other? }.
+            const otherText = draft => typeof draft.other === 'string' ? draft.other.trim() : '';
+            const ready = () => entry.questions.every((question, i) => {
+              const draft = drafts[i];
+              if (!draft) return false;
+              return question.multiSelect ? !!(draft.picked?.length || otherText(draft)) : draft.option !== undefined || !!otherText(draft);
+            });
             const submit = () => {
               if (!ready()) return;
               const answers = entry.questions.map((question, i) => {
                 const draft = drafts[i];
-                return draft.option !== undefined ? question.options[draft.option]?.label || '' : draft.other.trim();
+                if (question.multiSelect) return [...[...(draft.picked || [])].sort((a, b) => a - b).map(index => question.options[index]?.label), otherText(draft)].filter(Boolean).join(', ');
+                return draft.option !== undefined ? question.options[draft.option]?.label || '' : otherText(draft);
               });
               send({ type: 'questionResponse', id: qid, answers });
             };
             entry.questions.forEach((question, questionIndex) => {
-              const block = document.createElement('section'); block.className = 'question-block';
+              const multi = question.multiSelect === true;
+              const block = document.createElement('section'); block.className = 'question-block' + (multi ? ' question-multi' : '');
               if (question.header) { const chip = document.createElement('div'); chip.className = 'question-header'; chip.textContent = question.header; block.appendChild(chip); }
               const prompt = document.createElement('div'); prompt.className = 'question-prompt'; prompt.textContent = question.question; block.appendChild(prompt);
-              const group = document.createElement('div'); group.className = 'question-options'; group.setAttribute('role', 'radiogroup'); group.setAttribute('aria-label', question.question);
+              if (multi) { const hint = document.createElement('div'); hint.className = 'question-option-description'; hint.textContent = 'Select all that apply'; block.appendChild(hint); }
+              const group = document.createElement('div'); group.className = 'question-options'; group.setAttribute('role', multi ? 'group' : 'radiogroup'); group.setAttribute('aria-label', question.question);
               const draft = drafts[questionIndex] || {};
               const choices = [...(question.options || []), { label: 'Other…' }];
               const otherIndex = choices.length - 1;
@@ -699,18 +703,29 @@
               const clip = document.createElement('div'); clip.className = 'question-other-clip';
               const input = document.createElement('input'); input.className = 'question-other-input'; input.type = 'text'; input.setAttribute('aria-label', 'Your answer'); input.placeholder = 'Type your answer';
               // Selection updates the existing nodes so animations and keyboard focus survive.
+              const isSelected = (current, i) => i === otherIndex ? current.other !== undefined : multi ? (current.picked || []).includes(i) : current.option === i;
+              // Multi-select toggles each option, including Other…; single choice replaces the selection.
               const select = (index, focusInput) => {
                 const isOther = index === otherIndex;
-                drafts[questionIndex] = isOther ? { other: drafts[questionIndex]?.other || '' } : { option: index };
+                const current = drafts[questionIndex] || {};
+                if (multi) {
+                  const picked = new Set(current.picked || []);
+                  let other = current.other;
+                  if (isOther) other = other === undefined ? '' : undefined;
+                  else if (picked.has(index)) picked.delete(index); else picked.add(index);
+                  drafts[questionIndex] = { picked: [...picked], other };
+                } else drafts[questionIndex] = isOther ? { other: current.other || '' } : { option: index };
                 questionDrafts.set(draftKey, drafts);
-                radios.forEach((radio, i) => { radio.classList.toggle('question-selected', i === index); radio.setAttribute('aria-checked', String(i === index)); });
-                expand.classList.toggle('open', isOther); input.disabled = !isOther;
-                if (isOther && focusInput) input.focus();
+                const next = drafts[questionIndex];
+                radios.forEach((radio, i) => { radio.classList.toggle('question-selected', isSelected(next, i)); radio.setAttribute('aria-checked', String(isSelected(next, i))); });
+                const otherOpen = next.other !== undefined;
+                expand.classList.toggle('open', otherOpen); input.disabled = !otherOpen;
+                if (isOther && otherOpen && focusInput) input.focus();
                 updateSubmit();
               };
               choices.forEach((option, optionIndex) => {
-                const selected = optionIndex === otherIndex ? draft.other !== undefined : draft.option === optionIndex;
-                const choice = document.createElement('button'); choice.type = 'button'; choice.className = 'question-option' + (selected ? ' question-selected' : ''); choice.setAttribute('role', 'radio'); choice.setAttribute('aria-checked', selected ? 'true' : 'false'); choice.style.setProperty('--i', String(questionIndex * 6 + optionIndex));
+                const selected = isSelected(draft, optionIndex);
+                const choice = document.createElement('button'); choice.type = 'button'; choice.className = 'question-option' + (selected ? ' question-selected' : ''); choice.setAttribute('role', multi ? 'checkbox' : 'radio'); choice.setAttribute('aria-checked', selected ? 'true' : 'false'); choice.style.setProperty('--i', String(questionIndex * 6 + optionIndex));
                 const dot = document.createElement('span'); dot.className = 'question-radio'; dot.setAttribute('aria-hidden', 'true');
                 const content = document.createElement('span'); content.className = 'question-option-copy';
                 const label = document.createElement('span'); label.className = 'question-option-label'; label.textContent = option.label; content.appendChild(label);
@@ -721,12 +736,13 @@
                   if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
                   event.preventDefault();
                   const target = (optionIndex + (event.key === 'ArrowDown' ? 1 : choices.length - 1)) % choices.length;
-                  radios[target].focus(); select(target, false);
+                  radios[target].focus();
+                  if (!multi) select(target, false);
                 };
                 radios.push(choice); group.appendChild(choice);
               });
               input.value = draft.other || ''; input.disabled = draft.other === undefined; expand.classList.toggle('open', draft.other !== undefined);
-              input.oninput = () => { drafts[questionIndex] = { other: input.value }; questionDrafts.set(draftKey, drafts); updateSubmit(); };
+              input.oninput = () => { drafts[questionIndex] = multi ? { picked: drafts[questionIndex]?.picked || [], other: input.value } : { other: input.value }; questionDrafts.set(draftKey, drafts); updateSubmit(); };
               input.onkeydown = event => { if (event.key === 'Enter' && ready()) { event.preventDefault(); submit(); } };
               clip.appendChild(input); expand.appendChild(clip); group.appendChild(expand);
               block.appendChild(group); node.appendChild(block);
@@ -1378,8 +1394,47 @@
     });
   }
 
+  const syncBusy = { connecting: 'Connecting to GitHub…', uploading: 'Uploading to GitHub…', downloading: 'Downloading from GitHub…', checking: 'Checking GitHub for changes…' };
+  let syncKey = '';
+  function renderSync() {
+    const root = el('sync-list');
+    const sync = state.sync || { connected: false, auto: true };
+    // Skip identical rebuilds so focus stays on the button you just used.
+    const key = JSON.stringify(sync);
+    if (key === syncKey && root.childElementCount) return;
+    syncKey = key;
+    const busy = !!sync.busy;
+    const actions = items => {
+      const row = document.createElement('div'); row.className = 'sync-actions';
+      for (const [label, title, action, className] of items) {
+        const item = button(label, title, () => send({ type: 'syncAction', action }), className || 'secondary-button');
+        item.disabled = busy; row.appendChild(item);
+      }
+      return row;
+    };
+    const note = (text, className = 'sync-note') => { const line = document.createElement('p'); line.className = className; line.textContent = text; return line; };
+    rebuild(root, () => {
+      const status = sync.connected
+        ? settingRow('sync:status', { icon: 'cloud_done', title: 'Connected as ' + (sync.account || 'GitHub'), desc: sync.lastSync ? 'Last synced ' + new Date(sync.lastSync).toLocaleString() : 'Not synced yet' })
+        : settingRow('sync:status', { icon: 'cloud_off', title: 'Not connected', desc: 'Sign in with GitHub. If your account already has a DSH config from another PC, you can download it.' });
+      status.appendChild(sync.connected
+        ? actions([['Upload now', 'Upload this PC\'s config to GitHub', 'upload'], ['Download', 'Replace this PC\'s config with the GitHub copy', 'download'], ['Open gist', 'Open the config gist on GitHub', 'openGist', 'text-button'], ['Disconnect', 'Stop syncing on this PC (the gist stays on GitHub)', 'disconnect', 'text-button']])
+        : actions([['Connect GitHub', 'Sign in with GitHub and start syncing', 'connect', 'primary-button']]));
+      if (sync.busy) status.appendChild(note(syncBusy[sync.busy] || 'Working…'));
+      if (sync.error) status.appendChild(note(sync.error, 'sync-note sync-error'));
+      root.appendChild(status);
+      if (sync.connected) {
+        root.appendChild(settingRow('sync:auto', { icon: 'sync', title: 'Sync automatically', desc: 'Uploads a few seconds after you change synced config, and picks up changes from your other PCs at startup. If both sides changed, DSH asks first.' }, !!sync.auto, () => {
+          state.sync = { ...sync, auto: !sync.auto };
+          renderSync();
+          send({ type: 'setSyncAuto', enabled: !sync.auto });
+        }));
+      }
+    });
+  }
+
   function render() {
-    el('view-title').textContent = { chat: 'Chats', accounts: 'Accounts', models: 'Models', subagents: 'Subagents', instructions: 'Behavior', toolcalls: 'Toolpacks', customize: 'Customize', accessibility: 'Accessibility' }[page];
+    el('view-title').textContent = { chat: 'Chats', accounts: 'Accounts', models: 'Models', subagents: 'Subagents', instructions: 'Behavior', toolcalls: 'Toolpacks', customize: 'Customize', accessibility: 'Accessibility', sync: 'Sync' }[page];
     for (const name of settingsPages) el(name).classList.toggle('current', page === name);
     el('settings-toggle').setAttribute('aria-pressed', String(settingsPages.includes(page)));
     el('accounts').setAttribute('aria-pressed', String(page === 'accounts'));
@@ -1391,6 +1446,7 @@
     if (page === 'toolcalls') renderToolpacks();
     if (page === 'customize') renderCustomize();
     if (page === 'accessibility') renderAccessibility();
+    if (page === 'sync') renderSync();
   }
 
   el('recent-toggle').onclick = () => { const menu = el('recent-menu'); menu.hidden = !menu.hidden; el('recent-toggle').setAttribute('aria-expanded', String(!menu.hidden)); };
@@ -1400,6 +1456,7 @@
   el('settings-toggle').onclick = () => { const menu = el('settings-menu'); menu.hidden = !menu.hidden; el('settings-toggle').setAttribute('aria-expanded', String(!menu.hidden)); };
   el('customize').onclick = () => showPage(page === 'customize' ? 'chat' : 'customize');
   el('accessibility').onclick = () => showPage(page === 'accessibility' ? 'chat' : 'accessibility');
+  el('sync').onclick = () => showPage(page === 'sync' ? 'chat' : 'sync');
   document.addEventListener('click', event => {
     if (!event.target.closest('.settings-wrap')) closeSettings();
     if (!event.target.closest('.recent-wrap')) { el('recent-menu').hidden = true; el('recent-toggle').setAttribute('aria-expanded', 'false'); }
@@ -1548,6 +1605,7 @@
         state.accessibility = message.accessibility || state.accessibility;
         applyAccessibility(state.accessibility);
         break;
+      case 'syncState': state.sync = message.sync || state.sync; break;
       case 'instructionContent': {
         const form = el('instruction-form');
         if (!form.hidden && form.dataset.id === message.id) { const content = el('instruction-content'); content.value = message.content; content.disabled = false; content.focus(); }

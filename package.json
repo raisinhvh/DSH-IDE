@@ -2,7 +2,7 @@
   "name": "dsh-ide",
   "displayName": "DeepSeek Harness for IDE",
   "description": "A native VS Code and Cursor front end for DeepSeek Harness",
-  "version": "0.5.7",
+  "version": "0.5.9",
   "publisher": "dsh-local",
   "license": "MIT",
   "repository": {
@@ -26,7 +26,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "build": "esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/extension.js --external:vscode --external:@deepseek-ai/dsh --external:esbuild && esbuild src/toolpacks/worker.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/toolpack-worker.js && esbuild src/mcp/delegateServer.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/delegate-server.js",
-    "build:test": "esbuild src/review/hunks.ts src/review/guards.ts src/review/renames.ts src/sidebar/view.ts src/sidebar/questions.ts src/update/version.ts src/update/plan.ts src/update/extensionUpdate.ts src/toolpacks/registry.ts src/runtime/models.ts src/runtime/naming.ts src/instructions/store.ts src/instructions/share.ts --bundle --platform=node --format=esm --target=node20 --outdir=dist --out-extension:.js=.mjs && esbuild src/toolpacks/worker.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/toolpack-worker.js",
+    "build:test": "esbuild src/review/hunks.ts src/review/guards.ts src/review/renames.ts src/sidebar/view.ts src/sidebar/questions.ts src/update/version.ts src/update/plan.ts src/update/extensionUpdate.ts src/toolpacks/registry.ts src/runtime/models.ts src/runtime/naming.ts src/instructions/store.ts src/instructions/share.ts src/sync/configSync.ts --bundle --platform=node --format=esm --target=node20 --outdir=dist --out-extension:.js=.mjs && esbuild src/toolpacks/worker.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/toolpack-worker.js",
     "test": "npm run build:test && node test/run.mjs",
     "package": "npm run check && npm run build && vsce package --allow-missing-repository"
   },

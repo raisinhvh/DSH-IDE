@@ -2,7 +2,18 @@ import { randomBytes } from 'node:crypto';
 
 export interface SidebarImage { name: string; mimeType: string; data: string }
 export type ApprovalMode = 'ask' | 'auto' | 'full';
-export type SidebarPage = 'chat' | 'accounts' | 'models' | 'subagents' | 'instructions' | 'toolcalls' | 'customize' | 'accessibility';
+export type SidebarPage = 'chat' | 'accounts' | 'models' | 'subagents' | 'instructions' | 'toolcalls' | 'customize' | 'accessibility' | 'sync';
+
+/** GitHub config sync status for the Sync page. */
+export interface SidebarSync {
+  connected: boolean;
+  account?: string;
+  gistUrl?: string;
+  auto: boolean;
+  lastSync?: number;
+  busy?: 'connecting' | 'uploading' | 'downloading' | 'checking';
+  error?: string;
+}
 
 /** Display preferences from the Accessibility page. Reduce motion stays a feature switch (`dsh.features.reduceMotion`). */
 export interface SidebarAccessibility {
@@ -85,6 +96,8 @@ export type SidebarWebviewMessage =
   | { type: 'saveNameModel'; nameModel: SidebarNameModel }
   | { type: 'saveAccessibility'; accessibility: SidebarAccessibility }
   | { type: 'deleteAllSessions' }
+  | { type: 'syncAction'; action: 'connect' | 'upload' | 'download' | 'disconnect' | 'openGist' }
+  | { type: 'setSyncAuto'; enabled: boolean }
   | { type: 'manageAccounts' }
   | { type: 'refreshAccounts' }
   | { type: 'checkDependencies' }
@@ -139,6 +152,8 @@ export interface SidebarQuestion {
   question: string;
   header?: string;
   options: { label: string; description?: string }[];
+  /** The user may pick several options; their labels are joined with ", ". */
+  multiSelect?: boolean;
 }
 
 export interface SidebarSession {
@@ -239,6 +254,7 @@ export type SidebarHostMessage =
   | { type: 'subagentProfilesState'; profiles: SidebarSubagentProfile[] }
   | { type: 'subagentSaved' }
   | { type: 'customizeState'; features: SidebarFeatures; nameModel: SidebarNameModel; accessibility: SidebarAccessibility }
+  | { type: 'syncState'; sync: SidebarSync }
   | { type: 'instructionsState'; items: SidebarInstruction[] }
   | { type: 'instructionContent'; id: string; content: string }
   | { type: 'instructionSaved' }
@@ -283,13 +299,14 @@ export interface SidebarViewState {
   features: SidebarFeatures;
   nameModel: SidebarNameModel;
   accessibility: SidebarAccessibility;
+  sync: SidebarSync;
   error?: string;
 }
 
 export const defaultFeatures = (): SidebarFeatures => ({ activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true });
 
 export const initialSidebarState = (): SidebarViewState => ({
-  page: 'chat', approvalMode: 'ask', subagentProfiles: [], instructions: [], toolpacks: [], features: defaultFeatures(), nameModel: {}, accessibility: defaultAccessibility(), sessions: [], models: [], providerLabel: 'No provider', accountLabel: 'No account connected',
+  page: 'chat', approvalMode: 'ask', subagentProfiles: [], instructions: [], toolpacks: [], features: defaultFeatures(), nameModel: {}, accessibility: defaultAccessibility(), sync: { connected: false, auto: true }, sessions: [], models: [], providerLabel: 'No provider', accountLabel: 'No account connected',
   accountConnected: false, accounts: [], dependencies: [], cursor: { connected: false, label: 'Not connected' },
   messages: {}, timeline: {}, tools: [], subagents: {}, diffs: [], runStates: {}, queues: {},
 });
@@ -331,6 +348,8 @@ export function getSidebarHtml(
         <div class="settings-separator" role="separator"></div>
         <button class="settings-item" id="customize" type="button" role="menuitem"><span class="symbol">toggle_on</span><span class="settings-item-copy"><span class="settings-item-title">Customize</span><span class="settings-item-desc">Turn features on or off</span></span></button>
         <button class="settings-item" id="accessibility" type="button" role="menuitem"><span class="symbol">accessibility_new</span><span class="settings-item-copy"><span class="settings-item-title">Accessibility</span><span class="settings-item-desc">Text size, spacing, contrast, motion</span></span></button>
+        <div class="settings-separator" role="separator"></div>
+        <button class="settings-item" id="sync" type="button" role="menuitem"><span class="symbol">cloud_sync</span><span class="settings-item-copy"><span class="settings-item-title">Sync</span><span class="settings-item-desc">Back up your config to GitHub</span></span></button>
       </div>
     </div>
     <button class="icon-button" id="new" type="button" title="Start a new chat" aria-label="Start a new chat"><span class="symbol">add_comment</span></button>
@@ -425,6 +444,11 @@ export function getSidebarHtml(
   <div class="page-heading"><button class="icon-button back" data-page="chat" title="Back to chat" aria-label="Back to chat"><span class="symbol">arrow_back</span></button><div><h1>Accessibility</h1></div></div>
   <p class="helper">Adjust how the sidebar reads and feels. Changes show immediately and are saved to your user settings.</p>
   <div id="a11y-list" class="scroll-content feature-list"></div>
+</section>
+<section id="sync-page" class="page settings-page" hidden>
+  <div class="page-heading"><button class="icon-button back" data-page="chat" title="Back to chat" aria-label="Back to chat"><span class="symbol">arrow_back</span></button><div><h1>Sync</h1></div></div>
+  <p class="helper">Keep your global rules, skills, toolpacks, models, subagents, MCP servers and Customize and Accessibility choices in a secret GitHub gist, so other PCs can use them. API keys, account sign-ins and MCP env and header values stay on this PC.</p>
+  <div id="sync-list" class="scroll-content feature-list"></div>
 </section>
 <script nonce="${nonce}" type="application/json" id="boot-state">${boot}</script>
 <script nonce="${nonce}" src="${escapeHtml(assets.markdown || assets.script.replace(/sidebar\.js$/, 'markdown-it.min.js'))}"></script>

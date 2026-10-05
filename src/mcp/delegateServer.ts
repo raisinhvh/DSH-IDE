@@ -48,7 +48,7 @@ async function tools(): Promise<Json[]> {
         },
         {
             name: 'ask_questions',
-            description: 'Ask the user focused multiple-choice questions in the DSH chat and wait for their answers. Use it when a decision belongs to the user and you cannot resolve it from the request or the code. Each question is single choice; the user can always answer with their own text instead. Ask 1 to 4 questions per call, keep them specific, and put your recommended option first.',
+            description: 'Ask the user focused multiple-choice questions in the DSH chat and wait for their answers. Use it when a decision belongs to the user and you cannot resolve it from the request or the code. Each question is single choice unless multiSelect is true; the user can always answer with their own text instead. Ask 1 to 4 questions per call, keep them specific, and put your recommended option first.',
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -64,6 +64,7 @@ async function tools(): Promise<Json[]> {
                                     items: { type: 'object', properties: { label: { type: 'string', description: 'Concise choice text (1-5 words).' }, description: { type: 'string', description: 'What choosing this means.' } }, required: ['label'] },
                                     description: 'Do not include an "Other" option; the user can always type their own answer.',
                                 },
+                                multiSelect: { type: 'boolean', description: 'Let the user pick several options. The answer lists them separated by ", ".' },
                             },
                             required: ['question', 'options'],
                         },

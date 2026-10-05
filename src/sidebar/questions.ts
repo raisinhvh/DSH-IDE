@@ -18,9 +18,15 @@ export function parseQuestions(args: Record<string, unknown>): { questions: Side
       return label ? [{ label, description: text(candidate.description, 300) || undefined }] : [];
     });
     if (options.length < 2 || options.length > 4) return { error: `Question ${index + 1} needs 2 to 4 options.` };
-    questions.push({ question, header: text(entry.header, 12) || undefined, options });
+    questions.push({ question, header: text(entry.header, 12) || undefined, options, ...(entry.multiSelect === true ? { multiSelect: true } : {}) });
   }
   return { questions };
+}
+
+/** Claude's AskUserQuestion expects answers keyed by the exact question text it sent. */
+export function answersByQuestion(args: Record<string, unknown>, answers: string[]): Record<string, string> {
+  const raw = Array.isArray(args.questions) ? args.questions as Record<string, unknown>[] : [];
+  return Object.fromEntries(raw.map((item, index) => [typeof item?.question === 'string' ? item.question : '', answers[index] || '']));
 }
 
 /** Text returned to the agent. `answers` is null when the user skipped. */

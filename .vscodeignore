@@ -16,4 +16,5 @@ dist/instructions/**
 dist/runtime/**
 dist/toolpacks/**
 dist/update/**
+dist/sync/**
 debug.log

@@ -6,8 +6,9 @@ export function firstMessageTitle(prompt: string): string {
 }
 
 export function chatTitlePrompt(request: string): string {
-  return 'Write a title for a coding chat that starts with the request below. Reply with ONLY the title: 2 to 6 words, '
-    + 'sentence case, no quotes, no trailing punctuation. Name the concrete task, for example "Fix sidebar tab overflow". '
+  return 'Write a title for a coding chat that starts with the request below. Reply with ONLY the title: exactly 2 words. '
+    + 'Use 3 words only if no 2-word title can name the task; never use more. Sentence case, no quotes, no trailing punctuation. '
+    + 'Name the concrete subject, for example "Tab overflow", "Question tool" or "Diff viewer". When the request covers several things, name the main one. '
     + `Do not use any tools.\n\nRequest:\n${request.trim().slice(0, 4000)}`;
 }
 

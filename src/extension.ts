@@ -14,17 +14,19 @@ import { InstructionItem, InstructionRoots, listInstructions, locateInstruction,
 import { shareInstructions } from './instructions/share';
 import { chatTitlePrompt, cleanChatTitle, firstMessageTitle } from './runtime/naming';
 import { ToolpackRegistry } from './toolpacks/registry';
+import { ConfigSync } from './sync/controller';
+import { SYNCED_SETTINGS } from './sync/configSync';
 import { currentVersion, installVersion, latestVersion, updatedRoot } from './update/dshUpdate';
 import { installExtensionRelease, latestExtensionRelease } from './update/extensionUpdate';
 import { planUpdates, UpdateOffer, UpdatePlan } from './update/plan';
 import { compareVersions } from './update/version';
-import { formatAnswers, parseQuestions } from './sidebar/questions';
+import { answersByQuestion, formatAnswers, parseQuestions } from './sidebar/questions';
 import { delegationInstructions, isDelegationTool, isNativeSubagentTool } from './runtime/delegation';
 import { AcpRuntime, RuntimeEvent } from './runtime/acp';
 import { OAuthCliRuntime } from './runtime/oauthCli';
 import { MirrorChange, WorkspaceMirror } from './runtime/shadow';
 import { DshSidebarProvider, SidebarWebviewMessage } from './sidebar/provider';
-import { ApprovalMode, CursorAccountState, SidebarAccessibility, SidebarFeatureKey, SidebarFeatures, SidebarImage, SidebarNameModel, SidebarTimelineItem, SidebarSubagent, defaultFeatures, normalizeAccessibility } from './sidebar/view';
+import { ApprovalMode, CursorAccountState, SidebarAccessibility, SidebarFeatureKey, SidebarFeatures, SidebarImage, SidebarNameModel, SidebarQuestion, SidebarTimelineItem, SidebarSubagent, defaultFeatures, normalizeAccessibility } from './sidebar/view';
 
 interface SessionRecord {
   id: string;
@@ -145,6 +147,7 @@ class ExtensionHost implements vscode.Disposable {
   private readonly oneShots = new Map<string, (update: Record<string, unknown>) => void>();
   private readonly delegateHost = new DelegateHost();
   private readonly toolpacks: ToolpackRegistry;
+  private readonly sync: ConfigSync;
   private active?: SessionRecord;
   private selectedModel: string;
   private modelChoices: Record<string, ModelChoice>;
@@ -185,21 +188,32 @@ class ExtensionHost implements vscode.Disposable {
         void this.context.workspaceState.update(TIMELINES_KEY, this.timelines);
       }, 300);
     });
+    this.sync = new ConfigSync(context, {
+      roots: () => ({ ...this.instructionRoots(), toolpacks: join(context.globalStorageUri.fsPath, 'toolpacks') }),
+      accounts: () => [...this.oauthAccounts.list(), ...this.accounts.list()].map(({ id, provider, label }) => ({ id, provider, label })),
+      toolpacks: this.toolpacks,
+      log: line => this.output.appendLine(line),
+      post: sync => this.sidebar.postMessage({ type: 'syncState', sync }),
+      applied: async () => { this.refreshModels(); this.refreshSubagents(); this.refreshCustomize(); await this.refreshInstructions(); },
+    });
     this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
     this.status.command = 'dsh.continue';
     this.status.text = '$(hubot) DSH';
     this.status.tooltip = 'DeepSeek Harness: click to continue chat';
     this.status.show();
     this.disposables.push(
-      this.output, this.status, this.sidebar,
+      this.output, this.status, this.sidebar, this.sync,
       { dispose: () => { for (const runtime of this.runtimes.values()) runtime.dispose(); this.runtimes.clear(); this.delegateHost.dispose(); void this.toolpacks.dispose(); } },
-      this.toolpacks.onChange(() => this.postToolpacks()),
+      this.toolpacks.onChange(() => { this.postToolpacks(); this.sync.schedule(); }),
       vscode.window.registerWebviewViewProvider(DshSidebarProvider.viewType, this.sidebar, { webviewOptions: { retainContextWhenHidden: true } }),
       vscode.workspace.onDidChangeConfiguration(event => {
         if (event.affectsConfiguration('dsh.models')) this.refreshModels();
         if (event.affectsConfiguration('dsh.subagents')) this.refreshSubagents();
         if (['dsh.features', 'dsh.nameModel', 'dsh.updates.check', 'dsh.accessibility'].some(key => event.affectsConfiguration(key))) this.refreshCustomize();
+        if (SYNCED_SETTINGS.some(key => event.affectsConfiguration(`dsh.${key}`))) this.sync.schedule();
       }),
+      vscode.window.onDidChangeWindowState(state => { if (state.focused) this.sync.check(true); }),
+      ...this.watchGlobalInstructions(),
       // Before the write, so a watcher scan cannot see the save first; after it, for format-on-save output.
       vscode.workspace.onWillSaveTextDocument(event => this.adoptSave(event.document)),
       vscode.workspace.onDidSaveTextDocument(document => this.adoptSave(document)),
@@ -212,7 +226,8 @@ class ExtensionHost implements vscode.Disposable {
     }).catch(error => this.output.appendLine(`Subagent bridge failed to start: ${String(error)}`));
     const updateTimer = setTimeout(() => { void this.checkUpdates(); }, 5000);
     this.disposables.push({ dispose: () => clearTimeout(updateTimer) });
-    this.ensureNode().then(async () => { await this.refreshDependencies(); await this.toolpacks.start(); }).catch(error => {
+    // Toolpacks must be loaded before a startup sync can install or remove them.
+    this.ensureNode().then(async () => { await this.refreshDependencies(); await this.toolpacks.start(); this.sync.start(); }).catch(error => {
       this.output.appendLine(`Dependency setup failed: ${String(error)}`);
       void vscode.window.showErrorMessage(`DSH setup failed: ${error instanceof Error ? error.message : String(error)}`);
     });
@@ -817,16 +832,29 @@ class ExtensionHost implements vscode.Disposable {
 
   private readonly pendingQuestions = new Map<string, { sessionId: string; resolve: (answers: string[] | null) => void }>();
 
-  private askQuestions(chat: Chat, args: Record<string, unknown>): Promise<DelegateResult> {
-    if (chat.cancelRequested) return Promise.resolve({ text: 'Cancelled.', isError: true });
+  private async askQuestions(chat: Chat, args: Record<string, unknown>): Promise<DelegateResult> {
+    if (chat.cancelRequested) return { text: 'Cancelled.', isError: true };
     const parsed = parseQuestions(args);
-    if ('error' in parsed) return Promise.resolve({ text: parsed.error, isError: true });
+    if ('error' in parsed) return { text: parsed.error, isError: true };
+    return { text: formatAnswers(parsed.questions, await this.showQuestions(chat, parsed.questions)) };
+  }
+
+  /** Claude's built-in AskUserQuestion, shown with the same chat card as ask_questions. */
+  private async askNativeQuestions(chat: Chat, input: Record<string, unknown>): Promise<Record<string, string> | string> {
+    if (chat.cancelRequested) return 'Cancelled.';
+    const parsed = parseQuestions(input);
+    if ('error' in parsed) return parsed.error;
+    const answers = await this.showQuestions(chat, parsed.questions);
+    return answers ? answersByQuestion(input, answers) : formatAnswers(parsed.questions, null);
+  }
+
+  private showQuestions(chat: Chat, questions: SidebarQuestion[]): Promise<string[] | null> {
     const id = randomUUID();
     const sessionId = chat.record.id;
     void vscode.commands.executeCommand('workbench.view.extension.dsh');
-    return new Promise<DelegateResult>(resolve => {
-      this.pendingQuestions.set(id, { sessionId, resolve: answers => resolve({ text: formatAnswers(parsed.questions, answers) }) });
-      this.sidebar.postMessage({ type: 'questionRequest', sessionId, id, questions: parsed.questions });
+    return new Promise(resolve => {
+      this.pendingQuestions.set(id, { sessionId, resolve });
+      this.sidebar.postMessage({ type: 'questionRequest', sessionId, id, questions });
     });
   }
 
@@ -1116,6 +1144,24 @@ class ExtensionHost implements vscode.Disposable {
     };
   }
 
+  /** Global rules and skills edited outside the sidebar still trigger a sync upload. */
+  private watchGlobalInstructions(): vscode.Disposable[] {
+    const { dshHome, agentsHome } = this.instructionRoots();
+    return ([[dshHome, '{AGENTS.md,skills/**}'], [agentsHome, 'skills/**']] as const).flatMap(([base, pattern]) => {
+      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(vscode.Uri.file(base), pattern));
+      const schedule = (): void => this.sync.schedule();
+      return [watcher, watcher.onDidCreate(schedule), watcher.onDidChange(schedule), watcher.onDidDelete(schedule)];
+    });
+  }
+
+  private async syncAction(action: Extract<SidebarWebviewMessage, { type: 'syncAction' }>['action']): Promise<void> {
+    if (action === 'connect') await this.sync.connect();
+    else if (action === 'upload') await this.sync.uploadNow();
+    else if (action === 'download') await this.sync.downloadNow();
+    else if (action === 'disconnect') await this.sync.disconnect();
+    else if (action === 'openGist' && this.sync.gistUrl?.startsWith('https://gist.github.com/')) await vscode.env.openExternal(vscode.Uri.parse(this.sync.gistUrl));
+  }
+
   private async refreshInstructions(): Promise<void> {
     this.sidebar.postMessage({ type: 'instructionsState', items: await listInstructions(this.instructionRoots()) });
   }
@@ -1131,6 +1177,7 @@ class ExtensionHost implements vscode.Disposable {
       id: message.id, kind: message.kind, scope: message.scope, file: message.file, name: message.name, description: message.description, content: message.content,
     });
     await this.syncInstructionMirror(saved.item, saved.file, await readFile(saved.file, 'utf8'));
+    if (saved.item.scope === 'global') this.sync.schedule();
     await this.refreshInstructions();
     this.sidebar.postMessage({ type: 'instructionSaved' });
   }
@@ -1138,6 +1185,7 @@ class ExtensionHost implements vscode.Disposable {
   private async removeInstructionRequest(id: string): Promise<void> {
     const removed = await removeInstruction(this.instructionRoots(), id);
     await this.syncInstructionMirror(removed.item, removed.file, undefined);
+    if (removed.item.scope === 'global') this.sync.schedule();
     await this.refreshInstructions();
   }
 
@@ -1333,6 +1381,7 @@ class ExtensionHost implements vscode.Disposable {
           images: imageAttachments,
           delegate: this.delegateConfig(chat.ownerId),
           onApproval: (description, info) => this.decideApproval(chat, PARENT, description, info),
+          onQuestions: input => this.askNativeQuestions(chat, input),
         });
         await this.saveSession(record);
       } else {
@@ -2019,7 +2068,7 @@ class ExtensionHost implements vscode.Disposable {
         case 'checkDependencies': await this.refreshDependencies(); break;
         case 'installProvider': await this.installProvider(message.provider); break;
         case 'pageChanged': this.sidebar.setPage(message.page); if (message.page === 'instructions') await this.refreshInstructions(); break;
-        case 'ready': await this.refreshInstructions(); this.postToolpacks(); this.sidebar.postMessage({ type: 'approvalState', mode: this.approvalMode }); this.refreshCustomize(); this.refreshSubagents(); this.refreshModels(); this.refreshSessions(); await this.refreshAccount(); await this.refreshAccounts(); break;
+        case 'ready': await this.refreshInstructions(); this.postToolpacks(); this.sidebar.postMessage({ type: 'approvalState', mode: this.approvalMode }); this.refreshCustomize(); this.sync.post(); this.refreshSubagents(); this.refreshModels(); this.refreshSessions(); await this.refreshAccount(); await this.refreshAccounts(); break;
         case 'sendPrompt': await this.sendPrompt(message.prompt, message.images, undefined, undefined, message.mode === 'queue' ? 'queue' : 'interrupt'); break;
         case 'unqueue': { const target = this.chats.get(message.sessionId); if (target && Number.isInteger(message.index)) { target.queue.splice(message.index, 1); this.postQueue(target); } break; }
         case 'editMessage': await this.editMessage(message.sessionId, message.entryId, message.text); break;
@@ -2034,6 +2083,8 @@ class ExtensionHost implements vscode.Disposable {
         case 'saveNameModel': await this.saveNameModel(message.nameModel); break;
         case 'saveAccessibility': await this.saveAccessibility(message.accessibility); break;
         case 'deleteAllSessions': await this.deleteAllSessions(); break;
+        case 'syncAction': await this.syncAction(message.action); break;
+        case 'setSyncAuto': await this.sync.setAuto(message.enabled === true); break;
         case 'toolpackAction':
           if (message.action === 'remove') await this.toolpacks.remove(message.id);
           else if (message.action === 'reload') await this.toolpacks.reload(message.id);

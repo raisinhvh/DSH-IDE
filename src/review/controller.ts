@@ -22,6 +22,8 @@ export interface ReviewProposal {
 
 const keyOf = (path: string, base?: string, proposed?: string): string => createHash('sha256').update(path).update('\0').update(base ?? '<new>').update('\0').update(proposed ?? '<deleted>').digest('hex');
 
+let instances = 0;
+
 /** Native virtual diff documents and guarded VS Code WorkspaceEdit application. */
 export class ReviewController implements vscode.TextDocumentContentProvider, vscode.Disposable {
   private proposals = new Map<string, ReviewProposal>();
@@ -32,20 +34,25 @@ export class ReviewController implements vscode.TextDocumentContentProvider, vsc
   public readonly onDidChange = this.changed.event;
   public readonly onProposalsChanged = this.proposalsChanged.event;
   private readonly registration: vscode.Disposable;
+  private readonly scheme: string;
 
   public constructor(
     private readonly root: vscode.Uri,
     private readonly acknowledge: (path: string, text?: string) => Promise<void>,
-    private readonly scheme = 'dsh-review',
+    scheme = 'dsh-review',
     private readonly restore?: (path: string, text?: string) => Promise<void>,
     /** The agent edits the real workspace, so changes are already on disk and only need recording. */
     private readonly direct = false,
   ) {
+    // Every warm chat has its own controller. VS Code asks the newest provider of a scheme first,
+    // so a shared scheme let another chat's controller answer with empty text and blank the diff.
+    this.scheme = `${scheme}-${++instances}`;
     this.registration = vscode.workspace.registerTextDocumentContentProvider(this.scheme, this);
   }
 
   public provideTextDocumentContent(uri: vscode.Uri): string {
-    const path = decodeURIComponent(uri.path.slice(1));
+    // Uri.parse already decoded the path; decoding again breaks names containing "%".
+    const path = uri.path.slice(1);
     const proposal = this.proposals.get(path);
     if (!proposal) return '';
     return uri.query === 'base' ? proposal.base ?? '' : proposal.proposed ?? '';
