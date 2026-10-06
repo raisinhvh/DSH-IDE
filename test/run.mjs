@@ -7,6 +7,7 @@ await import('./speed-protocol.test.mjs');
 await import('./instructions.test.mjs');
 await import('./instructions-share.test.mjs');
 await import('./naming.test.mjs');
+await import('./job.test.mjs');
 await import('./delegation.test.mjs');
 await import('./subagent-behavior.test.mjs');
 await import('./review-controller.test.mjs');

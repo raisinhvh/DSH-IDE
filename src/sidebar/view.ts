@@ -1,4 +1,6 @@
 import { randomBytes } from 'node:crypto';
+import type { CriterionStatus, JobPhase } from '../goal/types';
+import { SLASH_COMMANDS } from '../slash/registry';
 
 export interface SidebarImage { name: string; mimeType: string; data: string }
 export type ApprovalMode = 'ask' | 'auto' | 'full';
@@ -60,10 +62,20 @@ export function accessibilityStyle(value: SidebarAccessibility): { vars: Record<
     classes: [value.highContrast ? 'a11y-contrast' : '', value.largeTargets ? 'a11y-targets' : '', value.underlineLinks ? 'a11y-underline' : ''].filter(Boolean),
   };
 }
-export type SidebarFeatureKey = 'activityRail' | 'autoName' | 'shareRules' | 'editorContext' | 'reduceMotion' | 'updateChecks' | 'mirror';
+export type SidebarFeatureKey = 'activityRail' | 'autoName' | 'shareRules' | 'editorContext' | 'reduceMotion' | 'updateChecks' | 'mirror' | 'reviewAgent';
 export type SidebarFeatures = Record<SidebarFeatureKey, boolean>;
 /** Model that writes chat titles; an empty model keeps the first-message title. */
 export interface SidebarNameModel { model?: string; effort?: string; speed?: string }
+/** A slash command offered in the composer menu. */
+export interface SidebarSlashCommand { name: string; description: string; usage: string }
+/** A /job run as shown in the job bar at the top of the chat. */
+export interface SidebarJob {
+  phase: JobPhase;
+  round: number;
+  maxRounds: number;
+  stopReason?: string;
+  criteria: { id: string; text: string; source: string; check?: string; status: CriterionStatus; evidence?: string }[];
+}
 
 export type SidebarWebviewMessage =
   | { type: 'ready' }
@@ -94,6 +106,7 @@ export type SidebarWebviewMessage =
   | { type: 'removeSubagent'; name: string }
   | { type: 'setFeature'; key: SidebarFeatureKey; enabled: boolean }
   | { type: 'saveNameModel'; nameModel: SidebarNameModel }
+  | { type: 'saveReviewModel'; reviewModel: SidebarNameModel }
   | { type: 'saveAccessibility'; accessibility: SidebarAccessibility }
   | { type: 'deleteAllSessions' }
   | { type: 'syncAction'; action: 'connect' | 'upload' | 'download' | 'disconnect' | 'openGist' }
@@ -253,7 +266,8 @@ export type SidebarHostMessage =
   | { type: 'modelRemoveFailed'; name: string }
   | { type: 'subagentProfilesState'; profiles: SidebarSubagentProfile[] }
   | { type: 'subagentSaved' }
-  | { type: 'customizeState'; features: SidebarFeatures; nameModel: SidebarNameModel; accessibility: SidebarAccessibility }
+  | { type: 'customizeState'; features: SidebarFeatures; nameModel: SidebarNameModel; reviewModel: SidebarNameModel; accessibility: SidebarAccessibility }
+  | { type: 'jobState'; sessionId: string; job: SidebarJob | null }
   | { type: 'syncState'; sync: SidebarSync }
   | { type: 'instructionsState'; items: SidebarInstruction[] }
   | { type: 'instructionContent'; id: string; content: string }
@@ -298,15 +312,18 @@ export interface SidebarViewState {
   toolpackError?: string;
   features: SidebarFeatures;
   nameModel: SidebarNameModel;
+  reviewModel: SidebarNameModel;
+  slashCommands: SidebarSlashCommand[];
+  jobs: Record<string, SidebarJob>;
   accessibility: SidebarAccessibility;
   sync: SidebarSync;
   error?: string;
 }
 
-export const defaultFeatures = (): SidebarFeatures => ({ activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true });
+export const defaultFeatures = (): SidebarFeatures => ({ activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false });
 
 export const initialSidebarState = (): SidebarViewState => ({
-  page: 'chat', approvalMode: 'ask', subagentProfiles: [], instructions: [], toolpacks: [], features: defaultFeatures(), nameModel: {}, accessibility: defaultAccessibility(), sync: { connected: false, auto: true }, sessions: [], models: [], providerLabel: 'No provider', accountLabel: 'No account connected',
+  page: 'chat', approvalMode: 'ask', subagentProfiles: [], instructions: [], toolpacks: [], features: defaultFeatures(), nameModel: {}, reviewModel: {}, slashCommands: SLASH_COMMANDS.map(command => ({ ...command })), jobs: {}, accessibility: defaultAccessibility(), sync: { connected: false, auto: true }, sessions: [], models: [], providerLabel: 'No provider', accountLabel: 'No account connected',
   accountConnected: false, accounts: [], dependencies: [], cursor: { connected: false, label: 'Not connected' },
   messages: {}, timeline: {}, tools: [], subagents: {}, diffs: [], runStates: {}, queues: {},
 });

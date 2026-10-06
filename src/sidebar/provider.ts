@@ -65,7 +65,7 @@ export class DshSidebarProvider implements vscode.WebviewViewProvider {
         break;
       case 'sessionState': Object.assign(this.state, { sessions: message.sessions, activeSessionId: message.activeSessionId }); break;
       case 'sessionDeleted':
-        for (const table of [this.state.timeline, this.state.messages, this.state.subagents, this.state.runStates, this.state.queues] as Record<string, unknown>[]) delete table[message.sessionId];
+        for (const table of [this.state.timeline, this.state.messages, this.state.subagents, this.state.runStates, this.state.queues, this.state.jobs] as Record<string, unknown>[]) delete table[message.sessionId];
         break;
       case 'queueState': this.state.queues[message.sessionId] = message.items; break;
       case 'modelState': Object.assign(this.state, { models: message.models, cursorBackends: message.cursorBackends, selectedModelId: message.selectedModelId, selectedSpeed: message.selectedSpeed, selectedEffort: message.selectedEffort }); break;
@@ -73,7 +73,8 @@ export class DshSidebarProvider implements vscode.WebviewViewProvider {
       case 'accountsState': Object.assign(this.state, { accounts: message.accounts, cursor: message.cursor }); break;
       case 'subagentProfilesState': this.state.subagentProfiles = message.profiles; break;
       case 'instructionsState': this.state.instructions = message.items; break;
-      case 'customizeState': this.state.features = message.features; this.state.nameModel = message.nameModel; this.state.accessibility = message.accessibility; break;
+      case 'customizeState': this.state.features = message.features; this.state.nameModel = message.nameModel; this.state.reviewModel = message.reviewModel; this.state.accessibility = message.accessibility; break;
+      case 'jobState': if (message.job) this.state.jobs[message.sessionId] = message.job; else delete this.state.jobs[message.sessionId]; break;
       case 'syncState': this.state.sync = message.sync; break;
       case 'approvalState': this.state.approvalMode = message.mode; break;
       case 'showPage': this.state.page = message.page; break;

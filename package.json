@@ -2,7 +2,7 @@
   "name": "dsh-ide",
   "displayName": "DeepSeek Harness for IDE",
   "description": "A native VS Code and Cursor front end for DeepSeek Harness",
-  "version": "0.5.9",
+  "version": "0.6.0",
   "publisher": "dsh-local",
   "license": "MIT",
   "repository": {
@@ -26,7 +26,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "build": "esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/extension.js --external:vscode --external:@deepseek-ai/dsh --external:esbuild && esbuild src/toolpacks/worker.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/toolpack-worker.js && esbuild src/mcp/delegateServer.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/delegate-server.js",
-    "build:test": "esbuild src/review/hunks.ts src/review/guards.ts src/review/renames.ts src/sidebar/view.ts src/sidebar/questions.ts src/update/version.ts src/update/plan.ts src/update/extensionUpdate.ts src/toolpacks/registry.ts src/runtime/models.ts src/runtime/naming.ts src/instructions/store.ts src/instructions/share.ts src/sync/configSync.ts --bundle --platform=node --format=esm --target=node20 --outdir=dist --out-extension:.js=.mjs && esbuild src/toolpacks/worker.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/toolpack-worker.js",
+    "build:test": "esbuild src/review/hunks.ts src/review/guards.ts src/review/renames.ts src/sidebar/view.ts src/sidebar/questions.ts src/update/version.ts src/update/plan.ts src/update/extensionUpdate.ts src/toolpacks/registry.ts src/runtime/models.ts src/runtime/naming.ts src/instructions/store.ts src/instructions/share.ts src/sync/configSync.ts src/slash/registry.ts src/goal/parse.ts src/goal/prompts.ts src/goal/runner.ts --bundle --platform=node --format=esm --target=node20 --outdir=dist --out-extension:.js=.mjs && esbuild src/toolpacks/worker.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/toolpack-worker.js",
     "test": "npm run build:test && node test/run.mjs",
     "package": "npm run check && npm run build && vsce package --allow-missing-repository"
   },
@@ -159,6 +159,12 @@
           "scope": "application",
           "description": "Name new chats with the model in dsh.nameModel. Without a name model, or when off, chats are named after the first message."
         },
+        "dsh.features.reviewAgent": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "description": "Review /job rounds with a separate read-only agent running the model in dsh.reviewModel. When off, the chat agent reviews its own work in the same chat."
+        },
         "dsh.features.shareRules": {
           "type": "boolean",
           "default": true,
@@ -241,6 +247,26 @@
           "default": {},
           "scope": "application",
           "description": "Model that writes chat titles from the first message. Example: { \"model\": \"DeepSeek V4 Flash\", \"effort\": \"low\" }.",
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "Name of an entry from dsh.models (or a Cursor model)."
+            },
+            "effort": {
+              "type": "string",
+              "description": "Reasoning effort from the model's effort options."
+            },
+            "speed": {
+              "type": "string",
+              "description": "Speed label from the model's speed options."
+            }
+          }
+        },
+        "dsh.reviewModel": {
+          "type": "object",
+          "default": {},
+          "scope": "application",
+          "description": "Model for the separate /job review agent (used when dsh.features.reviewAgent is on). Example: { \"model\": \"Codex Default\", \"effort\": \"high\" }.",
           "properties": {
             "model": {
               "type": "string",

@@ -13,6 +13,9 @@
   state.instructions ||= [];
   state.features ||= { activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true };
   state.nameModel ||= {};
+  state.reviewModel ||= {};
+  state.jobs ||= {};
+  state.slashCommands ||= [];
   state.accessibility ||= {};
   state.sync ||= { connected: false, auto: true };
   boot.remove();
@@ -36,6 +39,10 @@
   let editingEntryId = '';
   const expandedBatches = new Set();
   const batchCounts = new Map();
+  const jobBarExpanded = new Map();
+  let slashMenuEl = null;
+  let slashMatches = [];
+  let slashHighlight = 0;
   const toolGlyph = tool => tool.state === 'running' ? 'progress_activity' : tool.state === 'error' ? 'error' : tool.state === 'cancelled' ? 'stop_circle' : tool.kind === 'search' ? 'search' : tool.kind === 'shell' ? 'terminal' : tool.kind === 'read' ? 'description' : 'check_circle';
   const toolLabel = tool => {
     const running = tool.state === 'running';
@@ -526,6 +533,63 @@
     } });
   }
 
+  const jobPhaseLabel = { draft: 'Drafting', work: 'Working', verify: 'Reviewing', done: 'Done', stopped: 'Stopped' };
+  const criterionIcon = { pending: 'radio_button_unchecked', pass: 'check_circle', fail: 'cancel' };
+  const sourceChipLabel = source => /^answer:(\d+)$/.test(source) ? 'answer #' + source.slice(7) : source;
+
+  function renderJobBar(feed, sessionId, job) {
+    const key = 'job-bar:' + sessionId;
+    let node = feed.querySelector('[data-key="' + key + '"]');
+    const expanded = jobBarExpanded.get(sessionId) || false;
+    const passCount = job.criteria.filter(item => item.status === 'pass').length;
+    const criteriaTotal = job.criteria.length;
+    const roundLabel = job.round === 0 ? 'Job · drafting' : 'Job · round ' + job.round + '/' + job.maxRounds;
+    const signature = JSON.stringify([job.phase, job.round, job.maxRounds, job.stopReason, expanded, job.criteria]);
+    if (node && node.dataset.signature === signature) return;
+    if (!node) { node = keyed(document.createElement('div'), key); node.className = 'job-bar'; feed.prepend(node); }
+    node.textContent = '';
+    const head = button('', expanded ? 'Collapse job details' : 'Expand job details', () => { jobBarExpanded.set(sessionId, !expanded); renderFeed(); }, 'job-bar-head');
+    head.setAttribute('aria-expanded', String(expanded));
+    head.append(icon('checklist'));
+    const title = document.createElement('span'); title.className = 'job-bar-title'; title.textContent = roundLabel;
+    const phase = document.createElement('span'); phase.className = 'job-bar-phase'; phase.textContent = jobPhaseLabel[job.phase] || job.phase;
+    head.append(title, phase);
+    if (criteriaTotal) {
+      const counts = document.createElement('span'); counts.className = 'job-bar-counts'; counts.textContent = passCount + '/' + criteriaTotal + ' passing';
+      head.appendChild(counts);
+    }
+    const chevron = icon(expanded ? 'expand_less' : 'expand_more'); chevron.classList.add('small'); head.appendChild(chevron);
+    node.appendChild(head);
+    if (expanded) {
+      const body = document.createElement('div'); body.className = 'job-bar-body';
+      if (job.stopReason) {
+        const reason = document.createElement('div'); reason.className = 'job-bar-stop job-bar-stop-' + job.phase;
+        reason.textContent = job.stopReason; body.appendChild(reason);
+      }
+      const list = document.createElement('div'); list.className = 'job-criteria';
+      for (const criterion of job.criteria) {
+        const row = document.createElement('div'); row.className = 'job-criterion job-criterion-' + criterion.status;
+        if (criterion.status === 'pass' && criterion.evidence) row.title = criterion.evidence;
+        const glyph = icon(criterionIcon[criterion.status] || criterionIcon.pending); glyph.classList.add('small', 'job-criterion-icon');
+        const main = document.createElement('div'); main.className = 'job-criterion-main';
+        const line = document.createElement('div'); line.className = 'job-criterion-line';
+        const id = document.createElement('span'); id.className = 'job-criterion-id'; id.textContent = criterion.id;
+        const text = document.createElement('span'); text.className = 'job-criterion-text'; text.textContent = criterion.text;
+        const chip = document.createElement('span'); chip.className = 'job-criterion-source'; chip.textContent = sourceChipLabel(criterion.source);
+        line.append(id, text, chip);
+        if (criterion.check) { const code = document.createElement('code'); code.className = 'job-criterion-check'; code.textContent = criterion.check; line.appendChild(code); }
+        main.appendChild(line);
+        if (criterion.status === 'fail' && criterion.evidence) {
+          const evidence = document.createElement('div'); evidence.className = 'job-criterion-evidence'; evidence.textContent = criterion.evidence;
+          main.appendChild(evidence);
+        }
+        row.append(glyph, main); list.appendChild(row);
+      }
+      body.appendChild(list); node.appendChild(body);
+    }
+    node.dataset.signature = signature;
+  }
+
   function renderFeed() {
     const feed = el('feed');
     const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
@@ -545,6 +609,9 @@
     if (selectedAgent) { renderSubagentFeed(feed, selectedAgent); return; }
     if (openedSubagent) openedSubagent = '';
     if (feed.dataset.view !== sessionId) { feed.textContent = ''; feed.dataset.view = sessionId; }
+    const job = state.jobs?.[sessionId];
+    if (job) renderJobBar(feed, sessionId, job);
+    else feed.querySelector('[data-key="job-bar:' + sessionId + '"]')?.remove();
     const items = [];
     for (const entry of state.timeline?.[sessionId] || []) {
       if (entry.kind === 'tool') {
@@ -1194,6 +1261,7 @@
   const featureInfo = [
     { key: 'activityRail', icon: 'view_sidebar', title: 'Activity rail', desc: 'A rail left of the chat: gray while a chat runs, amber when it needs you, blue when it finished while you were elsewhere. When off, the top chat tabs return.' },
     { key: 'autoName', icon: 'title', title: 'Name chats automatically', desc: 'A name model turns your first message into a short title. Renaming a chat yourself keeps your name.' },
+    { key: 'reviewAgent', icon: 'rate_review', title: 'Separate review agent', desc: 'A separate read-only agent reviews each /job round. When off, the chat agent reviews its own work in the same chat.' },
     { key: 'shareRules', icon: 'share', title: 'Share global rules and skills', desc: 'Before each Claude or Codex turn, copies your all-workspace rules and skills into that account. DSH already reads them.' },
     { key: 'editorContext', icon: 'code', title: 'Send editor context', desc: 'Adds your open files, cursor position, selection and diagnostics to each message.' },
     { key: 'mirror', icon: 'content_copy', title: 'Private workspace copy', desc: 'Each new chat edits its own copy of the workspace. Turn off to let agents edit your real files, so they see your changes and each other\'s. Applies to new chats.' },
@@ -1201,9 +1269,9 @@
   ];
   let customizeKey = '';
 
-  function nameModelFields() {
+  function featureModelFields(stateKey, saveType, modelLabel, emptyLabel, helperWithModel, helperWithoutModel) {
     const models = state.models.filter(item => item.enabled !== false);
-    const current = state.nameModel || {};
+    const current = state[stateKey] || {};
     const model = models.find(item => item.id === current.model);
     const detail = document.createElement('div'); detail.className = 'feature-detail';
     const field = (label, items, value, onchange) => {
@@ -1211,8 +1279,8 @@
       const select = document.createElement('select'); fillSelect(select, items, value); select.onchange = () => onchange(select.value);
       wrap.appendChild(select); detail.appendChild(wrap); return wrap;
     };
-    const save = next => { state.nameModel = next; customizeKey = ''; renderCustomize(); send({ type: 'saveNameModel', nameModel: next }); };
-    field('Name model', [{ value: '', label: 'None (use the first message)' }, ...models.map(item => ({ value: item.id, label: item.name }))], current.model || '',
+    const save = next => { state[stateKey] = next; customizeKey = ''; renderCustomize(); send({ type: saveType, [stateKey]: next }); };
+    field(modelLabel, [{ value: '', label: emptyLabel }, ...models.map(item => ({ value: item.id, label: item.name }))], current.model || '',
       value => save({ model: value || undefined }));
     if (model) {
       if (model.effortOptions?.length) field('Effort', [{ value: '', label: 'Default' }, ...model.effortOptions.map(value => ({ value, label: value }))], current.effort || '',
@@ -1221,7 +1289,7 @@
         value => save({ ...current, speed: value || undefined }));
     }
     const help = document.createElement('p'); help.className = 'helper';
-    help.textContent = model ? 'Pick a fast, cheap model. It only sees your first message.' : 'Without a name model, chats are named after the first message.';
+    help.textContent = model ? helperWithModel : helperWithoutModel;
     detail.appendChild(help);
     return detail;
   }
@@ -1229,7 +1297,7 @@
   function renderCustomize() {
     const root = el('feature-list');
     // Skip identical rebuilds so an open select is not reset by unrelated state messages.
-    const key = JSON.stringify([state.features, state.nameModel, state.models.map(item => [item.id, item.enabled, item.effortOptions, item.speedOptions])]);
+    const key = JSON.stringify([state.features, state.nameModel, state.reviewModel, state.models.map(item => [item.id, item.enabled, item.effortOptions, item.speedOptions])]);
     if (key === customizeKey && root.childElementCount) return;
     customizeKey = key;
     rebuild(root, () => {
@@ -1241,7 +1309,8 @@
           renderCustomize();
           send({ type: 'setFeature', key: feature.key, enabled: !enabled });
         });
-        if (feature.key === 'autoName' && enabled) row.appendChild(nameModelFields());
+        if (feature.key === 'autoName' && enabled) row.appendChild(featureModelFields('nameModel', 'saveNameModel', 'Name model', 'None (use the first message)', 'Pick a fast, cheap model. It only sees your first message.', 'Without a name model, chats are named after the first message.'));
+        if (feature.key === 'reviewAgent' && enabled) row.appendChild(featureModelFields('reviewModel', 'saveReviewModel', 'Review model', 'Choose a model', 'It reads the working copy and checks every criterion.', 'Pick a model, or each /job stops when it reaches review.'));
         root.appendChild(row);
       }
     });
@@ -1463,7 +1532,86 @@
     if (!event.target.closest('.model-picker-wrap') && !event.target.closest('.option-wrap')) closeMenus();
     if (!event.target.closest('.send-wrap')) closeSendMenu();
   });
-  document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeSettings(); el('recent-menu').hidden = true; el('recent-toggle').setAttribute('aria-expanded', 'false'); closeMenus(); closeSendMenu(); } });
+  function slashMenuOpen() { return slashMenuEl && !slashMenuEl.hidden; }
+
+  function closeSlashMenu() {
+    if (!slashMenuEl) return;
+    slashMenuEl.hidden = true;
+    slashMatches = [];
+    slashHighlight = 0;
+    const prompt = el('prompt');
+    prompt.removeAttribute('aria-activedescendant');
+    prompt.removeAttribute('aria-controls');
+    prompt.removeAttribute('aria-expanded');
+    prompt.removeAttribute('aria-autocomplete');
+    prompt.removeAttribute('role');
+  }
+
+  function ensureSlashMenu() {
+    if (slashMenuEl) return slashMenuEl;
+    slashMenuEl = document.createElement('div');
+    slashMenuEl.id = 'slash-menu';
+    slashMenuEl.className = 'slash-menu';
+    slashMenuEl.hidden = true;
+    slashMenuEl.setAttribute('role', 'listbox');
+    slashMenuEl.setAttribute('aria-label', 'Slash commands');
+    slashMenuEl.onmousedown = event => event.preventDefault();
+    el('composer').appendChild(slashMenuEl);
+    return slashMenuEl;
+  }
+
+  function pickSlashCommand(command) {
+    const prompt = el('prompt');
+    prompt.value = '/' + command.name + ' ';
+    closeSlashMenu();
+    prompt.focus();
+    prompt.setSelectionRange(prompt.value.length, prompt.value.length);
+  }
+
+  function renderSlashMenu() {
+    const menu = ensureSlashMenu();
+    menu.textContent = '';
+    if (!slashMatches.length) { closeSlashMenu(); return; }
+    slashHighlight = Math.min(slashHighlight, slashMatches.length - 1);
+    slashMatches.forEach((command, index) => {
+      const row = button('', command.description, () => pickSlashCommand(command), 'slash-option');
+      row.id = 'slash-option-' + index;
+      row.setAttribute('role', 'option');
+      row.setAttribute('aria-selected', String(index === slashHighlight));
+      if (command.usage) row.title = command.usage;
+      const name = document.createElement('span'); name.className = 'slash-name'; name.textContent = '/' + command.name;
+      const desc = document.createElement('span'); desc.className = 'slash-desc'; desc.textContent = command.description;
+      row.append(name, desc);
+      menu.appendChild(row);
+    });
+    menu.hidden = false;
+    const prompt = el('prompt');
+    prompt.setAttribute('role', 'combobox');
+    prompt.setAttribute('aria-controls', 'slash-menu');
+    prompt.setAttribute('aria-expanded', 'true');
+    prompt.setAttribute('aria-autocomplete', 'list');
+    prompt.setAttribute('aria-activedescendant', 'slash-option-' + slashHighlight);
+  }
+
+  function slashTokenAt(value, caret) {
+    if (!value.startsWith('/')) return null;
+    const end = value.search(/\s/);
+    const tokenEnd = end < 0 ? value.length : end;
+    if (caret > tokenEnd) return null;
+    return value.slice(1, caret);
+  }
+
+  function updateSlashMenu() {
+    const prompt = el('prompt');
+    const query = slashTokenAt(prompt.value, prompt.selectionStart ?? prompt.value.length);
+    if (query === null) { closeSlashMenu(); return; }
+    slashMatches = (state.slashCommands || []).filter(item => item.name.toLowerCase().startsWith(query.toLowerCase()));
+    if (!slashMatches.length) { closeSlashMenu(); return; }
+    slashHighlight = 0;
+    renderSlashMenu();
+  }
+
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeSlashMenu(); closeSettings(); el('recent-menu').hidden = true; el('recent-toggle').setAttribute('aria-expanded', 'false'); closeMenus(); closeSendMenu(); } });
   el('apply-all').onclick = () => send({ type: 'applyAll' });
   el('reject-all').onclick = () => send({ type: 'rejectAll' });
   el('changes-toggle').onclick = () => { changesExpanded = !changesExpanded; renderChanges(); };
@@ -1528,7 +1676,19 @@
       name, description: el('instruction-description').value.trim(), content: content.value });
   };
   el('approval').onclick = () => { state.approvalMode = { ask: 'auto', auto: 'full', full: 'ask' }[state.approvalMode] || 'ask'; renderApproval(); send({ type: 'setApproval', mode: state.approvalMode }); };
-  el('prompt').onkeydown = event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); el('composer').requestSubmit(); } };
+  el('prompt').oninput = () => updateSlashMenu();
+  el('prompt').onkeyup = event => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) updateSlashMenu(); };
+  el('prompt').onclick = () => updateSlashMenu();
+  el('prompt').onblur = () => { setTimeout(() => { if (!slashMenuEl?.contains(document.activeElement)) closeSlashMenu(); }, 120); };
+  el('prompt').onkeydown = event => {
+    if (slashMenuOpen()) {
+      if (event.key === 'Escape') { event.preventDefault(); closeSlashMenu(); return; }
+      if (event.key === 'ArrowDown') { event.preventDefault(); slashHighlight = (slashHighlight + 1) % slashMatches.length; renderSlashMenu(); return; }
+      if (event.key === 'ArrowUp') { event.preventDefault(); slashHighlight = (slashHighlight + slashMatches.length - 1) % slashMatches.length; renderSlashMenu(); return; }
+      if (event.key === 'Tab' || event.key === 'Enter') { event.preventDefault(); pickSlashCommand(slashMatches[slashHighlight]); return; }
+    }
+    if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); el('composer').requestSubmit(); }
+  };
   el('cancel').onclick = () => send({ type: 'cancel' });
   el('account-cancel').onclick = () => { el('account-form').hidden = true; el('account-key').value = ''; };
   el('account-form').onsubmit = event => {
@@ -1588,7 +1748,12 @@
       }
       case 'sessionDeleted':
         if (unread.delete(message.sessionId)) saveLocal();
-        for (const table of [state.timeline, state.messages, state.subagents, state.runStates, state.queues]) delete table?.[message.sessionId];
+        for (const table of [state.timeline, state.messages, state.subagents, state.runStates, state.queues, state.jobs]) delete table?.[message.sessionId];
+        jobBarExpanded.delete(message.sessionId);
+        break;
+      case 'jobState':
+        if (message.job) state.jobs[message.sessionId] = message.job;
+        else delete state.jobs[message.sessionId];
         break;
       case 'queueState': (state.queues ||= {})[message.sessionId] = message.items || []; renderQueue(); break;
       case 'accountState': state.providerLabel = message.provider; state.accountLabel = message.label; state.accountConnected = message.connected; break;
@@ -1601,7 +1766,7 @@
       case 'subagentSaved': el('subagent-form').hidden = true; state.error = undefined; break;
       case 'instructionsState': state.instructions = message.items || []; break;
       case 'customizeState':
-        state.features = message.features || state.features; state.nameModel = message.nameModel || {};
+        state.features = message.features || state.features; state.nameModel = message.nameModel || {}; state.reviewModel = message.reviewModel || {};
         state.accessibility = message.accessibility || state.accessibility;
         applyAccessibility(state.accessibility);
         break;
@@ -1699,7 +1864,7 @@
       }
       case 'error': state.error = message.message; el('account-submit').disabled = false; if (el('account-form').dataset.oauth === 'true') el('account-submit').textContent = 'Continue in browser'; break;
     }
-    if (['userMessage', 'assistantDelta', 'assistantMessage', 'toolEvent', 'subagentEvent', 'toolState', 'diff', 'diffState', 'runState', 'approvalRequest', 'approvalResolved', 'questionRequest', 'questionResolved', 'timelineState'].includes(message.type)) {
+    if (['userMessage', 'assistantDelta', 'assistantMessage', 'toolEvent', 'subagentEvent', 'toolState', 'diff', 'diffState', 'runState', 'approvalRequest', 'approvalResolved', 'questionRequest', 'questionResolved', 'timelineState', 'jobState'].includes(message.type)) {
       renderFeed();
       if (message.type === 'runState') renderNotice();
       if (/^(approval|question)(Request|Resolved)$|^timelineState$/.test(message.type)) renderRail();

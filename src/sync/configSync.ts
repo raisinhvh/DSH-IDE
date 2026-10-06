@@ -4,8 +4,8 @@ import { dirname, join, resolve, sep } from 'node:path';
 
 /** `dsh.*` settings that travel with the config, read from and written to user settings only. */
 export const SYNCED_SETTINGS = [
-  'models', 'subagents', 'nameModel', 'mcpServers', 'accessibility',
-  'features.activityRail', 'features.autoName', 'features.shareRules', 'features.editorContext', 'features.reduceMotion',
+  'models', 'subagents', 'nameModel', 'reviewModel', 'mcpServers', 'accessibility',
+  'features.activityRail', 'features.autoName', 'features.shareRules', 'features.editorContext', 'features.reduceMotion', 'features.reviewAgent',
   'updates.check', 'runtime.mirror',
 ] as const;
 

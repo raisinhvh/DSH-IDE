@@ -118,7 +118,7 @@ body.a11y-contrast button:focus-visible, body.a11y-contrast input:focus-visible,
 body.a11y-targets .icon-button { min-width: calc(34px * var(--text-scale, 1)); height: calc(34px * var(--text-scale, 1)); }
 body.a11y-targets .recent-row .icon-button, body.a11y-targets .row-actions .icon-button, body.a11y-targets .queue-item .icon-button, body.a11y-targets .message-edit { min-width: calc(30px * var(--text-scale, 1)); height: calc(30px * var(--text-scale, 1)); }
 body.a11y-targets .primary-button, body.a11y-targets .secondary-button, body.a11y-targets .text-button, body.a11y-targets .tool-button, body.a11y-targets .composer-choice { min-height: calc(34px * var(--text-scale, 1)); }
-body.a11y-targets .settings-item, body.a11y-targets .recent-row .recent-item, body.a11y-targets .segmented button { padding-top: calc(10px * var(--space-scale, 1)); padding-bottom: calc(10px * var(--space-scale, 1)); }
+body.a11y-targets .settings-item, body.a11y-targets .recent-row .recent-item, body.a11y-targets .segmented button, body.a11y-targets .slash-option { padding-top: calc(10px * var(--space-scale, 1)); padding-bottom: calc(10px * var(--space-scale, 1)); }
 body.a11y-targets .rail { flex-basis: calc(44px * var(--text-scale, 1)); }
 body.a11y-targets .rail-tab { width: calc(27px * var(--text-scale, 1)); }
 body.a11y-targets .rail-tab.done, body.a11y-targets .rail-tab.blocked { width: calc(34px * var(--text-scale, 1)); }
@@ -245,7 +245,39 @@ select, input { min-height: calc(30px * var(--text-scale, 1)); padding: 5px 8px;
 .change-open:hover, .change-action:hover { background: var(--hover); }
 .change-actions { display: flex; gap: 2px; width: 100%; justify-content: flex-end; }
 .run-status { min-height: calc(16px * var(--text-scale, 1)); padding: 2px 11px 5px; color: var(--muted); }
-.composer { padding: calc(9px * var(--space-scale, 1)) 10px calc(11px * var(--space-scale, 1)); border-top: 1px solid var(--line); }
+.composer { position: relative; padding: calc(9px * var(--space-scale, 1)) 10px calc(11px * var(--space-scale, 1)); border-top: 1px solid var(--line); }
+.slash-menu { position: absolute; z-index: 35; left: 10px; right: 10px; bottom: calc(100% + 5px); max-height: min(280px, 40vh); overflow: auto; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--vscode-dropdown-background, #252525); color: var(--vscode-dropdown-foreground, var(--vscode-foreground)); box-shadow: 0 9px 22px #0006; transform-origin: bottom center; }
+.slash-menu:not([hidden]) { animation: menu-bubble 240ms cubic-bezier(.18, 1.45, .3, 1) both; }
+.slash-option { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; padding: 7px 9px; border: 0; border-radius: 6px; background: transparent; color: inherit; text-align: left; }
+.slash-option:hover, .slash-option:focus-visible { background: var(--vscode-list-hoverBackground, #333); }
+.slash-option[aria-selected="true"] { background: var(--vscode-list-activeSelectionBackground, #245484); color: var(--vscode-list-activeSelectionForeground, #fff); }
+.slash-name { flex: none; font-family: var(--vscode-editor-font-family, monospace); font-weight: 650; white-space: nowrap; }
+.slash-desc { flex: 1; min-width: 0; color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.slash-option[aria-selected="true"] .slash-desc { color: inherit; opacity: .85; }
+.job-bar { position: sticky; top: 0; z-index: 3; margin: 0 0 calc(8px * var(--space-scale, 1)); border: 1px solid var(--line); border-radius: 8px; background: var(--vscode-sideBar-background); overflow: hidden; }
+.job-bar-head { display: flex; align-items: center; gap: 6px; width: 100%; min-height: calc(31px * var(--text-scale, 1)); padding: 5px 8px; border: 0; border-radius: 0; background: var(--quiet-surface); text-align: left; font-weight: 600; }
+.job-bar-head:hover { background: var(--hover); }
+.job-bar-head .symbol:first-child { flex: 0 0 auto; color: var(--muted); font-size: calc(17px * var(--text-scale, 1)); }
+.job-bar-title { flex: 0 0 auto; white-space: nowrap; }
+.job-bar-phase { flex: 0 0 auto; color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); font-weight: 500; }
+.job-bar-counts { flex: 1; min-width: 0; color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); font-weight: 500; text-align: right; white-space: nowrap; }
+.job-bar-head .symbol.small { flex: 0 0 auto; margin-left: auto; color: var(--muted); font-size: calc(17px * var(--text-scale, 1)); }
+.job-bar-body { max-height: 40vh; overflow: auto; padding: 6px 8px 8px; border-top: 1px solid var(--quiet-line); }
+.job-bar-stop { margin-bottom: 6px; font-size: calc(11px * var(--text-scale, 1)); line-height: 1.4; overflow-wrap: anywhere; }
+.job-bar-stop-done { color: var(--vscode-testing-iconPassed, #3fb950); }
+.job-bar-stop-stopped { color: var(--vscode-editorWarning-foreground, #cca700); }
+.job-criteria { display: flex; flex-direction: column; gap: 6px; }
+.job-criterion { display: flex; align-items: flex-start; gap: 6px; min-width: 0; }
+.job-criterion-icon { flex: 0 0 auto; margin-top: 1px; font-size: calc(15px * var(--text-scale, 1)); color: var(--muted); }
+.job-criterion-pass .job-criterion-icon { color: var(--vscode-testing-iconPassed, #3fb950); }
+.job-criterion-fail .job-criterion-icon { color: var(--vscode-testing-iconFailed, #f85149); }
+.job-criterion-main { flex: 1; min-width: 0; }
+.job-criterion-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; line-height: 1.35; }
+.job-criterion-id { flex: 0 0 auto; color: var(--muted); font-family: var(--vscode-editor-font-family, monospace); font-size: calc(10px * var(--text-scale, 1)); }
+.job-criterion-text { flex: 1 1 120px; min-width: 0; overflow-wrap: anywhere; }
+.job-criterion-source { flex: 0 0 auto; padding: 1px 5px; border-radius: 999px; background: var(--quiet-surface); color: var(--muted); font-size: calc(10px * var(--text-scale, 1)); text-transform: lowercase; }
+.job-criterion-check { flex: 1 1 100%; font-family: var(--vscode-editor-font-family, monospace); font-size: calc(10px * var(--text-scale, 1)); overflow-wrap: anywhere; }
+.job-criterion-evidence { margin-top: 3px; color: var(--muted); font-size: calc(10px * var(--text-scale, 1)); line-height: 1.35; overflow-wrap: anywhere; }
 .composer-input { display: flex; align-items: flex-start; gap: 4px; }
 .composer-input.drag-over { outline: 2px dashed var(--vscode-focusBorder); outline-offset: 2px; border-radius: 6px; }
 .composer-input .icon-button { flex: 0 0 auto; margin-top: 4px; }
