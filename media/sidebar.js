@@ -543,8 +543,8 @@
     const expanded = jobBarExpanded.get(sessionId) || false;
     const passCount = job.criteria.filter(item => item.status === 'pass').length;
     const criteriaTotal = job.criteria.length;
-    const roundLabel = job.round === 0 ? 'Job · drafting' : 'Job · round ' + job.round + '/' + job.maxRounds;
-    const signature = JSON.stringify([job.phase, job.round, job.maxRounds, job.stopReason, expanded, job.criteria]);
+    const roundLabel = job.round === 0 ? 'Job · drafting' : 'Job · round ' + job.round;
+    const signature = JSON.stringify([job.phase, job.round, job.stopReason, expanded, job.criteria]);
     if (node && node.dataset.signature === signature) return;
     if (!node) { node = keyed(document.createElement('div'), key); node.className = 'job-bar'; feed.prepend(node); }
     node.textContent = '';

@@ -60,7 +60,7 @@ export async function runJob(job: JobState, host: JobHost): Promise<void> {
       job.round = round;
       await update();
       const failingIds = job.criteria.filter(criterion => criterion.status === 'fail').map(criterion => criterion.id);
-      const label = `/job · round ${round}/${job.maxRounds}${round > 1 ? ` · fixing ${failingIds.join(', ')}` : ''}`;
+      const label = `/job · round ${round}${round > 1 ? ` · fixing ${failingIds.join(', ')}` : ''}`;
       const reply = await step(() => host.runTurn(round === 1 ? workPrompt(job) : fixPrompt(job), label)) as string;
       const blocked = parseBlocked(reply);
       if (blocked) { await stop(`Blocked: ${blocked}`); return; }
@@ -73,7 +73,7 @@ export async function runJob(job: JobState, host: JobHost): Promise<void> {
         checks.push({ id: criterion.id, command: criterion.check, ...result });
       }
       const ids = job.criteria.map(criterion => criterion.id);
-      const reviewLabel = `/job · review ${round}/${job.maxRounds}`;
+      const reviewLabel = `/job · review ${round}`;
       let verdict = parseVerdict(await step(() => host.review(verifyPrompt(job, checks), reviewLabel)) as string, ids);
       if ('error' in verdict) {
         const note = `Your previous reply had invalid verdict JSON (${verdict.error}). Return the required JSON block.`;

@@ -1,7 +1,7 @@
 import type { SidebarQuestion } from '../sidebar/view';
 
 /** A job ends after this many work rounds even if criteria still fail. */
-export const MAX_JOB_ROUNDS = 7;
+export const MAX_JOB_ROUNDS = 10;
 
 export type JobPhase = 'draft' | 'work' | 'verify' | 'done' | 'stopped';
 export type CriterionStatus = 'pending' | 'pass' | 'fail';

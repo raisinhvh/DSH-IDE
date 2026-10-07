@@ -26,7 +26,7 @@ export function workPrompt(job: JobState): string {
 
 export function fixPrompt(job: JobState): string {
   const failing = job.criteria.filter(item => item.status === 'fail');
-  return `Round ${job.round} of ${job.maxRounds}. Fix these failing criteria.\n${workRules}\n\n${context(job)}\n\nFailing criteria:\n${failing.map(item => `${checklist([item])}\nEvidence: ${item.evidence || '(none)'}`).join('\n')}`;
+  return `Round ${job.round}. Fix these failing criteria.\n${workRules}\n\n${context(job)}\n\nFailing criteria:\n${failing.map(item => `${checklist([item])}\nEvidence: ${item.evidence || '(none)'}`).join('\n')}`;
 }
 
 export function verifyPrompt(job: JobState, checks: CheckResult[], retryNote?: string): string {

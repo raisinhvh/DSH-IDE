@@ -78,7 +78,7 @@ test('blocked lines, stalls and criterion ids use the requested boundaries', () 
 
 test('prompts carry current decisions and direct read-only drafting and review', () => {
   const job = createJob('Build the requested feature');
-  assert.equal(job.maxRounds, 7);
+  assert.equal(job.maxRounds, 10);
   assert.equal(addDecision(job, 'Color?', 'Blue'), 1);
   job.criteria = [{ id: 'C1', text: 'Blue button', source: 'answer:1', check: 'npm test', status: 'pass' }, { id: 'C2', text: 'Works', source: 'spec', status: 'fail', evidence: 'Broken' }];
   job.round = 2;
@@ -88,7 +88,8 @@ test('prompts carry current decisions and direct read-only drafting and review',
   assert.match(repairChecklistPrompt('bad'), /bad/);
   assert.match(workPrompt(job), /#1 Q: Color\? A: Blue/);
   assert.match(workPrompt(job), /C1 \[answer:1\] Blue button — check: `npm test`/);
-  assert.match(fixPrompt(job), /Round 2 of 7/);
+  assert.match(fixPrompt(job), /^Round 2\. /);
+  assert.doesNotMatch(fixPrompt(job), /Round 2 of/);
   assert.match(fixPrompt(job), /Broken/);
   assert.doesNotMatch(fixPrompt(job), /C1 \[/);
   const review = verifyPrompt(job, [{ id: 'C1', command: 'npm test', code: 1, output: 'failed output' }], 'Retry JSON');
@@ -157,13 +158,13 @@ test('cancelled turns and cancellation between checks stop without another host 
 test('different failures reach the maximum round count without a stall', async () => {
   const job = createJob('Work');
   const fake = scripted({
-    turns: [draft([{ text: 'One' }, { text: 'Two' }]), ...Array(7).fill('Work')],
-    reviews: Array.from({ length: 7 }, (_, index) => verdict([['C1', index % 2 === 1], ['C2', index % 2 === 0]])),
+    turns: [draft([{ text: 'One' }, { text: 'Two' }]), ...Array(10).fill('Work')],
+    reviews: Array.from({ length: 10 }, (_, index) => verdict([['C1', index % 2 === 1], ['C2', index % 2 === 0]])),
   });
   await runJob(job, fake.host);
-  assert.equal(job.round, 7);
+  assert.equal(job.round, 10);
   assert.equal(job.phase, 'stopped');
-  assert.equal(job.stopReason, 'Reached round 7 with 1 failing');
+  assert.equal(job.stopReason, 'Reached round 10 with 1 failing');
 });
 
 test('unbacked answers become numbered decisions and failing requirements', async () => {
