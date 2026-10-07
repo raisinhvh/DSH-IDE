@@ -120,6 +120,10 @@ interface Chat {
   cancelRequested: boolean;
   jobActive: boolean;
   jobCancelled: boolean;
+  /** Messages sent while a job runs, waiting for the job to log them as decisions. */
+  jobNotes: { prompt: string; images: { path: string; mimeType: string; data: string; name: string }[] }[];
+  /** Set when a sent message ended the job's current turn or review early. */
+  jobInterrupted: boolean;
   queue: { prompt: string; images: { path: string; mimeType: string; data: string; name: string }[] }[];
   turnEntryId: string;
   segment: number;
@@ -983,7 +987,7 @@ class ExtensionHost implements vscode.Disposable {
 
   private addChat(record: SessionRecord, mirror: WorkspaceMirror, review: ReviewController, ownerId: string, slot?: { runtime: AcpRuntime; key: string }): Chat {
     const chat: Chat = {
-      record, mirror, review, cli: new OAuthCliRuntime(), running: false, cancelRequested: false, jobActive: false, jobCancelled: false, queue: [], turnEntryId: '',
+      record, mirror, review, cli: new OAuthCliRuntime(), running: false, cancelRequested: false, jobActive: false, jobCancelled: false, jobNotes: [], jobInterrupted: false, queue: [], turnEntryId: '',
       segment: 0, startedTools: new Set(), subagentIds: new Set(), delegationToolIds: new Set(), subagentText: new Map(), turnReply: '', handoffPending: false,
       ownerId, runtime: slot?.runtime, runtimeKey: slot?.key, locks: new Map(), children: new Set(),
     };
@@ -1290,12 +1294,15 @@ class ExtensionHost implements vscode.Disposable {
     const record = this.active!;
     const busy = (): boolean => !!this.promptStarts.has(record.id) || !!this.chats.get(record.id)?.running || !!this.chats.get(record.id)?.jobActive || !!record.job && ['draft', 'work', 'verify'].includes(record.job.phase);
     if (busy()) { this.sidebar.postMessage({ type: 'error', message: 'Finish or cancel the current task before starting a job.' }); return; }
+    let attachments = await this.saveImages(images);
     const chat = await this.loadChat(record);
     if (busy()) { this.sidebar.postMessage({ type: 'error', message: 'Finish or cancel the current task before starting a job.' }); return; }
     const job = createJob(spec);
-    chat.jobActive = true; chat.jobCancelled = false; chat.cancelRequested = false;
+    chat.jobActive = true; chat.jobCancelled = false; chat.cancelRequested = false; chat.jobNotes = []; chat.jobInterrupted = false;
     record.job = job;
-    let attachments = images;
+    const fileList = (files: { name: string }[]): string => files.length ? `[Files: ${files.map(file => file.name).join(', ')}]` : '';
+    // The first turn shows the /job message as typed; later turns show their step label.
+    let original: string | undefined = [`/job ${spec.trim()}`, fileList(attachments)].filter(Boolean).join('\n\n');
     const cancelled = (): boolean => chat.jobCancelled || this.deletedSessions.has(record.id);
     const runTurn = async (prompt: string, label: string): Promise<string | undefined> => {
       while (chat.running || this.promptStarts.has(record.id)) {
@@ -1304,9 +1311,11 @@ class ExtensionHost implements vscode.Disposable {
       }
       if (cancelled()) return undefined;
       let reply: string | undefined;
-      const files = attachments; attachments = undefined;
+      const files = attachments; attachments = [];
+      const shown = original ?? label; original = undefined;
+      chat.jobInterrupted = false;
       try {
-        await this.sendPrompt(prompt, files, undefined, record.id, 'interrupt', { job: true, shown: label,
+        await this.sendPrompt(prompt, undefined, files.length ? files : undefined, record.id, 'interrupt', { job: true, shown,
           onFinish: (text, wasCancelled) => { if (!wasCancelled && !cancelled()) reply = text; } });
       } catch (error) { reply = undefined; this.output.appendLine(`Job turn failed: ${String(error)}`); }
       return reply;
@@ -1320,11 +1329,12 @@ class ExtensionHost implements vscode.Disposable {
         const model = choice.model && this.availableModel(choice.model);
         if (!model || !model.enabled) throw new Error('Separate review agent is on, but no review model is chosen in Customize.');
         chat.turnEntryId = randomUUID();
+        chat.jobInterrupted = false;
         this.sidebar.postMessage({ type: 'userMessage', sessionId: record.id, entryId: `user:${chat.turnEntryId}`, text: label });
         this.postRun(record.id, 'thinking', label);
         try {
           const result = await this.runSubagentCore(chat, { name: 'Reviewer', model: model.name, effort: choice.effort, speed: choice.speed, mode: 'read-only' }, prompt, []);
-          if (cancelled()) return undefined;
+          if (cancelled() || chat.jobInterrupted) return undefined;
           if (result.isError) throw new Error(result.text);
           return result.text;
         } finally { this.postRun(record.id, 'idle', 'Ready'); }
@@ -1333,13 +1343,20 @@ class ExtensionHost implements vscode.Disposable {
       runCheck: command => this.runJobCheck(chat, command),
       update: state => this.updateJob(chat, state),
       cancelled,
+      // Files sent with a message go out with the job's next turn.
+      takeNotes: () => chat.jobNotes.splice(0).map(note => {
+        attachments.push(...note.images);
+        return [note.prompt, fileList(note.images)].filter(Boolean).join('\n\n');
+      }),
     };
     try { await this.updateJob(chat, job); }
     catch (error) { chat.jobActive = false; throw error; }
     void this.guarded(async () => {
       try { await runJob(job, host); }
       finally {
-        chat.jobActive = false; chat.jobCancelled = false;
+        chat.jobActive = false; chat.jobCancelled = false; chat.jobInterrupted = false;
+        // Messages the job ended before logging are sent as ordinary messages.
+        chat.queue.unshift(...chat.jobNotes.splice(0));
         if (!this.deletedSessions.has(record.id)) {
           this.postJob(record);
           const next = chat.queue.shift();
@@ -1439,7 +1456,14 @@ class ExtensionHost implements vscode.Disposable {
     try { target = await this.loadChat(recordToLoad); }
     catch (error) { if (this.deletedSessions.has(recordToLoad.id)) return; throw error; }
     if (this.deletedSessions.has(recordToLoad.id)) return;
-    if (target.running || (target.jobActive && !options.job)) {
+    if (target.jobActive && !options.job) {
+      // A message sent during a job joins the job's decisions log. Sending (not queueing) ends the current step so it reruns with the message.
+      if (!displayed) display();
+      target.jobNotes.push({ prompt: prompt.trim(), images: attachments });
+      if (mode === 'interrupt') { target.jobInterrupted = true; this.cancel(false, target.record.id); }
+      return;
+    }
+    if (target.running) {
       const message = { prompt: prompt.trim(), images: attachments };
       if (mode === 'queue') { target.queue.push(message); this.postQueue(target); return; }
       target.queue.unshift(message);
@@ -1903,7 +1927,7 @@ class ExtensionHost implements vscode.Disposable {
   private cancel(clearQueue = true, chatId?: string): void {
     const chat = chatId ? this.chats.get(chatId) : this.chat;
     if (!chat) return;
-    if (clearQueue && chat.jobActive) chat.jobCancelled = true;
+    if (clearQueue && chat.jobActive) { chat.jobCancelled = true; chat.jobNotes = []; }
     if (chat.jobActive || clearQueue) for (const child of [...chat.children]) child.cancel();
     if (clearQueue && chat.queue.length) { chat.queue = []; this.postQueue(chat); }
     this.settleChatApprovals(chat.record.id);

@@ -26,11 +26,32 @@ export async function runJob(job: JobState, host: JobHost): Promise<void> {
     return result;
   };
   const update = async (): Promise<void> => { await host.update(job); checkpoint(); };
-  const draft = async (prompt: string, label: string): Promise<boolean> => {
-    let parsed = parseChecklist(await step(() => host.runTurn(prompt, label)) as string);
+  const takeNotes = async (): Promise<boolean> => {
+    const notes = host.takeNotes();
+    for (const note of notes) addDecision(job, 'Message from you during the job', note);
+    if (notes.length) await update();
+    return notes.length > 0;
+  };
+  /** Runs one turn. Your messages join the decisions log first; a turn your message ended early reruns with it. `prompt` gets whether any message was logged. */
+  const turn = async (run: (prompt: string, label: string) => Promise<string | undefined>, prompt: (noted: boolean) => string, label: string): Promise<string> => {
+    let noted = await takeNotes();
+    while (true) {
+      checkpoint();
+      const reply = await run(prompt(noted), label);
+      checkpoint();
+      if (reply !== undefined) return reply;
+      if (!await takeNotes()) throw new Error('Cancelled');
+      noted = true;
+    }
+  };
+  const runTurn = (prompt: string, label: string): Promise<string | undefined> => host.runTurn(prompt, label);
+  const review = (prompt: string, label: string): Promise<string | undefined> => host.review(prompt, label);
+  const draft = async (prompt: () => string, label: string): Promise<boolean> => {
+    let parsed = parseChecklist(await turn(runTurn, prompt, label));
     if ('error' in parsed) {
       const error = parsed.error;
-      parsed = parseChecklist(await step(() => host.runTurn(repairChecklistPrompt(error), '/job · fixing checklist format')) as string);
+      // The repair prompt has no decisions log, so a turn that logged your message reruns the full drafting prompt.
+      parsed = parseChecklist(await turn(runTurn, noted => noted ? prompt() : repairChecklistPrompt(error), '/job · fixing checklist format'));
     }
     if ('error' in parsed) { await stop(`The agent did not return a checklist: ${parsed.error}`); return false; }
     if ('blocked' in parsed) { await stop(`Blocked: ${parsed.blocked}`); return false; }
@@ -40,19 +61,21 @@ export async function runJob(job: JobState, host: JobHost): Promise<void> {
   };
   try {
     checkpoint();
-    if (!await draft(draftPrompt(job), '/job · drafting checklist')) return;
+    if (!await draft(() => draftPrompt(job), '/job · drafting checklist')) return;
     while (true) {
       const answers = await step(() => host.ask([{
         header: 'Checklist', question: 'Approve the job checklist shown in the job bar? Approving also lets DSH run its check commands without asking.',
         options: [{ label: 'Approve', description: 'Start working' }, { label: 'Stop job', description: 'End the job without working' }],
       }]));
-      if (!answers || !answers.length) { await stop('Checklist not approved'); return; }
-      const answer = answers[0];
+      // A message sent instead of answering is checklist feedback.
+      const notes = answers?.length ? [] : host.takeNotes();
+      if (!answers?.length && !notes.length) { await stop('Checklist not approved'); return; }
+      const answer = answers?.length ? answers[0] : notes.join('\n\n');
       if (answer === 'Stop job') { await stop('Stopped by you'); return; }
       if (answer === 'Approve') break;
       addDecision(job, 'Checklist feedback', answer);
       await update();
-      if (!await draft(revisePrompt(job, answer), '/job · revising checklist')) return;
+      if (!await draft(() => revisePrompt(job, answer), '/job · revising checklist')) return;
     }
     for (let round = 1; round <= job.maxRounds; round++) {
       checkpoint();
@@ -61,7 +84,7 @@ export async function runJob(job: JobState, host: JobHost): Promise<void> {
       await update();
       const failingIds = job.criteria.filter(criterion => criterion.status === 'fail').map(criterion => criterion.id);
       const label = `/job · round ${round}${round > 1 ? ` · fixing ${failingIds.join(', ')}` : ''}`;
-      const reply = await step(() => host.runTurn(round === 1 ? workPrompt(job) : fixPrompt(job), label)) as string;
+      const reply = await turn(runTurn, () => round === 1 ? workPrompt(job) : fixPrompt(job), label);
       const blocked = parseBlocked(reply);
       if (blocked) { await stop(`Blocked: ${blocked}`); return; }
       job.phase = 'verify';
@@ -74,10 +97,10 @@ export async function runJob(job: JobState, host: JobHost): Promise<void> {
       }
       const ids = job.criteria.map(criterion => criterion.id);
       const reviewLabel = `/job · review ${round}`;
-      let verdict = parseVerdict(await step(() => host.review(verifyPrompt(job, checks), reviewLabel)) as string, ids);
+      let verdict = parseVerdict(await turn(review, () => verifyPrompt(job, checks), reviewLabel), ids);
       if ('error' in verdict) {
         const note = `Your previous reply had invalid verdict JSON (${verdict.error}). Return the required JSON block.`;
-        verdict = parseVerdict(await step(() => host.review(verifyPrompt(job, checks, note), reviewLabel)) as string, ids);
+        verdict = parseVerdict(await turn(review, () => verifyPrompt(job, checks, note), reviewLabel), ids);
       }
       if ('error' in verdict) { await stop(`The reviewer did not return a verdict: ${verdict.error}`); return; }
       for (const result of verdict.results) {
@@ -97,7 +120,8 @@ export async function runJob(job: JobState, host: JobHost): Promise<void> {
           header: 'Unbacked', question: `The work includes something the spec and your answers don't cover: ${item}. What should happen?`,
           options: [{ label: 'Keep it', description: 'Add it to the checklist as a requirement' }, { label: 'Remove it', description: 'The next round removes it' }],
         }));
-        const answers = await step(() => host.ask(questions));
+        let answers = await step(() => host.ask(questions));
+        while (!answers && await takeNotes()) answers = await step(() => host.ask(questions));
         if (!answers) continue;
         for (let index = 0; index < items.length; index++) {
           const answer = answers[index];

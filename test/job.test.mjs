@@ -9,11 +9,11 @@ const json = value => '```json\n' + JSON.stringify(value) + '\n```';
 const draft = (criteria = [{ text: 'Works', source: 'spec' }]) => json({ criteria });
 const verdict = (results = [['C1', true]], unbacked = []) => json({ results: results.map(([id, pass]) => ({ id, pass, evidence: `${id} inspected` })), unbacked });
 
-function scripted({ turns = [], reviews = [], answers = [['Approve']], checks = [], cancelled = () => false } = {}) {
+function scripted({ turns = [], reviews = [], answers = [['Approve']], checks = [], cancelled = () => false, notes = [] } = {}) {
   const calls = [], updates = [];
   const take = (queue, name) => { assert.ok(queue.length, `Unexpected ${name}`); return queue.shift(); };
   return {
-    calls, updates,
+    calls, updates, notes,
     host: {
       runTurn: async (prompt, label) => { calls.push({ kind: 'turn', prompt, label }); return take(turns, 'turn'); },
       review: async (prompt, label) => { calls.push({ kind: 'review', prompt, label }); return take(reviews, 'review'); },
@@ -21,8 +21,22 @@ function scripted({ turns = [], reviews = [], answers = [['Approve']], checks = 
       runCheck: async command => { calls.push({ kind: 'check', command }); return take(checks, 'check'); },
       update: job => updates.push(structuredClone(job)),
       cancelled,
+      takeNotes: () => notes.splice(0),
     },
   };
+}
+
+/** A host whose user sends `note` while the `index`th call of `kind` runs, ending that call early. */
+function interruptedAt(fake, kind, index, note) {
+  const original = fake.host[kind];
+  let count = 0;
+  fake.host[kind] = async (...args) => {
+    if (count++ !== index) return original(...args);
+    fake.calls.push({ kind: `interrupted ${kind}`, args });
+    fake.notes.push(note);
+    return kind === 'ask' ? null : undefined;
+  };
+  return fake;
 }
 
 test('parses known slash commands and leaves ordinary or unknown messages alone', () => {
@@ -202,6 +216,56 @@ test('invalid checklist and verdict JSON get one retry, then stop if still inval
   const badReview = createJob('Work');
   await runJob(badReview, scripted({ turns: [draft(), 'Work'], reviews: ['bad', 'bad'] }).host);
   assert.match(badReview.stopReason, /The reviewer did not return a verdict:/);
+});
+
+test('a message that ends a turn early is logged and the same step reruns with it', async () => {
+  const job = createJob('Work');
+  const fake = interruptedAt(scripted({ turns: [draft(), 'Work'], reviews: [verdict()] }), 'runTurn', 0, 'Use subagents');
+  await runJob(job, fake.host);
+  assert.equal(job.phase, 'done');
+  assert.deepEqual(job.decisions, [{ question: 'Message from you during the job', answer: 'Use subagents' }]);
+  const turns = fake.calls.filter(call => call.kind === 'turn');
+  assert.equal(turns[0].label, '/job · drafting checklist');
+  assert.match(turns[0].prompt, /#1 Q: Message from you during the job A: Use subagents/);
+  assert.match(turns[0].prompt, /numbered from #2/);
+});
+
+test('a message ending a review early reruns the review, and a repair rerun uses the full drafting prompt', async () => {
+  const job = createJob('Work');
+  const fake = interruptedAt(scripted({ turns: [draft(), 'Work'], reviews: [verdict()] }), 'review', 0, 'Check colors too');
+  await runJob(job, fake.host);
+  assert.equal(job.phase, 'done');
+  assert.match(fake.calls.filter(call => call.kind === 'review')[0].prompt, /A: Check colors too/);
+  const repaired = createJob('Work');
+  const other = interruptedAt(scripted({ turns: ['bad', draft(), 'Work'], reviews: [verdict()] }), 'runTurn', 1, 'Smaller scope');
+  await runJob(repaired, other.host);
+  assert.equal(repaired.phase, 'done');
+  const retry = other.calls.filter(call => call.kind === 'turn')[1];
+  assert.equal(retry.label, '/job · fixing checklist format');
+  assert.match(retry.prompt, /drafting a job checklist[\s\S]*A: Smaller scope/);
+});
+
+test('queued messages join the next step, and a message instead of an approval revises the checklist', async () => {
+  const job = createJob('Work');
+  const fake = scripted({ turns: [draft(), 'Work'], reviews: [verdict()], notes: ['Before drafting'] });
+  await runJob(job, fake.host);
+  assert.equal(job.decisions[0].answer, 'Before drafting');
+  assert.match(fake.calls[0].prompt, /A: Before drafting/);
+  const revised = createJob('Work');
+  const other = interruptedAt(scripted({ turns: [draft(), draft([{ text: 'Revised', source: 'answer:1' }]), 'Work'], answers: [['Approve']], reviews: [verdict()] }), 'ask', 0, 'Drop the export step');
+  await runJob(revised, other.host);
+  assert.equal(revised.phase, 'done');
+  assert.deepEqual(revised.decisions, [{ question: 'Checklist feedback', answer: 'Drop the export step' }]);
+  assert.equal(other.calls.filter(call => call.kind === 'turn')[1].label, '/job · revising checklist');
+});
+
+test('a message ending unbacked questions early is logged and the questions are asked again', async () => {
+  const job = createJob('Work');
+  const fake = interruptedAt(scripted({ turns: [draft(), 'Work', 'Fix'], reviews: [verdict([['C1', true]], ['Extra']), verdict([['C1', true], ['C2', true]])], answers: [['Approve'], ['Keep it']] }), 'ask', 1, 'Hold on');
+  await runJob(job, fake.host);
+  assert.equal(job.phase, 'done');
+  assert.deepEqual(job.decisions.map(item => item.answer), ['Hold on', 'Keep it']);
+  assert.equal(job.criteria[1].source, 'answer:2');
 });
 
 test('skipped approvals, explicit stops and host errors end the job without throwing', async () => {

@@ -41,4 +41,6 @@ export interface JobHost {
   update(job: JobState): void | Promise<void>;
   /** True once the user cancelled the chat's task. */
   cancelled(): boolean;
+  /** Returns and clears messages the user sent while the job was running. A sent (not queued) message also ends the current turn, review or question card early. */
+  takeNotes(): string[];
 }
