@@ -30,7 +30,7 @@ function fixture(mode = 'edit') {
     childRuns: new Set(), sidebar: { postMessage: event => events.push(event) },
     subagentProfiles: () => [{ name: 'test-agent', model: 'test-model', mode }],
     availableModel: () => ({ name: 'test-model', enabled: true, backend: 'test', provider: 'deepseek-official' }),
-    resolveRoute: async () => ({ model: {} }), releaseRuntime: async () => {}, mcpServers: () => [],
+    resolveRoute: async () => ({ model: {} }), releaseRuntime: async () => {}, mcpServers: () => [], summariesOn: () => false,
   });
   const chat = {
     record: { id: 'chat', modelName: 'test-model' }, turnEntryId: 'turn', mirror: { cwd: process.cwd() },

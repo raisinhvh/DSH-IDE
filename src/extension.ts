@@ -25,10 +25,11 @@ import { addDecision, createJob, runJob } from './goal/runner';
 import { parseSlash } from './slash/registry';
 import { terminateProcessTree } from './runtime/cancellation';
 import { answersByQuestion, formatAnswers, parseQuestions } from './sidebar/questions';
-import { delegationInstructions, isDelegationTool, isNativeSubagentTool } from './runtime/delegation';
+import { delegationInstructions, isDelegationTool, isNativeSubagentTool, TOOLPACK_SCOPE } from './runtime/delegation';
 import { AcpRuntime, RuntimeEvent } from './runtime/acp';
 import { OAuthCliRuntime } from './runtime/oauthCli';
-import { MirrorChange, WorkspaceMirror } from './runtime/shadow';
+import { MirrorChange, mirrorPathExcluded, WorkspaceMirror } from './runtime/shadow';
+import { FileSummaries, readToolPath, SUMMARY_INSTRUCTIONS, SUMMARY_TOOL } from './summaries/store';
 import { DshSidebarProvider, SidebarWebviewMessage } from './sidebar/provider';
 import { ApprovalMode, CursorAccountState, SidebarAccessibility, SidebarFeatureKey, SidebarFeatures, SidebarImage, SidebarJob, SidebarNameModel, SidebarQuestion, SidebarTimelineItem, SidebarSubagent, defaultFeatures, normalizeAccessibility } from './sidebar/view';
 
@@ -78,13 +79,15 @@ type ModelChoice = { speed?: string; effort?: string };
 const FEATURE_SETTINGS: Record<SidebarFeatureKey, string> = {
   activityRail: 'features.activityRail', autoName: 'features.autoName', shareRules: 'features.shareRules', editorContext: 'features.editorContext',
   reduceMotion: 'features.reduceMotion', updateChecks: 'updates.check', mirror: 'runtime.mirror', reviewAgent: 'features.reviewAgent',
+  fileSummaries: 'features.fileSummaries',
 };
+type ModelSettingKey = 'nameModel' | 'reviewModel' | 'summaryModel';
 type ResolvedRoute = ResolvedModel | { model: ModelEntry } | { model: ModelEntry; oauthAccount: OAuthCliAccount };
 
 function isOAuthProvider(value: string): value is OAuthCliProvider { return value === 'codex-cli' || value === 'claude-cli'; }
 function runtimeLabel(provider: string): string { return provider === 'cursor-acp' ? 'Cursor' : provider === 'codex-cli' ? 'Codex' : provider === 'claude-cli' ? 'Claude' : 'DSH'; }
 
-interface SubagentProfile { name: string; description?: string; model: string; effort?: string; speed?: string; mode: 'read-only' | 'edit'; enabled?: boolean }
+interface SubagentProfile { name: string; description?: string; model: string; effort?: string; speed?: string; mode: 'read-only' | 'edit'; tools?: boolean; enabled?: boolean }
 interface Actor { owner: string; label: string; readOnly: boolean }
 interface ToolInfo { tool: string; input: Record<string, unknown>; autoAllowEdits?: boolean }
 interface ChildRun {
@@ -175,6 +178,7 @@ class ExtensionHost implements vscode.Disposable {
   private timelineTimer?: NodeJS.Timeout;
   private cursorModels: ModelEntry[];
   private cursorAccount: CursorAccountState = { connected: false, label: 'Not connected' };
+  private fileSummaries?: FileSummaries;
   private readonly disposables: vscode.Disposable[] = [];
 
   public constructor(private readonly context: vscode.ExtensionContext) {
@@ -221,13 +225,13 @@ class ExtensionHost implements vscode.Disposable {
     this.status.show();
     this.disposables.push(
       this.output, this.status, this.sidebar, this.sync,
-      { dispose: () => { for (const runtime of this.runtimes.values()) runtime.dispose(); this.runtimes.clear(); this.delegateHost.dispose(); void this.toolpacks.dispose(); } },
+      { dispose: () => { for (const runtime of this.runtimes.values()) runtime.dispose(); this.runtimes.clear(); this.delegateHost.dispose(); void this.toolpacks.dispose(); this.fileSummaries?.dispose(); } },
       this.toolpacks.onChange(() => { this.postToolpacks(); this.sync.schedule(); }),
       vscode.window.registerWebviewViewProvider(DshSidebarProvider.viewType, this.sidebar, { webviewOptions: { retainContextWhenHidden: true } }),
       vscode.workspace.onDidChangeConfiguration(event => {
         if (event.affectsConfiguration('dsh.models')) this.refreshModels();
         if (event.affectsConfiguration('dsh.subagents')) this.refreshSubagents();
-        if (['dsh.features', 'dsh.nameModel', 'dsh.reviewModel', 'dsh.updates.check', 'dsh.accessibility'].some(key => event.affectsConfiguration(key))) this.refreshCustomize();
+        if (['dsh.features', 'dsh.nameModel', 'dsh.reviewModel', 'dsh.summaryModel', 'dsh.updates.check', 'dsh.accessibility'].some(key => event.affectsConfiguration(key))) this.refreshCustomize();
         if (SYNCED_SETTINGS.some(key => event.affectsConfiguration(`dsh.${key}`))) this.sync.schedule();
       }),
       vscode.window.onDidChangeWindowState(state => { if (state.focused) this.sync.check(true); }),
@@ -239,7 +243,7 @@ class ExtensionHost implements vscode.Disposable {
     this.registerCommands();
     this.delegateHost.start({
       describe: () => this.subagentInfos(),
-      tools: () => this.toolpackTools(),
+      tools: () => this.bridgeTools(),
       call: (owner, tool, args) => this.handleDelegateCall(owner, tool, args),
     }).catch(error => this.output.appendLine(`Subagent bridge failed to start: ${String(error)}`));
     const updateTimer = setTimeout(() => { void this.checkUpdates(); }, 5000);
@@ -253,11 +257,20 @@ class ExtensionHost implements vscode.Disposable {
     this.refreshCustomize();
     this.refreshModels();
     this.refreshSessions();
+    this.resumeLastChat();
     void this.refreshAccount();
     void this.refreshAccounts();
   }
 
   private get chat(): Chat | undefined { return this.active ? this.chats.get(this.active.id) : undefined; }
+
+  /** Reopens the chat that was open when VS Code closed, as selecting its tab would, so its history is shown on startup. */
+  private resumeLastChat(): void {
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (!folder || folder.uri.scheme !== 'file' || !vscode.workspace.isTrusted) return;
+    const id = this.context.workspaceState.get<string>(ACTIVE_SESSION_KEY);
+    if (id && this.sessions().some(item => item.id === id)) void this.guarded(() => this.continueChat(id));
+  }
 
   private ensureNode(): Promise<string> {
     if (!this.nodeReady) {
@@ -357,11 +370,13 @@ class ExtensionHost implements vscode.Disposable {
     this.sidebar.postMessage({ type: 'runState', sessionId: chatId, state, label });
   }
 
-  public dispose(): void {
+  /** Returns the final timeline save so deactivate can hold shutdown until it is written. */
+  public dispose(): Thenable<void> {
     if (this.timelineTimer) clearTimeout(this.timelineTimer);
-    void this.context.workspaceState.update(TIMELINES_KEY, this.timelines);
+    const saved = this.context.workspaceState.update(TIMELINES_KEY, this.timelines);
     for (const chat of this.chats.values()) { chat.review.dispose(); chat.mirror.dispose(); }
     for (const disposable of this.disposables) disposable.dispose();
+    return saved;
   }
 
   private registerCommands(): void {
@@ -897,6 +912,40 @@ class ExtensionHost implements vscode.Disposable {
 
   private toolpackTools(): DelegateToolInfo[] { return this.toolpacks.descriptors(); }
 
+  /** Tools every agent's bridge offers, subagents included: file summaries and custom toolpacks. */
+  private bridgeTools(): DelegateToolInfo[] { return [...this.summariesOn() ? [SUMMARY_TOOL] : [], ...this.toolpackTools()]; }
+
+  private summariesOn(): boolean { return this.feature('fileSummaries') && !!this.modelSetting('summaryModel').model; }
+
+  /** This workspace's file summaries, kept in extension storage. Undefined without a local workspace folder. */
+  private get summaries(): FileSummaries | undefined {
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (!folder || folder.uri.scheme !== 'file') return undefined;
+    return this.fileSummaries ??= new FileSummaries({
+      file: join(this.context.globalStorageUri.fsPath, 'summaries', `${createHash('sha256').update(folder.uri.fsPath).digest('hex').slice(0, 16)}.json`),
+      generate: (cwd, prompt) => {
+        const choice = this.modelSetting('summaryModel');
+        if (!choice.model) throw new Error('No summary model is set.');
+        return this.runOneShot({ ...choice, model: choice.model }, cwd, prompt, 300_000);
+      },
+      enabled: () => this.summariesOn(),
+      log: line => this.output.appendLine(line),
+      excluded: path => mirrorPathExcluded(path),
+    });
+  }
+
+  /** Queues a file an agent just read in `cwd` for a summary. */
+  private noteRead(cwd: string, path: unknown): void {
+    if (typeof path === 'string' && path && this.summariesOn()) this.summaries?.request(cwd, path);
+  }
+
+  private async readSummaries(chat: Chat, args: Record<string, unknown>): Promise<DelegateResult> {
+    if (!this.summariesOn() || !this.summaries) return { text: 'File summaries are turned off.', isError: true };
+    const paths = (Array.isArray(args.paths) ? args.paths : []).filter((item): item is string => typeof item === 'string');
+    if (!paths.length) return { text: '"paths" must list at least one file or folder.', isError: true };
+    return { text: await this.summaries.lookup(chat.mirror.cwd, paths.slice(0, 50)) };
+  }
+
   private postToolpacks(error?: string): void {
     this.sidebar.postMessage({ type: 'toolpacksState', packs: this.toolpacks.list(), error });
   }
@@ -1061,8 +1110,8 @@ class ExtensionHost implements vscode.Disposable {
     if (this.deletedSessions.has(record.id)) throw new Error('This chat was deleted.');
     const holder: { review?: ReviewController; changes?: MirrorChange[] } = {};
     const onChanges = (changes: MirrorChange[]): void => {
-      if (holder.review) holder.review.update(changes);
-      else holder.changes = changes;
+      if (!holder.review) { holder.changes = changes; return; }
+      holder.review.update(changes);
     };
     const fresh = !!record.pendingMirror;
     const mirror = fresh
@@ -1509,6 +1558,7 @@ class ExtensionHost implements vscode.Disposable {
     const postTool = (id: string, title: string, detail: string | undefined, state: 'running' | 'complete' | 'error'): void => {
       if (isDelegationTool(title) || (title === 'MCP tool' && isDelegationTool(detail || ''))) { if (!chat.delegationToolIds.has(id)) breakMessage(); chat.delegationToolIds.add(id); }
       if (chat.delegationToolIds.has(id)) return;
+      if (state === 'running') this.noteRead(chat.mirror.cwd, readToolPath(title, detail));
       this.sidebar.postMessage({ type: 'toolEvent', sessionId: record.id, entryId: `tool:${turnEntryId}:${id}`, event: {
         id, kind: /search|grep|glob|web/i.test(title) ? 'search' : /edit|write/i.test(title) ? 'edit' : /command|bash|shell/i.test(title) ? 'shell' : /read/i.test(title) ? 'read' : 'other',
         title, detail, state,
@@ -1543,7 +1593,8 @@ class ExtensionHost implements vscode.Disposable {
       chat.handoffPending = false;
       history.push({ role: 'user', text: historyPrompt + (fileContext.length ? '\nContext files:\n' + fileContext.join('\n') : '') });
       chat.turnReply = '';
-      const fullPrompt = `${handoff}${this.editorContext(chat.mirror.direct)}\n\n${delegationInstructions(!!this.delegateConfig(chat.ownerId))}\n\n${fileContext.length ? 'Attached context files (read as needed):\n' + fileContext.join('\n') + '\n\n' : ''}User request:\n${prompt}`;
+      const bridged = !!this.delegateConfig(chat.ownerId);
+      const fullPrompt = `${handoff}${this.editorContext(chat.mirror.direct)}\n\n${delegationInstructions(bridged)}\n\n${bridged && this.summariesOn() ? SUMMARY_INSTRUCTIONS + '\n\n' : ''}${fileContext.length ? 'Attached context files (read as needed):\n' + fileContext.join('\n') + '\n\n' : ''}User request:\n${prompt}`;
       if (isOAuthProvider(record.provider)) {
         const account = this.oauthAccounts.get(record.accountId);
         if (!account) throw new Error('The selected OAuth account is missing. Connect it again.');
@@ -1616,10 +1667,10 @@ class ExtensionHost implements vscode.Disposable {
     return parts.join('\n');
   }
 
-  private mcpServers(ownerId?: string): unknown[] {
+  private mcpServers(ownerId?: string, toolpacksOnly = false): unknown[] {
     const value = vscode.workspace.getConfiguration('dsh').get<unknown>('mcpServers', []);
     if (!Array.isArray(value)) throw new Error('dsh.mcpServers must be an array.');
-    const delegate = ownerId ? this.delegateConfig(ownerId) : undefined;
+    const delegate = ownerId ? this.delegateConfig(ownerId, toolpacksOnly) : undefined;
     return delegate ? [...value, { name: DELEGATE_SERVER, command: delegate.command, args: delegate.args, env: Object.entries(delegate.env).map(([name, envValue]) => ({ name, value: envValue })) }] : value;
   }
 
@@ -1628,11 +1679,11 @@ class ExtensionHost implements vscode.Disposable {
     if (!Array.isArray(value)) return [];
     return value.filter((item): item is SubagentProfile => !!item && typeof item === 'object' && typeof item.name === 'string' && !!item.name.trim()
       && typeof item.model === 'string' && item.enabled !== false)
-      .map(item => ({ ...item, name: item.name.trim(), mode: item.mode === 'edit' ? 'edit' as const : 'read-only' as const }));
+      .map(item => ({ ...item, name: item.name.trim(), mode: item.mode === 'edit' ? 'edit' as const : 'read-only' as const, tools: item.tools !== false }));
   }
 
   private refreshSubagents(): void {
-    this.sidebar.postMessage({ type: 'subagentProfilesState', profiles: this.subagentProfiles().map(({ name, description, model, effort, speed, mode }) => ({ name, description, model, effort, speed, mode })) });
+    this.sidebar.postMessage({ type: 'subagentProfilesState', profiles: this.subagentProfiles().map(({ name, description, model, effort, speed, mode, tools }) => ({ name, description, model, effort, speed, mode, tools })) });
   }
 
   private async writeSubagents(profiles: SubagentProfile[]): Promise<void> {
@@ -1647,7 +1698,7 @@ class ExtensionHost implements vscode.Disposable {
     if (!name || !model) throw new Error('Subagent needs a name and an available model.');
     if (profile.effort && !model.effortOptions?.includes(profile.effort)) throw new Error(`Effort "${profile.effort}" is not offered by ${model.name}.`);
     if (profile.speed && !model.speedOptions?.some(item => item.label === profile.speed)) throw new Error(`Speed "${profile.speed}" is not offered by ${model.name}.`);
-    const next: SubagentProfile = { name, description: profile.description?.trim() || undefined, model: model.name, effort: profile.effort || undefined, speed: profile.speed || undefined, mode: profile.mode === 'edit' ? 'edit' : 'read-only' };
+    const next: SubagentProfile = { name, description: profile.description?.trim() || undefined, model: model.name, effort: profile.effort || undefined, speed: profile.speed || undefined, mode: profile.mode === 'edit' ? 'edit' : 'read-only', tools: profile.tools !== false };
     const others = this.subagentProfiles().filter(item => item.name !== name && item.name !== message.originalName);
     await this.writeSubagents([...others, next]);
     this.sidebar.postMessage({ type: 'subagentSaved' });
@@ -1657,7 +1708,7 @@ class ExtensionHost implements vscode.Disposable {
     return vscode.workspace.getConfiguration('dsh').get<boolean>(FEATURE_SETTINGS[key], defaultFeatures()[key]) !== false;
   }
 
-  private modelSetting(key: 'nameModel' | 'reviewModel'): SidebarNameModel {
+  private modelSetting(key: ModelSettingKey): SidebarNameModel {
     const value = vscode.workspace.getConfiguration('dsh').get<unknown>(key);
     if (!value || typeof value !== 'object') return {};
     const { model, effort, speed } = value as Record<string, unknown>;
@@ -1667,7 +1718,7 @@ class ExtensionHost implements vscode.Disposable {
 
   private refreshCustomize(): void {
     const features = Object.fromEntries((Object.keys(FEATURE_SETTINGS) as SidebarFeatureKey[]).map(key => [key, this.feature(key)])) as SidebarFeatures;
-    this.sidebar.postMessage({ type: 'customizeState', features, nameModel: this.modelSetting('nameModel'), reviewModel: this.modelSetting('reviewModel'),
+    this.sidebar.postMessage({ type: 'customizeState', features, nameModel: this.modelSetting('nameModel'), reviewModel: this.modelSetting('reviewModel'), summaryModel: this.modelSetting('summaryModel'),
       accessibility: normalizeAccessibility(vscode.workspace.getConfiguration('dsh').get<unknown>('accessibility')) });
   }
 
@@ -1690,7 +1741,7 @@ class ExtensionHost implements vscode.Disposable {
     this.refreshCustomize();
   }
 
-  private async saveModelSetting(key: 'nameModel' | 'reviewModel', value: SidebarNameModel): Promise<void> {
+  private async saveModelSetting(key: ModelSettingKey, value: SidebarNameModel): Promise<void> {
     const name = String(value?.model || '').trim();
     let next: SidebarNameModel | undefined;
     if (name) {
@@ -1778,18 +1829,26 @@ class ExtensionHost implements vscode.Disposable {
     return this.subagentProfiles().map(profile => ({ name: profile.name, description: profile.description, mode: profile.mode, model: profile.model }));
   }
 
-  private delegateConfig(ownerId: string): { command: string; args: string[]; env: Record<string, string> } | undefined {
+  /** Subagents get a toolpack-only bridge so they can use external apps without delegating further. */
+  private delegateConfig(ownerId: string, toolpacksOnly = false): { command: string; args: string[]; env: Record<string, string> } | undefined {
     const url = this.delegateHost.url;
     if (!url || !vscode.workspace.isTrusted) return undefined;
+    if (toolpacksOnly && !this.bridgeTools().length) return undefined;
     const nodePath = vscode.workspace.getConfiguration('dsh').get<string>('runtime.nodePath') || undefined;
     return {
       command: nodePath || process.execPath,
       args: [join(this.context.extensionPath, 'dist', 'delegate-server.js')],
-      env: { DSH_DELEGATE_URL: url, DSH_DELEGATE_TOKEN: this.delegateHost.token, DSH_DELEGATE_OWNER: ownerId, ...(nodePath ? {} : { ELECTRON_RUN_AS_NODE: '1' }) },
+      env: { DSH_DELEGATE_URL: url, DSH_DELEGATE_TOKEN: this.delegateHost.token, DSH_DELEGATE_OWNER: ownerId, ...(toolpacksOnly ? { DSH_DELEGATE_SCOPE: TOOLPACK_SCOPE } : {}), ...(nodePath ? {} : { ELECTRON_RUN_AS_NODE: '1' }) },
     };
   }
 
   private async handleDelegateCall(owner: string, tool: string, args: Record<string, unknown>): Promise<DelegateResult> {
+    const child = [...this.childRuns].find(item => item.owner === owner);
+    if (child) {
+      if (child.parent.cancelRequested) return { text: 'Cancelled.', isError: true };
+      if (tool === SUMMARY_TOOL.name) return this.readSummaries(child.parent, args);
+      return this.toolpacks.owns(tool) ? this.toolpacks.call(tool, args) : { text: `Subagents may only use toolpack and file summary tools, not "${tool}".`, isError: true };
+    }
     const chat = [...this.chats.values()].find(item => item.ownerId === owner);
     if (!chat) return { text: 'This chat is no longer active.', isError: true };
     if (chat.cancelRequested) return { text: 'Cancelled.', isError: true };
@@ -1803,6 +1862,7 @@ class ExtensionHost implements vscode.Disposable {
     }
     if (tool === 'delegate_task') return this.runSubagent(chat, args);
     if (tool === 'ask_questions') return this.askQuestions(chat, args);
+    if (tool === SUMMARY_TOOL.name) return this.readSummaries(chat, args);
     if (this.toolpacks.owns(tool)) return this.toolpacks.call(tool, args);
     return { text: `Unknown tool "${tool}".`, isError: true };
   }
@@ -1853,10 +1913,13 @@ class ExtensionHost implements vscode.Disposable {
     const instructions = readOnly
       ? 'You are a READ-ONLY subagent. Do not modify, create or delete any files.'
       : `You may edit ONLY these paths: ${files.join(', ')}. Do not touch anything else; other agents are working in parallel.`;
-    const prompt = `You are a subagent working in a shared working copy on behalf of another agent. ${instructions}\n\n${delegationInstructions(false)}\n\nTask:\n${task}\n\nWhen you finish, reply with a concise final report: findings, files changed, and anything the requester must still do.`;
+    const summaries = profile.tools !== false && this.summariesOn() ? `${SUMMARY_INSTRUCTIONS}\n\n` : '';
+    const prompt = `You are a subagent working in a shared working copy on behalf of another agent. ${instructions}\n\n${delegationInstructions(false)}\n\n${summaries}Task:\n${task}\n\nWhen you finish, reply with a concise final report: findings, files changed, and anything the requester must still do.`;
     const onText = (text: string): void => { reply += text; post({ text, messageId: 'reply' }); };
     const onTool = (id: string, title: string, detail: string | undefined, state: 'running' | 'complete' | 'error'): void => {
-      if (state === 'running') post({ text: `${title}${detail ? `: ${detail.slice(0, 300)}` : ''}`, messageId: `tool:${id}`, role: 'tool' });
+      if (state !== 'running') return;
+      post({ text: `${title}${detail ? `: ${detail.slice(0, 300)}` : ''}`, messageId: `tool:${id}`, role: 'tool' });
+      this.noteRead(chat.mirror.cwd, readToolPath(title, detail));
     };
     try {
       const route = await this.resolveRoute(model);
@@ -1867,14 +1930,14 @@ class ExtensionHost implements vscode.Disposable {
         await this.shareGlobalInstructions(route.oauthAccount);
         if (cancelled) throw new Error('Cancelled.');
         await cli.prompt({ account: route.oauthAccount, cwd: chat.mirror.cwd, backend, effort, speed, readOnly, fullAccess: this.approvalMode === 'full',
-          prompt, onText, onTool, onApproval: (description, info) => this.decideApproval(chat, { owner, label: profile.name, readOnly }, description, info) });
+          delegate: profile.tools === false ? undefined : this.delegateConfig(owner, true), prompt, onText, onTool, onApproval: (description, info) => this.decideApproval(chat, { owner, label: profile.name, readOnly }, description, info) });
       } else {
         const slot = await this.ensureRuntime(route, chat.mirror.cwd, owner);
         if (!slot) throw new Error('No runtime is available for this subagent model.');
         run.runtimeKey = slot.key;
         run.cancel = () => { cancelled = true; void slot.runtime.stop(); };
         if (cancelled) throw new Error('Cancelled.');
-        const sessionId = await slot.runtime.newSession(chat.mirror.cwd, this.mcpServers());
+        const sessionId = await slot.runtime.newSession(chat.mirror.cwd, this.mcpServers(profile.tools === false ? undefined : owner, true));
         run.sessionId = sessionId;
         run.cancel = () => { cancelled = true; slot.runtime.cancel(sessionId); };
         const toolTexts = new Set<string>();
@@ -1886,6 +1949,9 @@ class ExtensionHost implements vscode.Disposable {
           } else if (kind === 'tool_call' && typeof update.toolCallId === 'string' && !toolTexts.has(update.toolCallId)) {
             toolTexts.add(update.toolCallId);
             onTool(update.toolCallId, String(update.title || 'Tool'), undefined, 'running');
+          }
+          if (kind.startsWith('tool_call') && String(update.kind || '').toLowerCase() === 'read' && Array.isArray(update.locations)) {
+            this.noteRead(chat.mirror.cwd, (update.locations as Record<string, unknown>[]).find(item => typeof item.path === 'string')?.path);
           }
         };
         try {
@@ -2150,6 +2216,7 @@ class ExtensionHost implements vscode.Disposable {
       const locations = Array.isArray(update.locations) ? update.locations as Record<string, unknown>[] : [];
       const location = locations.find(item => typeof item.path === 'string')?.path;
       const detail = typeof location === 'string' ? location : typeof update.status === 'string' ? update.status : undefined;
+      if (rawKind === 'read') this.noteRead(chat.mirror.cwd, location);
       if (!chat.startedTools.has(id)) { chat.startedTools.add(id); chat.segment++; }
       this.sidebar.postMessage({ type: 'toolEvent', sessionId: chatId, entryId: `tool:${chat.turnEntryId}:${id}`, event: {
         id, kind: toolKind, title, detail,
@@ -2278,6 +2345,7 @@ class ExtensionHost implements vscode.Disposable {
         case 'setFeature': await this.setFeature(message.key, message.enabled); break;
         case 'saveReviewModel': await this.saveModelSetting('reviewModel', message.reviewModel); break;
         case 'saveNameModel': await this.saveModelSetting('nameModel', message.nameModel); break;
+        case 'saveSummaryModel': await this.saveModelSetting('summaryModel', message.summaryModel); break;
         case 'saveAccessibility': await this.saveAccessibility(message.accessibility); break;
         case 'deleteAllSessions': await this.deleteAllSessions(); break;
         case 'syncAction': await this.syncAction(message.action); break;
@@ -2375,4 +2443,4 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(host);
 }
 
-export function deactivate(): void { host?.dispose(); host = undefined; }
+export function deactivate(): Thenable<void> | undefined { const saved = host?.dispose(); host = undefined; return saved; }

@@ -11,9 +11,10 @@
   state.runStates ||= {};
   state.subagentProfiles ||= [];
   state.instructions ||= [];
-  state.features ||= { activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true };
+  state.features ||= { activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: false };
   state.nameModel ||= {};
   state.reviewModel ||= {};
+  state.summaryModel ||= {};
   state.jobs ||= {};
   state.slashCommands ||= [];
   state.accessibility ||= {};
@@ -971,7 +972,7 @@
       const main = document.createElement('div'); main.className = 'row-main';
       const title = document.createElement('div'); title.className = 'row-title'; title.textContent = profile.name;
       const meta = document.createElement('div'); meta.className = 'row-meta';
-      meta.textContent = [profile.model, profile.effort, profile.speed, profile.mode === 'edit' ? 'can edit' : 'read-only'].filter(Boolean).join(' · ');
+      meta.textContent = [profile.model, profile.effort, profile.speed, profile.mode === 'edit' ? 'can edit' : 'read-only', profile.tools === false ? 'no tools' : ''].filter(Boolean).join(' · ');
       main.append(title, meta);
       const actions = document.createElement('div'); actions.className = 'row-actions';
       actions.append(button('', 'Edit ' + profile.name, () => openSubagentForm(profile), 'icon-button', 'edit'), button('', 'Remove ' + profile.name, () => send({ type: 'removeSubagent', name: profile.name }), 'icon-button', 'delete'));
@@ -1086,6 +1087,7 @@
     el('subagent-description').value = profile?.description || '';
     fillSelect(el('subagent-model'), state.models.filter(item => item.enabled !== false).map(item => ({ value: item.id, label: item.name })), profile?.model);
     el('subagent-mode').value = profile?.mode || 'read-only';
+    el('subagent-tools').checked = profile?.tools !== false;
     updateSubagentOptions(profile);
   }
 
@@ -1262,6 +1264,7 @@
     { key: 'activityRail', icon: 'view_sidebar', title: 'Activity rail', desc: 'A rail left of the chat: gray while a chat runs, amber when it needs you, blue when it finished while you were elsewhere. When off, the top chat tabs return.' },
     { key: 'autoName', icon: 'title', title: 'Name chats automatically', desc: 'A name model turns your first message into a short title. Renaming a chat yourself keeps your name.' },
     { key: 'reviewAgent', icon: 'rate_review', title: 'Separate review agent', desc: 'A separate read-only agent reviews each /job round. When off, the chat agent reviews its own work in the same chat.' },
+    { key: 'fileSummaries', icon: 'summarize', title: 'File summaries', desc: 'When an agent first reads a file or edits one, a summary model writes a short summary of it: its purpose and bare definitions. Agents check summaries before reading whole files.' },
     { key: 'shareRules', icon: 'share', title: 'Share global rules and skills', desc: 'Before each Claude or Codex turn, copies your all-workspace rules and skills into that account. DSH already reads them.' },
     { key: 'editorContext', icon: 'code', title: 'Send editor context', desc: 'Adds your open files, cursor position, selection and diagnostics to each message.' },
     { key: 'mirror', icon: 'content_copy', title: 'Private workspace copy', desc: 'Each new chat edits its own copy of the workspace. Turn off to let agents edit your real files, so they see your changes and each other\'s. Applies to new chats.' },
@@ -1297,7 +1300,7 @@
   function renderCustomize() {
     const root = el('feature-list');
     // Skip identical rebuilds so an open select is not reset by unrelated state messages.
-    const key = JSON.stringify([state.features, state.nameModel, state.reviewModel, state.models.map(item => [item.id, item.enabled, item.effortOptions, item.speedOptions])]);
+    const key = JSON.stringify([state.features, state.nameModel, state.reviewModel, state.summaryModel, state.models.map(item => [item.id, item.enabled, item.effortOptions, item.speedOptions])]);
     if (key === customizeKey && root.childElementCount) return;
     customizeKey = key;
     rebuild(root, () => {
@@ -1311,6 +1314,7 @@
         });
         if (feature.key === 'autoName' && enabled) row.appendChild(featureModelFields('nameModel', 'saveNameModel', 'Name model', 'None (use the first message)', 'Pick a fast, cheap model. It only sees your first message.', 'Without a name model, chats are named after the first message.'));
         if (feature.key === 'reviewAgent' && enabled) row.appendChild(featureModelFields('reviewModel', 'saveReviewModel', 'Review model', 'Choose a model', 'It reads the working copy and checks every criterion.', 'Pick a model, or each /job stops when it reaches review.'));
+        if (feature.key === 'fileSummaries' && enabled) row.appendChild(featureModelFields('summaryModel', 'saveSummaryModel', 'Summary model', 'Choose a model', 'Pick a fast, cheap model. It runs in the background and only sees the files it summarizes.', 'Pick a model to start writing summaries.'));
         root.appendChild(row);
       }
     });
@@ -1706,7 +1710,7 @@
   el('subagent-form').onsubmit = event => {
     event.preventDefault();
     const profile = { name: el('subagent-name').value.trim(), description: el('subagent-description').value.trim() || undefined, model: el('subagent-model').value,
-      effort: el('subagent-effort').value || undefined, speed: el('subagent-speed').value || undefined, mode: el('subagent-mode').value };
+      effort: el('subagent-effort').value || undefined, speed: el('subagent-speed').value || undefined, mode: el('subagent-mode').value, tools: el('subagent-tools').checked };
     if (profile.name && profile.model) send({ type: 'saveSubagent', originalName: el('subagent-form').dataset.originalName || undefined, profile });
   };
   el('add-model').onclick = () => openModelForm();
@@ -1766,7 +1770,7 @@
       case 'subagentSaved': el('subagent-form').hidden = true; state.error = undefined; break;
       case 'instructionsState': state.instructions = message.items || []; break;
       case 'customizeState':
-        state.features = message.features || state.features; state.nameModel = message.nameModel || {}; state.reviewModel = message.reviewModel || {};
+        state.features = message.features || state.features; state.nameModel = message.nameModel || {}; state.reviewModel = message.reviewModel || {}; state.summaryModel = message.summaryModel || {};
         state.accessibility = message.accessibility || state.accessibility;
         applyAccessibility(state.accessibility);
         break;

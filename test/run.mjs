@@ -18,3 +18,4 @@ await import('./dsh-update.test.mjs');
 await import('./extension-update.test.mjs');
 await import('./update-plan.test.mjs');
 await import('./config-sync.test.mjs');
+await import('./summaries.test.mjs');

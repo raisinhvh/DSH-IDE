@@ -1,3 +1,11 @@
+/** Subagents get a bridge that only exposes custom toolpack tools, so they cannot delegate further. */
+export const TOOLPACK_SCOPE = 'toolpacks';
+
+/** Whether a bridge config offers delegate_task, as opposed to only toolpack tools. */
+export function canDelegate(delegate?: { env: Record<string, string> }): boolean {
+  return !!delegate && delegate.env.DSH_DELEGATE_SCOPE !== TOOLPACK_SCOPE;
+}
+
 /** DSH profiles are the only supported source of subagents. */
 export function delegationInstructions(available: boolean): string {
   return available

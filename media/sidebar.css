@@ -430,6 +430,8 @@ select, input { min-height: calc(30px * var(--text-scale, 1)); padding: 5px 8px;
 .inline-form h2 { margin: 0 0 5px; font-size: calc(13px * var(--text-scale, 1)); }
 .inline-form label { display: block; margin-top: 9px; font-weight: 600; }
 .inline-form label input, .inline-form label select { display: block; margin-top: 4px; font-weight: 400; }
+.inline-form label.check-row { display: flex; align-items: center; gap: 6px; }
+.inline-form label.check-row input { width: auto; min-height: 0; margin: 0; padding: 0; accent-color: var(--accent); }
 .optional, .helper { color: var(--muted); font-weight: 400; }
 .helper { margin: 4px 0; line-height: calc(1.4 * var(--line-scale, 1)); }
 .provider-install { margin-top: 6px; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--quiet-surface); }

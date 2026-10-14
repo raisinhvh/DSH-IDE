@@ -62,7 +62,7 @@ export function accessibilityStyle(value: SidebarAccessibility): { vars: Record<
     classes: [value.highContrast ? 'a11y-contrast' : '', value.largeTargets ? 'a11y-targets' : '', value.underlineLinks ? 'a11y-underline' : ''].filter(Boolean),
   };
 }
-export type SidebarFeatureKey = 'activityRail' | 'autoName' | 'shareRules' | 'editorContext' | 'reduceMotion' | 'updateChecks' | 'mirror' | 'reviewAgent';
+export type SidebarFeatureKey = 'activityRail' | 'autoName' | 'shareRules' | 'editorContext' | 'reduceMotion' | 'updateChecks' | 'mirror' | 'reviewAgent' | 'fileSummaries';
 export type SidebarFeatures = Record<SidebarFeatureKey, boolean>;
 /** Model that writes chat titles; an empty model keeps the first-message title. */
 export interface SidebarNameModel { model?: string; effort?: string; speed?: string }
@@ -107,6 +107,7 @@ export type SidebarWebviewMessage =
   | { type: 'setFeature'; key: SidebarFeatureKey; enabled: boolean }
   | { type: 'saveNameModel'; nameModel: SidebarNameModel }
   | { type: 'saveReviewModel'; reviewModel: SidebarNameModel }
+  | { type: 'saveSummaryModel'; summaryModel: SidebarNameModel }
   | { type: 'saveAccessibility'; accessibility: SidebarAccessibility }
   | { type: 'deleteAllSessions' }
   | { type: 'syncAction'; action: 'connect' | 'upload' | 'download' | 'disconnect' | 'openGist' }
@@ -139,6 +140,8 @@ export interface SidebarSubagentProfile {
   effort?: string;
   speed?: string;
   mode: 'read-only' | 'edit';
+  /** Whether the subagent gets custom toolpack tools. Missing means yes. */
+  tools?: boolean;
 }
 
 export interface SidebarInstruction {
@@ -266,7 +269,7 @@ export type SidebarHostMessage =
   | { type: 'modelRemoveFailed'; name: string }
   | { type: 'subagentProfilesState'; profiles: SidebarSubagentProfile[] }
   | { type: 'subagentSaved' }
-  | { type: 'customizeState'; features: SidebarFeatures; nameModel: SidebarNameModel; reviewModel: SidebarNameModel; accessibility: SidebarAccessibility }
+  | { type: 'customizeState'; features: SidebarFeatures; nameModel: SidebarNameModel; reviewModel: SidebarNameModel; summaryModel: SidebarNameModel; accessibility: SidebarAccessibility }
   | { type: 'jobState'; sessionId: string; job: SidebarJob | null }
   | { type: 'syncState'; sync: SidebarSync }
   | { type: 'instructionsState'; items: SidebarInstruction[] }
@@ -313,6 +316,7 @@ export interface SidebarViewState {
   features: SidebarFeatures;
   nameModel: SidebarNameModel;
   reviewModel: SidebarNameModel;
+  summaryModel: SidebarNameModel;
   slashCommands: SidebarSlashCommand[];
   jobs: Record<string, SidebarJob>;
   accessibility: SidebarAccessibility;
@@ -320,10 +324,10 @@ export interface SidebarViewState {
   error?: string;
 }
 
-export const defaultFeatures = (): SidebarFeatures => ({ activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false });
+export const defaultFeatures = (): SidebarFeatures => ({ activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: false });
 
 export const initialSidebarState = (): SidebarViewState => ({
-  page: 'chat', approvalMode: 'ask', subagentProfiles: [], instructions: [], toolpacks: [], features: defaultFeatures(), nameModel: {}, reviewModel: {}, slashCommands: SLASH_COMMANDS.map(command => ({ ...command })), jobs: {}, accessibility: defaultAccessibility(), sync: { connected: false, auto: true }, sessions: [], models: [], providerLabel: 'No provider', accountLabel: 'No account connected',
+  page: 'chat', approvalMode: 'ask', subagentProfiles: [], instructions: [], toolpacks: [], features: defaultFeatures(), nameModel: {}, reviewModel: {}, summaryModel: {}, slashCommands: SLASH_COMMANDS.map(command => ({ ...command })), jobs: {}, accessibility: defaultAccessibility(), sync: { connected: false, auto: true }, sessions: [], models: [], providerLabel: 'No provider', accountLabel: 'No account connected',
   accountConnected: false, accounts: [], dependencies: [], cursor: { connected: false, label: 'Not connected' },
   messages: {}, timeline: {}, tools: [], subagents: {}, diffs: [], runStates: {}, queues: {},
 });
@@ -427,6 +431,7 @@ export function getSidebarHtml(
     <label>Effort<select id="subagent-effort"></select></label>
     <label>Speed<select id="subagent-speed"></select></label>
     <label>Mode<select id="subagent-mode"><option value="read-only">Read-only</option><option value="edit">Can edit files (locked paths)</option></select></label>
+    <label class="check-row"><input id="subagent-tools" type="checkbox" checked> Can use toolpack tools</label>
     <div class="form-actions"><button type="button" class="text-button" id="subagent-cancel">Cancel</button><button type="submit" class="primary-button">Save subagent</button></div>
   </form>
 </section>

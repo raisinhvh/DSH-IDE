@@ -1,9 +1,11 @@
 import { createInterface } from 'node:readline';
+import { TOOLPACK_SCOPE } from '../runtime/delegation';
 import { normalizeToolpackResult } from '../toolpacks/result';
 
 const url = process.env.DSH_DELEGATE_URL || '';
 const token = process.env.DSH_DELEGATE_TOKEN || '';
 const owner = process.env.DSH_DELEGATE_OWNER || '';
+const toolpacksOnly = process.env.DSH_DELEGATE_SCOPE === TOOLPACK_SCOPE;
 
 type Json = Record<string, unknown>;
 
@@ -24,6 +26,8 @@ async function tools(): Promise<Json[]> {
         agents = list.map(agent => `- ${agent.name} (${agent.mode}, model ${agent.model})${agent.description ? `: ${agent.description}` : ''}`).join('\n');
         custom = Array.isArray(described.tools) ? described.tools as Json[] : [];
     } catch { /* the host may be unavailable; fall back to a generic description */ }
+    const customTools = custom.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema }));
+    if (toolpacksOnly) return customTools;
     return [
         {
             name: 'list_subagents',
@@ -73,7 +77,7 @@ async function tools(): Promise<Json[]> {
                 required: ['questions'],
             },
         },
-        ...custom.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema })),
+        ...customTools,
         {
             name: 'list_locked_files',
             description: 'List files currently locked by running subagents. Do not edit these until the subagent finishes.',
@@ -89,7 +93,9 @@ async function handle(message: Json): Promise<void> {
     try {
         if (method === 'initialize') {
             const params = (message.params || {}) as Json;
-            reply(id, { protocolVersion: typeof params.protocolVersion === 'string' ? params.protocolVersion : '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'dsh-delegate', version: '1.0.0' }, instructions: 'delegate_task is the DSH subagent command and replaces native subagent tools. Only configured profiles returned by list_subagents are available. Use their exact names; do not spawn native agents or substitute other models. ask_questions asks the user multiple-choice questions in the DSH chat. Other tools on this server come from custom toolpacks the user installed.' });
+            reply(id, { protocolVersion: typeof params.protocolVersion === 'string' ? params.protocolVersion : '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'dsh-delegate', version: '1.0.0' }, instructions: toolpacksOnly
+                ? 'Tools on this server come from custom toolpacks the user installed. They give access to external apps (for example Blender or Roblox Studio) that you cannot see through files.'
+                : 'delegate_task is the DSH subagent command and replaces native subagent tools. Only configured profiles returned by list_subagents are available. Use their exact names; do not spawn native agents or substitute other models. ask_questions asks the user multiple-choice questions in the DSH chat. Other tools on this server come from custom toolpacks the user installed.' });
         } else if (method === 'ping') reply(id, {});
         else if (method === 'tools/list') reply(id, { tools: await tools() });
         else if (method === 'tools/call') {

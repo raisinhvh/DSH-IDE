@@ -18,3 +18,4 @@ dist/toolpacks/**
 dist/update/**
 dist/sync/**
 debug.log
+.dsh/**
