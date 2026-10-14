@@ -26,7 +26,7 @@ async function fixture(reply = files => files.map(path => `=== SUMMARY ${path} =
     },
     enabled: () => enabled,
     log: () => undefined,
-    excluded: path => path.startsWith('.dsh/'),
+    excluded: path => path === '.dsh' || path.startsWith('.dsh/'),
   });
   return { dir, cwd, calls, summaries, disable: () => { enabled = false; } };
 }
@@ -62,7 +62,7 @@ test('reads are summarized in one batch, saved, and skipped once current', async
   summaries.request(cwd, join(cwd, 'src', 'a.ts'));
   summaries.request(cwd, 'src/b.ts');
   summaries.request(cwd, '.dsh/context/x.txt');
-  await until(async () => (await summaries.lookup(cwd, ['src'])).includes('Summary of src/b.ts'));
+  await until(async () => calls.length === 1);
   assert.deepEqual(calls, [['src/a.ts', 'src/b.ts']]);
   assert.equal(await summaries.lookup(cwd, ['src/a.ts']), 'File: src/a.ts\nSummary of src/a.ts');
   summaries.request(cwd, 'src/a.ts');
@@ -82,17 +82,33 @@ test('lookup writes missing summaries in one batch before replying', async () =>
   summaries.dispose();
 });
 
-test('changed files are rewritten when looked up, including through folders', async () => {
+test('changed files are rewritten when looked up', async () => {
   const { cwd, calls, summaries } = await fixture();
   await writeFile(join(cwd, 'src', 'a.ts'), 'one');
   await summaries.lookup(cwd, ['src/a.ts']);
   await writeFile(join(cwd, 'src', 'a.ts'), 'two');
   await wait(50);
   assert.equal(calls.length, 1);
-  assert.equal(await summaries.lookup(cwd, ['src']), 'File: src/a.ts\nSummary of src/a.ts');
+  assert.equal(await summaries.lookup(cwd, ['src/a.ts']), 'File: src/a.ts\nSummary of src/a.ts');
   assert.equal(calls.length, 2);
-  await summaries.lookup(cwd, ['.']);
+  await summaries.lookup(cwd, ['src/a.ts']);
   assert.equal(calls.length, 2);
+  summaries.dispose();
+});
+
+test('folders get a one-line overview from stored summaries and never write any', async () => {
+  const { cwd, calls, summaries } = await fixture(files => files.map(path => `=== SUMMARY ${path} ===\nPurpose: Does ${path}.\nexport a(): void`).join('\n'));
+  await mkdir(join(cwd, 'src', 'lib'));
+  await mkdir(join(cwd, '.dsh'));
+  await writeFile(join(cwd, 'src', 'a.ts'), 'one');
+  await writeFile(join(cwd, 'src', 'b.ts'), 'two');
+  await summaries.lookup(cwd, ['src/a.ts']);
+  await writeFile(join(cwd, 'src', 'a.ts'), 'changed');
+  const overview = 'Folder: src/\nlib/\na.ts: Does src/a.ts.\nb.ts (no summary yet)';
+  assert.equal(await summaries.lookup(cwd, ['src']), overview);
+  assert.equal(await summaries.lookup(cwd, ['src/']), overview);
+  assert.equal(await summaries.lookup(cwd, ['.']), 'Folder: ./\nsrc/');
+  assert.equal(calls.length, 1);
   summaries.dispose();
 });
 

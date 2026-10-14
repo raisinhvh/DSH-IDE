@@ -1915,9 +1915,16 @@ class ExtensionHost implements vscode.Disposable {
       : `You may edit ONLY these paths: ${files.join(', ')}. Do not touch anything else; other agents are working in parallel.`;
     const summaries = profile.tools !== false && this.summariesOn() ? `${SUMMARY_INSTRUCTIONS}\n\n` : '';
     const prompt = `You are a subagent working in a shared working copy on behalf of another agent. ${instructions}\n\n${delegationInstructions(false)}\n\n${summaries}Task:\n${task}\n\nWhen you finish, reply with a concise final report: findings, files changed, and anything the requester must still do.`;
-    const onText = (text: string): void => { reply += text; post({ text, messageId: 'reply' }); };
+    // Text after a tool call or a new model message starts a new paragraph instead of running on.
+    let gap = false;
+    const onText = (raw: string): void => {
+      const text = gap && reply.trim() && raw.trim() ? `${reply.endsWith('\n\n') ? '' : reply.endsWith('\n') ? '\n' : '\n\n'}${raw.trimStart()}` : raw;
+      if (raw.trim()) gap = false;
+      reply += text; post({ text, messageId: 'reply' });
+    };
     const onTool = (id: string, title: string, detail: string | undefined, state: 'running' | 'complete' | 'error'): void => {
       if (state !== 'running') return;
+      gap = true;
       post({ text: `${title}${detail ? `: ${detail.slice(0, 300)}` : ''}`, messageId: `tool:${id}`, role: 'tool' });
       this.noteRead(chat.mirror.cwd, readToolPath(title, detail));
     };
@@ -1930,7 +1937,7 @@ class ExtensionHost implements vscode.Disposable {
         await this.shareGlobalInstructions(route.oauthAccount);
         if (cancelled) throw new Error('Cancelled.');
         await cli.prompt({ account: route.oauthAccount, cwd: chat.mirror.cwd, backend, effort, speed, readOnly, fullAccess: this.approvalMode === 'full',
-          delegate: profile.tools === false ? undefined : this.delegateConfig(owner, true), prompt, onText, onTool, onApproval: (description, info) => this.decideApproval(chat, { owner, label: profile.name, readOnly }, description, info) });
+          delegate: profile.tools === false ? undefined : this.delegateConfig(owner, true), prompt, onText, onTool, onMessageBreak: () => { gap = true; }, onApproval: (description, info) => this.decideApproval(chat, { owner, label: profile.name, readOnly }, description, info) });
       } else {
         const slot = await this.ensureRuntime(route, chat.mirror.cwd, owner);
         if (!slot) throw new Error('No runtime is available for this subagent model.');

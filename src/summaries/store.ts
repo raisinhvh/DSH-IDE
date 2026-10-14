@@ -19,7 +19,7 @@ export interface SummaryOptions {
 
 export const SUMMARY_TOOL = {
   name: 'read_file_summaries',
-  description: 'Read short summaries of workspace files (purpose and bare function, class and type definitions) instead of whole files. Pass file paths or folders relative to the working copy; a folder returns every summary under it, and "." returns all of them. Missing or out-of-date summaries of the files asked for are written before the reply, which can take a few seconds. Read the file itself when you need exact code, and before editing it.',
+  description: 'Read short summaries of workspace files (purpose and bare function, class and type definitions) instead of whole files. Pass paths relative to the working copy. For a file, a missing or out-of-date summary is written before the reply, which can take a few seconds. A folder (or ".") gives a brief overview: its subfolders, and each file directly in it with the first line of its summary; files never summarized show only their name. Read the file itself when you need exact code, and before editing it.',
   inputSchema: {
     type: 'object',
     properties: { paths: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'Files or folders, relative to the working copy.' } },
@@ -27,14 +27,14 @@ export const SUMMARY_TOOL = {
   },
 };
 
-export const SUMMARY_INSTRUCTIONS = 'DSH file summaries: read_file_summaries on the dsh-delegate MCP server returns short summaries of workspace files (purpose and bare definitions). Summaries are your primary way to learn the codebase. IMPORTANT: always call read_file_summaries before reading any file, and pass a folder (or ".") to survey many files in one call. Read a whole file only when it is absolutely necessary: when you are about to edit it, or when you need exact code the summary does not give. Do not read files just to explore, to find where something lives, or to understand what they do; the summaries answer that. Never read the same file twice unless it has changed since you read it.';
+export const SUMMARY_INSTRUCTIONS = 'DSH file summaries: read_file_summaries on the dsh-delegate MCP server returns short summaries of workspace files (purpose and bare definitions). Summaries are your primary way to learn the codebase. IMPORTANT: always call read_file_summaries before reading any file, and pass several files in one call. A folder path gives only a brief one-line-per-file overview of what is directly in it; ask for the files themselves to get full summaries. Read a whole file only when it is absolutely necessary: when you are about to edit it, or when you need exact code the summary does not give. Do not read files just to explore or to understand what they do; find candidate files with search tools and check their summaries instead. Never read the same file twice unless it has changed since you read it.';
 
 const MAX_FILE_CHARS = 150_000;
 const BATCH_CHARS = 120_000;
 const BATCH_FILES = 8;
 const MAX_SUMMARY_CHARS = 6000;
 const MAX_LOOKUP_CHARS = 80_000;
-const MAX_FOLDER_ENTRIES = 200;
+const MAX_FOLDER_ENTRIES = 300;
 
 export const hashText = (text: string): string => createHash('sha256').update(text).digest('hex').slice(0, 16);
 
@@ -124,22 +124,21 @@ export class FileSummaries {
     return done;
   }
 
-  /** Reply for read_file_summaries, checked against the files in `cwd`. Missing and stale summaries are written first. */
+  /**
+   * Reply for read_file_summaries, checked against the files in `cwd`. Missing and stale file summaries are
+   * written first. Folders get an overview built from stored summaries, which never writes any.
+   */
   public async lookup(cwd: string, paths: string[]): Promise<string> {
     const data = await this.load();
-    const entries: ({ note: string } | { path: string; listed: boolean })[] = [];
+    const entries: ({ note: string } | { path: string })[] = [];
     for (const raw of paths) {
       const trimmed = raw.trim();
-      const all = !trimmed || /^[./\\]+$/.test(trimmed);
-      const rel = all ? '' : normalizePath(cwd, trimmed);
+      const root = !trimmed || /^[./\\]+$/.test(trimmed);
+      const rel = root ? '' : normalizePath(cwd, trimmed);
       if (rel === undefined) { entries.push({ note: `File: ${trimmed}\nOutside the working copy.` }); continue; }
       const stat = await fs.stat(join(cwd, rel)).catch(() => undefined);
-      if (!stat?.isDirectory()) { entries.push({ path: rel, listed: false }); continue; }
-      const prefix = rel ? `${rel}/` : '';
-      const under = Object.keys(data).filter(path => path.startsWith(prefix)).sort();
-      if (!under.length) { entries.push({ note: `File: ${rel || '.'}/\nNo summaries in this folder yet.` }); continue; }
-      entries.push(...under.slice(0, MAX_FOLDER_ENTRIES).map(path => ({ path, listed: true })));
-      if (under.length > MAX_FOLDER_ENTRIES) entries.push({ note: `(${under.length - MAX_FOLDER_ENTRIES} more summaries under ${rel || '.'}/ were left out; ask for narrower folders.)` });
+      if (stat?.isDirectory()) { entries.push({ note: await this.folderOverview(cwd, rel, data) }); continue; }
+      entries.push({ path: rel });
     }
     const texts = new Map<string, string | undefined>();
     for (const entry of entries) if ('path' in entry && !texts.has(entry.path)) texts.set(entry.path, await readText(join(cwd, entry.path)));
@@ -151,17 +150,30 @@ export class FileSummaries {
     for (const entry of entries) {
       let section: string;
       if ('note' in entry) section = entry.note;
-      else if (texts.get(entry.path) === undefined) {
-        if (entry.listed) continue;
-        section = `File: ${entry.path}\nNot found, or not a text file.`;
-      } else if (!data[entry.path]) section = `File: ${entry.path}\nNo summary could be written. Read the file.`;
+      else if (texts.get(entry.path) === undefined) section = `File: ${entry.path}\nNot found, or not a text file.`;
+      else if (!data[entry.path]) section = `File: ${entry.path}\nNo summary could be written. Read the file.`;
       else if (!current(entry.path)) section = `File: ${entry.path} (out of date: rewriting this summary failed; read the file for exact code)\n${data[entry.path].summary}`;
       else section = `File: ${entry.path}\n${data[entry.path].summary}`;
-      if (size + section.length > MAX_LOOKUP_CHARS) { sections.push('(Output limit reached; ask for fewer paths or narrower folders.)'); break; }
+      if (size + section.length > MAX_LOOKUP_CHARS) { sections.push('(Output limit reached; ask for fewer files.)'); break; }
       sections.push(section);
       size += section.length;
     }
     return sections.join('\n\n') || 'No summaries found.';
+  }
+
+  /** One line per entry directly in the folder: subfolders, then files with the first line of their stored summary. */
+  private async folderOverview(cwd: string, rel: string, data: Record<string, FileSummary>): Promise<string> {
+    const items = await fs.readdir(join(cwd, rel), { withFileTypes: true }).catch(() => []);
+    const path = (name: string): string => rel ? `${rel}/${name}` : name;
+    const shown = items.filter(item => (item.isDirectory() || item.isFile()) && !this.options.excluded?.(path(item.name)))
+      .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
+    const lines = shown.slice(0, MAX_FOLDER_ENTRIES).map(item => {
+      if (item.isDirectory()) return `${item.name}/`;
+      const first = data[path(item.name)]?.summary.split('\n').find(line => line.trim())?.trim().replace(/^Purpose:\s*/i, '');
+      return first ? `${item.name}: ${first.slice(0, 300)}` : `${item.name} (no summary yet)`;
+    });
+    if (shown.length > MAX_FOLDER_ENTRIES) lines.push(`(${shown.length - MAX_FOLDER_ENTRIES} more entries left out)`);
+    return `Folder: ${rel || '.'}/\n${lines.join('\n') || '(empty)'}`;
   }
 
   public dispose(): void {
