@@ -1609,7 +1609,10 @@
     const prompt = el('prompt');
     const query = slashTokenAt(prompt.value, prompt.selectionStart ?? prompt.value.length);
     if (query === null) { closeSlashMenu(); return; }
-    slashMatches = (state.slashCommands || []).filter(item => item.name.toLowerCase().startsWith(query.toLowerCase()));
+    // Running toolpacks double as commands: "/roblox" turns that pack on for the rest of the chat.
+    const packs = (state.toolpacks || []).filter(pack => pack.enabled && pack.state === 'running')
+      .map(pack => ({ name: pack.id, description: 'Turn on the ' + pack.id + ' toolpack for this chat', usage: '/' + pack.id }));
+    slashMatches = [...(state.slashCommands || []), ...packs].filter(item => item.name.toLowerCase().startsWith(query.toLowerCase()));
     if (!slashMatches.length) { closeSlashMenu(); return; }
     slashHighlight = 0;
     renderSlashMenu();

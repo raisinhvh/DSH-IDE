@@ -58,7 +58,20 @@ export class ToolpackRegistry {
         return [...this.entries.values()].filter(entry => entry.info.state === 'running').flatMap(entry => entry.descriptors);
     }
 
+    /** Running packs with their descriptions, for listing packs without their tools. */
+    public running(): { id: string; description: string }[] {
+        return [...this.entries.values()].filter(entry => entry.info.state === 'running').map(entry => ({ id: entry.info.id, description: entry.info.description }));
+    }
+
+    /** Agent-facing tools of the given running packs. */
+    public packDescriptors(ids: ReadonlySet<string>): ToolDescriptor[] {
+        return [...this.entries.values()].filter(entry => entry.info.state === 'running' && ids.has(entry.info.id)).flatMap(entry => entry.descriptors);
+    }
+
     public owns(tool: string): boolean { return !!this.find(tool); }
+
+    /** The id of the pack that owns `tool`. */
+    public packOf(tool: string): string | undefined { return this.find(tool)?.entry.info.id; }
 
     public async start(): Promise<void> {
         await fs.mkdir(this.options.dir, { recursive: true });

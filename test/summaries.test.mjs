@@ -53,6 +53,7 @@ test('replies split into one summary per requested file', () => {
   const parsed = parseSummaries('=== SUMMARY src/a.ts ===\nPurpose: A.\n\n=== SUMMARY src/b.ts ===\n```\nPurpose: B.\n```\n=== SUMMARY other.ts ===\nignored', ['src/a.ts', 'src/b.ts']);
   assert.deepEqual([...parsed], [['src/a.ts', 'Purpose: A.'], ['src/b.ts', 'Purpose: B.']]);
   assert.deepEqual([...parseSummaries('Purpose: lone file.', ['a.ts'])], [['a.ts', 'Purpose: lone file.']]);
+  assert.deepEqual([...parseSummaries('=== SUMMARY a.ts ===\nPurpose: A.\n=== END SUMMARY a.ts ===\n', ['a.ts'])], [['a.ts', 'Purpose: A.']]);
 });
 
 test('reads are summarized in one batch, saved, and skipped once current', async () => {

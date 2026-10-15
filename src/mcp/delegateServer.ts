@@ -1,6 +1,8 @@
 import { createInterface } from 'node:readline';
 import { TOOLPACK_SCOPE } from '../runtime/delegation';
 import { normalizeToolpackResult } from '../toolpacks/result';
+import { LOAD_TOOLPACK } from '../toolpacks/access';
+import { CHAT_HISTORY_TOOL } from '../runtime/handoff';
 
 const url = process.env.DSH_DELEGATE_URL || '';
 const token = process.env.DSH_DELEGATE_TOKEN || '';
@@ -79,6 +81,12 @@ async function tools(): Promise<Json[]> {
         },
         ...customTools,
         {
+            name: CHAT_HISTORY_TOOL,
+            description: 'Read earlier messages of this chat word for word, most recent last. Use it when a conversation summary you were given leaves out something you need.',
+            annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+            inputSchema: { type: 'object', properties: { count: { type: 'integer', minimum: 1, maximum: 100, description: 'How many of the most recent earlier messages to return (default 10).' } } },
+        },
+        {
             name: 'list_locked_files',
             description: 'List files currently locked by running subagents. Do not edit these until the subagent finishes.',
             annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
@@ -93,7 +101,7 @@ async function handle(message: Json): Promise<void> {
     try {
         if (method === 'initialize') {
             const params = (message.params || {}) as Json;
-            reply(id, { protocolVersion: typeof params.protocolVersion === 'string' ? params.protocolVersion : '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'dsh-delegate', version: '1.0.0' }, instructions: toolpacksOnly
+            reply(id, { protocolVersion: typeof params.protocolVersion === 'string' ? params.protocolVersion : '2024-11-05', capabilities: { tools: { listChanged: true } }, serverInfo: { name: 'dsh-delegate', version: '1.0.0' }, instructions: toolpacksOnly
                 ? 'Tools on this server come from custom toolpacks the user installed. They give access to external apps (for example Blender or Roblox Studio) that you cannot see through files.'
                 : 'delegate_task is the DSH subagent command and replaces native subagent tools. Only configured profiles returned by list_subagents are available. Use their exact names; do not spawn native agents or substitute other models. ask_questions asks the user multiple-choice questions in the DSH chat. Other tools on this server come from custom toolpacks the user installed.' });
         } else if (method === 'ping') reply(id, {});
@@ -104,7 +112,10 @@ async function handle(message: Json): Promise<void> {
             const content = result.content === undefined
                 ? [{ type: 'text', text: String(result.text ?? result.error ?? '') }]
                 : normalizeToolpackResult(result).content;
-            reply(id, { content, isError: result.isError === true || !!result.error });
+            const isError = result.isError === true || !!result.error;
+            reply(id, { content, isError });
+            // Loaded pack tools join the tool list; clients that follow list changes can call them directly.
+            if (params.name === LOAD_TOOLPACK && !isError) process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' }) + '\n');
         } else fail(id, -32601, `Method not found: ${String(method)}`);
     } catch (error) {
         reply(id, { content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }], isError: true });

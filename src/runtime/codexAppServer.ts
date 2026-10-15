@@ -241,7 +241,7 @@ export class CodexAppServerRuntime {
       const approvalPolicy = full ? 'never' : 'on-request';
       const sandbox = turn.readOnly ? 'read-only' : full ? 'danger-full-access' : 'workspace-write';
       // Override persisted thread/project settings on resume as well as start.
-      const delegation = { developerInstructions: delegationInstructions(canDelegate(turn.delegate)), config: {
+      const delegation = { developerInstructions: turn.system ?? delegationInstructions(canDelegate(turn.delegate)), config: {
         'features.multi_agent': false,
         ...(turn.delegate ? { 'mcp_servers.dsh-delegate.default_tools_approval_mode': 'approve', 'mcp_servers.dsh-delegate.enabled': true, 'mcp_servers.dsh-delegate.supports_parallel_tool_calls': true } : {}),
       } };

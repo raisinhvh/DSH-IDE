@@ -19,3 +19,5 @@ await import('./extension-update.test.mjs');
 await import('./update-plan.test.mjs');
 await import('./config-sync.test.mjs');
 await import('./summaries.test.mjs');
+await import('./toolpack-access.test.mjs');
+await import('./handoff.test.mjs');

@@ -62,9 +62,10 @@ export function summaryPrompt(files: { path: string; text: string }[]): string {
     'Definitions: every top-level or exported function, class, method, type and constant as a bare signature (name, parameters, return type), one per line, without bodies. Most definitions are self-explanatory from their name and signature and need no description. Only add a few words when the signature alone would leave a reader unsure what it does.',
     'Notes: only what someone using or editing the file could not tell from the signatures: state it reads or changes outside its own scope, I/O it performs (files, network, processes, storage), events or callbacks it registers, setup or call order it requires, assumptions callers must respect, and surprising behavior such as caching, retries or silently ignored errors. Leave notes out when there are none.',
     '',
-    'Write plain text with no Markdown: no headings, bullets, bold, tables or code fences. Be concise and factual, and describe only what is in the file. For data or config files, describe the purpose and structure instead.',
+    'Write plain text with no Markdown: no headings, bullets or dashes starting lines, bold, tables or code fences. Be concise and factual, and describe only what is in the file. For data or config files, describe the purpose and structure instead.',
+    'Keep each summary well under 40 lines; for large files, list only the definitions other files use and group minor helpers on one line.',
     '',
-    'Start each summary with a line "=== SUMMARY <path> ===" using the exact path given, and write nothing before the first one. Do not use tools.',
+    'Start each summary with a line "=== SUMMARY <path> ===" using the exact path given, write nothing before the first one, and do not add any closing line. Do not use tools.',
     ...files.map(file => `\n=== FILE ${file.path} ===\n${file.text}\n=== END FILE ${file.path} ===`),
   ].join('\n');
 }
@@ -72,7 +73,9 @@ export function summaryPrompt(files: { path: string; text: string }[]): string {
 /** Splits a summary reply into one summary per requested path. */
 export function parseSummaries(reply: string, paths: string[]): Map<string, string> {
   const result = new Map<string, string>();
-  const clean = (body: string): string => body.trim().replace(/^```[a-z]*\n/i, '').replace(/\n```$/, '').trim().slice(0, MAX_SUMMARY_CHARS);
+  // Models sometimes echo the "=== END FILE ===" wrapper as an END SUMMARY line; it is not part of the summary.
+  const clean = (body: string): string => body.replace(/^\s*=== END (?:SUMMARY|FILE) .*?===\s*$/gm, '').trim()
+    .replace(/^```[a-z]*\n/i, '').replace(/\n```$/, '').trim().slice(0, MAX_SUMMARY_CHARS);
   const marks = [...reply.matchAll(/^\s*=== SUMMARY (.+?) ===\s*$/gm)];
   marks.forEach((mark, index) => {
     const path = mark[1].trim();
@@ -189,7 +192,8 @@ export class FileSummaries {
       const parsed = JSON.parse(text) as unknown;
       if (!parsed || typeof parsed !== 'object') return {};
       return Object.fromEntries(Object.entries(parsed as Record<string, FileSummary>).filter(([, item]) =>
-        item && typeof item.hash === 'string' && typeof item.summary === 'string'));
+        item && typeof item.hash === 'string' && typeof item.summary === 'string')
+        .map(([path, item]) => [path, { ...item, summary: item.summary.replace(/\n*^\s*=== END (?:SUMMARY|FILE) .*?===\s*$/gm, '').trim() }]));
     }).catch(() => ({}));
   }
 

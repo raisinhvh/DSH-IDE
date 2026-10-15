@@ -30,6 +30,8 @@ import { AcpRuntime, RuntimeEvent } from './runtime/acp';
 import { OAuthCliRuntime } from './runtime/oauthCli';
 import { MirrorChange, mirrorPathExcluded, WorkspaceMirror } from './runtime/shadow';
 import { FileSummaries, readToolPath, SUMMARY_INSTRUCTIONS, SUMMARY_TOOL } from './summaries/store';
+import { buildHandoff, CHAT_HISTORY_TOOL, chatHistoryReply, ChatMessage, handoffSummaryPrompt, KEEP_WITH_TOOL } from './runtime/handoff';
+import { describePackTools, LOAD_TOOLPACK, loadToolpackTool, packCommands, RUN_TOOLPACK_TOOL, runToolpackTool } from './toolpacks/access';
 import { DshSidebarProvider, SidebarWebviewMessage } from './sidebar/provider';
 import { ApprovalMode, CursorAccountState, SidebarAccessibility, SidebarFeatureKey, SidebarFeatures, SidebarImage, SidebarJob, SidebarNameModel, SidebarQuestion, SidebarTimelineItem, SidebarSubagent, defaultFeatures, normalizeAccessibility } from './sidebar/view';
 
@@ -50,6 +52,8 @@ interface SessionRecord {
   /** The agent edits the real workspace instead of a private copy (dsh.runtime.mirror off when the chat was created). */
   direct?: boolean;
   effort?: string;
+  /** Toolpacks turned on in this chat, by a /pack command or an agent's load_toolpack call. */
+  toolpacks?: string[];
   updatedAt: number;
 }
 
@@ -136,6 +140,8 @@ interface Chat {
   subagentText: Map<string, string>;
   turnReply: string;
   handoffPending: boolean;
+  /** Instructions and editor context last sent into this agent session, so unchanged text is not repeated. */
+  sent?: { session: string; instructions: string; context: string };
   ownerId: string;
   runtime?: AcpRuntime;
   runtimeKey?: string;
@@ -243,7 +249,7 @@ class ExtensionHost implements vscode.Disposable {
     this.registerCommands();
     this.delegateHost.start({
       describe: () => this.subagentInfos(),
-      tools: () => this.bridgeTools(),
+      tools: owner => this.bridgeTools(owner),
       call: (owner, tool, args) => this.handleDelegateCall(owner, tool, args),
     }).catch(error => this.output.appendLine(`Subagent bridge failed to start: ${String(error)}`));
     const updateTimer = setTimeout(() => { void this.checkUpdates(); }, 5000);
@@ -910,10 +916,65 @@ class ExtensionHost implements vscode.Disposable {
     pending.resolve(answers);
   }
 
-  private toolpackTools(): DelegateToolInfo[] { return this.toolpacks.descriptors(); }
+  /**
+   * Tools every agent's bridge offers, subagents included: file summaries, and toolpacks listed one line per pack.
+   * Tools of packs turned on in the owner's chat are offered directly.
+   */
+  private bridgeTools(owner?: string): DelegateToolInfo[] {
+    const tools: DelegateToolInfo[] = this.summariesOn() ? [SUMMARY_TOOL] : [];
+    const packs = this.toolpacks.running();
+    if (packs.length) {
+      const chat = owner ? this.chatForOwner(owner) : undefined;
+      tools.push(loadToolpackTool(packs), runToolpackTool, ...this.toolpacks.packDescriptors(new Set(chat?.record.toolpacks || [])));
+    }
+    return tools;
+  }
 
-  /** Tools every agent's bridge offers, subagents included: file summaries and custom toolpacks. */
-  private bridgeTools(): DelegateToolInfo[] { return [...this.summariesOn() ? [SUMMARY_TOOL] : [], ...this.toolpackTools()]; }
+  /** The chat a bridge owner belongs to; a subagent's is its parent chat. */
+  private chatForOwner(owner: string): Chat | undefined {
+    return [...this.childRuns].find(item => item.owner === owner)?.parent ?? [...this.chats.values()].find(item => item.ownerId === owner);
+  }
+
+  /** Turns on packs in a chat and returns the ones that were newly turned on. */
+  private enablePacks(chat: Chat, ids: string[]): string[] {
+    const on = chat.record.toolpacks || [];
+    const added = ids.filter(id => !on.includes(id));
+    if (added.length) { chat.record.toolpacks = [...on, ...added]; void this.saveSession(chat.record); }
+    return added;
+  }
+
+  /** Packs the user named as "/pack" in a message, turned on for the rest of the chat. */
+  private turnOnPacks(chat: Chat, prompt: string): string[] {
+    return this.enablePacks(chat, packCommands(prompt, this.toolpacks.running().map(pack => pack.id)));
+  }
+
+  private loadToolpacks(chat: Chat, args: Record<string, unknown>): DelegateResult {
+    const asked = (Array.isArray(args.packs) ? args.packs : [args.packs ?? args.pack]).filter((item): item is string => typeof item === 'string').map(item => item.trim().toLowerCase());
+    const running = new Set(this.toolpacks.running().map(pack => pack.id));
+    const found = asked.filter(id => running.has(id));
+    const missing = asked.filter(id => !running.has(id));
+    if (!found.length) return { text: `No such running toolpack: ${missing.join(', ') || '(none given)'}. Available: ${[...running].join(', ') || '(none)'}.`, isError: true };
+    this.enablePacks(chat, found);
+    const tools = describePackTools(this.toolpacks.packDescriptors(new Set(found)));
+    return { text: `${missing.length ? `Not available: ${missing.join(', ')}.\n\n` : ''}Loaded ${found.join(', ')} for this chat. Tools:\n\n${tools}` };
+  }
+
+  private runPackTool(chat: Chat, args: Record<string, unknown>): Promise<DelegateResult> | DelegateResult {
+    const tool = typeof args.tool === 'string' ? args.tool.trim() : '';
+    const pack = this.toolpacks.packOf(tool);
+    if (!pack) return { text: `Unknown toolpack tool "${tool}". Call ${LOAD_TOOLPACK} first to see tool names.`, isError: true };
+    if (!chat.record.toolpacks?.includes(pack)) return { text: `Toolpack "${pack}" is not loaded. Call ${LOAD_TOOLPACK} with it first.`, isError: true };
+    const toolArgs = args.arguments && typeof args.arguments === 'object' && !Array.isArray(args.arguments) ? args.arguments as Record<string, unknown> : {};
+    return this.toolpacks.call(tool, toolArgs);
+  }
+
+  /** Handles the toolpack tools shared by main agents and subagents, or returns undefined for other tools. */
+  private packCall(chat: Chat, tool: string, args: Record<string, unknown>): Promise<DelegateResult> | DelegateResult | undefined {
+    if (tool === LOAD_TOOLPACK) return this.loadToolpacks(chat, args);
+    if (tool === RUN_TOOLPACK_TOOL) return this.runPackTool(chat, args);
+    if (this.toolpacks.owns(tool)) return this.toolpacks.call(tool, args);
+    return undefined;
+  }
 
   private summariesOn(): boolean { return this.feature('fileSummaries') && !!this.modelSetting('summaryModel').model; }
 
@@ -1588,19 +1649,36 @@ class ExtensionHost implements vscode.Disposable {
       if (chat.cancelRequested) return;
       const history = this.transcripts.get(record.id) || [];
       this.transcripts.set(record.id, history);
-      const handoff = chat.handoffPending && history.length
-        ? `Earlier conversation, for context:\n${history.map(item => `${item.role === 'user' ? 'User' : 'Assistant'}: ${item.text}`).join('\n\n')}\n\n` : '';
+      const bridged = !!this.delegateConfig(chat.ownerId);
+      const handoff = chat.handoffPending ? await this.handoffText(history, bridged, chat.mirror.cwd) : '';
+      if (chat.cancelRequested) return;
       chat.handoffPending = false;
       history.push({ role: 'user', text: historyPrompt + (fileContext.length ? '\nContext files:\n' + fileContext.join('\n') : '') });
       chat.turnReply = '';
-      const bridged = !!this.delegateConfig(chat.ownerId);
-      const fullPrompt = `${handoff}${this.editorContext(chat.mirror.direct)}\n\n${delegationInstructions(bridged)}\n\n${bridged && this.summariesOn() ? SUMMARY_INSTRUCTIONS + '\n\n' : ''}${fileContext.length ? 'Attached context files (read as needed):\n' + fileContext.join('\n') + '\n\n' : ''}User request:\n${prompt}`;
-      if (isOAuthProvider(record.provider)) {
+      const packsOn = this.turnOnPacks(chat, prompt);
+      // Claude and Codex take the fixed instructions as system/developer text on every run, so they never enter the
+      // conversation. Other runtimes get them once per session. Editor context is only resent when it changed.
+      const oauth = isOAuthProvider(record.provider);
+      const instructions = this.agentInstructions(chat, bridged);
+      const context = this.editorContext();
+      const session = oauth ? record.cliSessionId : this.rid(record);
+      const fresh = !session || chat.sent?.session !== session;
+      const sendInstructions = !oauth && (fresh || chat.sent?.instructions !== instructions);
+      const sendContext = !!context && (fresh || chat.sent?.context !== context);
+      const fullPrompt = [
+        handoff.trim(),
+        sendInstructions ? instructions : '',
+        sendContext ? context : '',
+        packsOn.length ? `The user turned on toolpacks: ${packsOn.join(', ')}. Use their tools directly if they are in your tool list; otherwise call ${LOAD_TOOLPACK} to see them.` : '',
+        fileContext.length ? 'Attached context files (read as needed):\n' + fileContext.join('\n') : '',
+        `User request:\n${prompt}`,
+      ].filter(Boolean).join('\n\n');
+      if (oauth) {
         const account = this.oauthAccounts.get(record.accountId);
         if (!account) throw new Error('The selected OAuth account is missing. Connect it again.');
         await this.shareGlobalInstructions(account);
         if (chat.cancelRequested) return;
-        record.cliSessionId = await chat.cli.prompt({ account, cwd: chat.mirror.cwd, backend: record.backend,
+        record.cliSessionId = await chat.cli.prompt({ account, cwd: chat.mirror.cwd, backend: record.backend, system: instructions,
           prompt: fullPrompt, sessionId: record.cliSessionId, effort: record.effort, readOnly: this.jobReadOnly(chat), fullAccess: this.approvalMode === 'full' && !this.jobReadOnly(chat), speed: this.choiceFor(this.availableModel(record.modelName)).speed,
           onText: postText,
           onMessageBreak: breakMessage,
@@ -1616,6 +1694,8 @@ class ExtensionHost implements vscode.Disposable {
         if (!chat.runtime) throw new Error('This chat has no running agent. Use "DSH: Restart Runtime" and try again.');
         await chat.runtime.prompt(this.rid(record), fullPrompt, imageAttachments);
       }
+      const sentTo = oauth ? record.cliSessionId : session;
+      if (sentTo) chat.sent = { session: sentTo, instructions, context };
     } catch (error) {
       if (!chat.cancelRequested) throw error;
     } finally {
@@ -1636,14 +1716,38 @@ class ExtensionHost implements vscode.Disposable {
     }
   }
 
-  private editorContext(direct: boolean): string {
-    const folder = this.root();
-    const scope = direct
+  /**
+   * Opening context for a new agent session: earlier messages summarized by the chat-naming model, plus the
+   * latest exchange word for word. Without a summary model, or if summarizing fails, more messages are kept instead.
+   */
+  private async handoffText(history: ChatMessage[], bridged: boolean, cwd: string): Promise<string> {
+    if (!history.length) return '';
+    let summary: string | undefined;
+    const older = history.slice(0, -KEEP_WITH_TOOL);
+    const choice = this.modelSetting('nameModel');
+    if (bridged && older.length && choice.model) {
+      try { summary = (await this.runOneShot({ ...choice, model: choice.model }, cwd, handoffSummaryPrompt(older))).trim() || undefined; }
+      catch (error) { this.output.appendLine(`Summarizing the chat for a new session failed: ${error instanceof Error ? error.message : String(error)}`); }
+    }
+    return buildHandoff(history, summary, bridged);
+  }
+
+  /** Fixed instructions for a chat's agent: where it works, delegation, file summaries and toolpacks. */
+  private agentInstructions(chat: Chat, bridged: boolean): string {
+    const scope = chat.mirror.direct
       ? 'You are editing the user\'s workspace directly. The user and other agents may change files between turns, so re-read a file before editing it.'
       : 'Work within this working copy. Proposed edits will be reviewed in the IDE before they reach the source workspace.';
-    if (!this.feature('editorContext')) {
-      return ['IDE context:', scope, `Workspace: ${folder.name}`].join('\n');
-    }
+    return [
+      `DSH IDE. Workspace: ${this.root().name}. ${scope}`,
+      delegationInstructions(bridged),
+      bridged && this.summariesOn() ? SUMMARY_INSTRUCTIONS : '',
+    ].filter(Boolean).join('\n\n');
+  }
+
+  /** The editor's current state, or nothing when editor context is turned off. */
+  private editorContext(): string {
+    if (!this.feature('editorContext')) return '';
+    const folder = this.root();
     const editor = vscode.window.activeTextEditor;
     const tabs = vscode.window.tabGroups.all.flatMap(group => group.tabs).map(tab => {
       const input = tab.input;
@@ -1651,8 +1755,6 @@ class ExtensionHost implements vscode.Disposable {
     }).filter((item): item is string => !!item && !item.startsWith('..')).slice(0, 20);
     const parts = [
       'IDE context (paths are relative to the working copy):',
-      scope,
-      `Workspace: ${folder.name}`,
       `Open files: ${tabs.join(', ') || '(none)'}`,
     ];
     if (editor && editor.document.uri.scheme === 'file') {
@@ -1847,7 +1949,7 @@ class ExtensionHost implements vscode.Disposable {
     if (child) {
       if (child.parent.cancelRequested) return { text: 'Cancelled.', isError: true };
       if (tool === SUMMARY_TOOL.name) return this.readSummaries(child.parent, args);
-      return this.toolpacks.owns(tool) ? this.toolpacks.call(tool, args) : { text: `Subagents may only use toolpack and file summary tools, not "${tool}".`, isError: true };
+      return this.packCall(child.parent, tool, args) ?? { text: `Subagents may only use toolpack and file summary tools, not "${tool}".`, isError: true };
     }
     const chat = [...this.chats.values()].find(item => item.ownerId === owner);
     if (!chat) return { text: 'This chat is no longer active.', isError: true };
@@ -1860,11 +1962,15 @@ class ExtensionHost implements vscode.Disposable {
       const locks = [...chat.locks];
       return { text: locks.length ? locks.map(([path, lock]) => `${path} (locked by subagent "${lock.label}")`).join('\n') : 'No files are locked.' };
     }
+    if (tool === CHAT_HISTORY_TOOL) {
+      // The running turn's own message is already in the agent's prompt.
+      const history = this.transcripts.get(chat.record.id) || [];
+      return { text: chatHistoryReply(chat.running ? history.slice(0, -1) : history, Number(args.count) || 10) };
+    }
     if (tool === 'delegate_task') return this.runSubagent(chat, args);
     if (tool === 'ask_questions') return this.askQuestions(chat, args);
     if (tool === SUMMARY_TOOL.name) return this.readSummaries(chat, args);
-    if (this.toolpacks.owns(tool)) return this.toolpacks.call(tool, args);
-    return { text: `Unknown tool "${tool}".`, isError: true };
+    return this.packCall(chat, tool, args) ?? { text: `Unknown tool "${tool}".`, isError: true };
   }
 
   private async runSubagent(chat: Chat, args: Record<string, unknown>): Promise<DelegateResult> {
@@ -1914,7 +2020,11 @@ class ExtensionHost implements vscode.Disposable {
       ? 'You are a READ-ONLY subagent. Do not modify, create or delete any files.'
       : `You may edit ONLY these paths: ${files.join(', ')}. Do not touch anything else; other agents are working in parallel.`;
     const summaries = profile.tools !== false && this.summariesOn() ? `${SUMMARY_INSTRUCTIONS}\n\n` : '';
-    const prompt = `You are a subagent working in a shared working copy on behalf of another agent. ${instructions}\n\n${delegationInstructions(false)}\n\n${summaries}Task:\n${task}\n\nWhen you finish, reply with a concise final report: findings, files changed, and anything the requester must still do.`;
+    const body = `${summaries}Task:\n${task}\n\nWhen you finish, reply with a concise final report of at most 300 words unless the task asks for more: findings, files changed, and anything the requester must still do.`;
+    const intro = `You are a subagent working in a shared working copy on behalf of another agent. ${instructions}`;
+    // Claude and Codex already get the delegation note as system text.
+    const prompt = `${intro}\n\n${delegationInstructions(false)}\n\n${body}`;
+    const cliPrompt = `${intro}\n\n${body}`;
     // Text after a tool call or a new model message starts a new paragraph instead of running on.
     let gap = false;
     const onText = (raw: string): void => {
@@ -1937,7 +2047,7 @@ class ExtensionHost implements vscode.Disposable {
         await this.shareGlobalInstructions(route.oauthAccount);
         if (cancelled) throw new Error('Cancelled.');
         await cli.prompt({ account: route.oauthAccount, cwd: chat.mirror.cwd, backend, effort, speed, readOnly, fullAccess: this.approvalMode === 'full',
-          delegate: profile.tools === false ? undefined : this.delegateConfig(owner, true), prompt, onText, onTool, onMessageBreak: () => { gap = true; }, onApproval: (description, info) => this.decideApproval(chat, { owner, label: profile.name, readOnly }, description, info) });
+          delegate: profile.tools === false ? undefined : this.delegateConfig(owner, true), prompt: cliPrompt, onText, onTool, onMessageBreak: () => { gap = true; }, onApproval: (description, info) => this.decideApproval(chat, { owner, label: profile.name, readOnly }, description, info) });
       } else {
         const slot = await this.ensureRuntime(route, chat.mirror.cwd, owner);
         if (!slot) throw new Error('No runtime is available for this subagent model.');

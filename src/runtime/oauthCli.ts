@@ -16,6 +16,8 @@ export interface CliTurn {
   readOnly?: boolean;
   delegate?: { command: string; args: string[]; env: Record<string, string> };
   prompt: string;
+  /** Fixed instructions sent as system (Claude) or developer (Codex) text on every run, instead of the default delegation note. */
+  system?: string;
   images?: { path: string; mimeType: string }[];
   sessionId?: string;
   onText(text: string): void;
@@ -50,7 +52,7 @@ export class OAuthCliRuntime {
       ? turn.sessionId
         ? ['-s', 'workspace-write', '-a', 'never', ...effort, 'exec', 'resume', '--json', '--skip-git-repo-check', '--ignore-user-config', ...(turn.backend === 'default' ? [] : ['-m', turn.backend]), turn.sessionId, '-']
         : ['-s', 'workspace-write', '-a', 'never', ...effort, 'exec', '--json', '--skip-git-repo-check', '--ignore-user-config', ...(turn.backend === 'default' ? [] : ['-m', turn.backend]), '-']
-      : ['--print', ...speedSettings, '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--permission-prompt-tool', 'stdio', '--disallowedTools', 'Agent,Task', '--append-system-prompt', delegationInstructions(canDelegate(turn.delegate)), ...(turn.delegate ? ['--mcp-config', JSON.stringify({ mcpServers: { 'dsh-delegate': turn.delegate } }), '--allowedTools', 'mcp__dsh-delegate'] : []), '--include-partial-messages', ...(turn.images?.length ? ['--add-dir', dirname(turn.images[0].path)] : []), '--permission-mode', 'default', ...(turn.effort ? ['--effort', turn.effort] : []), ...(turn.backend === 'default' ? [] : ['--model', turn.backend]), ...(turn.sessionId ? ['--resume', turn.sessionId] : [])];
+      : ['--print', ...speedSettings, '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--permission-prompt-tool', 'stdio', '--disallowedTools', 'Agent,Task', '--append-system-prompt', turn.system ?? delegationInstructions(canDelegate(turn.delegate)), ...(turn.delegate ? ['--mcp-config', JSON.stringify({ mcpServers: { 'dsh-delegate': turn.delegate } }), '--allowedTools', 'mcp__dsh-delegate'] : []), '--include-partial-messages', ...(turn.images?.length ? ['--add-dir', dirname(turn.images[0].path)] : []), '--permission-mode', 'default', ...(turn.effort ? ['--effort', turn.effort] : []), ...(turn.backend === 'default' ? [] : ['--model', turn.backend]), ...(turn.sessionId ? ['--resume', turn.sessionId] : [])];
     return new Promise<string | undefined>((resolve, reject) => {
       let buffer = '';
       let errorText = '';
