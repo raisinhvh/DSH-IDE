@@ -1,5 +1,5 @@
 import { createInterface } from 'node:readline';
-import { TOOLPACK_SCOPE } from '../runtime/delegation';
+import { CANCEL_SUBAGENT, TOOLPACK_SCOPE, WAIT_SUBAGENTS } from '../runtime/delegation';
 import { normalizeToolpackResult } from '../toolpacks/result';
 import { LOAD_TOOLPACK } from '../toolpacks/access';
 import { CHAT_HISTORY_TOOL } from '../runtime/handoff';
@@ -39,7 +39,7 @@ async function tools(): Promise<Json[]> {
         },
         {
             name: 'delegate_task',
-            description: `Run a task on a subagent (possibly a different model or provider) and wait for its final answer. Subagents see the same working copy.\nAvailable subagents:\n${agents || '(none configured)'}\nOmit "files" or pass an empty list to run any profile as read-only. Read-only subagents cannot modify files. For edit-capable profiles, a non-empty "files" list enables edits only to those paths. Those paths are locked to that subagent until it finishes, so neither you nor other subagents can edit them meanwhile. Use a trailing "/" to lock a whole directory.`,
+            description: `Run a task on a subagent (possibly a different model or provider). By default this waits for its final answer; with background: true it returns a task id at once so you can keep working, and you collect the result with ${WAIT_SUBAGENTS}. Subagents see the same working copy.\nAvailable subagents:\n${agents || '(none configured)'}\nOmit "files" or pass an empty list to run any profile as read-only. Read-only subagents cannot modify files. For edit-capable profiles, a non-empty "files" list enables edits only to those paths. Those paths are locked to that subagent until it finishes, so neither you nor other subagents can edit them meanwhile. Use a trailing "/" to lock a whole directory.`,
             // Claude Code only runs MCP tools concurrently when they are marked read-only. Edit subagents are still confined to their locked paths.
             annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
             inputSchema: {
@@ -48,9 +48,30 @@ async function tools(): Promise<Json[]> {
                     agent: { type: 'string', description: 'Exact configured profile name from list_subagents; not a model name or a native agent role.' },
                     task: { type: 'string', description: 'Complete, self-contained instructions for the subagent.' },
                     files: { type: 'array', items: { type: 'string' }, description: 'Optional paths (relative to the working copy) an edit-capable subagent may edit. Omit or pass an empty list to run read-only.' },
+                    background: { type: 'boolean', description: `Return a task id immediately instead of waiting, so you can keep working while the subagent runs. Collect its result with ${WAIT_SUBAGENTS}.` },
+                    after_turn: { type: 'string', enum: ['resume', 'hold', 'cancel'], description: 'Background only: what happens if your turn ends before you collect the result. "resume" (default): you get the results in a new turn as soon as all such subagents finish. "hold": the results are attached to the user\'s next message. "cancel": the subagent is stopped.' },
                 },
                 required: ['agent', 'task'],
             },
+        },
+        {
+            name: WAIT_SUBAGENTS,
+            description: 'Yield until background subagents finish and return their final reports. Results returned here are not sent to you again.',
+            annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    ids: { type: 'array', items: { type: 'string' }, description: 'Task ids from delegate_task. Omit to wait for every background subagent of this chat.' },
+                    any: { type: 'boolean', description: 'Return as soon as one of them finishes instead of waiting for all.' },
+                    timeout_seconds: { type: 'integer', minimum: 0, maximum: 3000, description: 'Stop waiting after this long and report which are still running (default 1800). 0 only checks status.' },
+                },
+            },
+        },
+        {
+            name: CANCEL_SUBAGENT,
+            description: 'Stop a background subagent started with delegate_task.',
+            annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+            inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'Task id from delegate_task.' } }, required: ['id'] },
         },
         {
             name: 'ask_questions',

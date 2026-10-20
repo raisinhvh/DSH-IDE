@@ -125,6 +125,7 @@ export type SidebarWebviewMessage =
   | { type: 'cursorLogout' }
   | { type: 'openAuthUrl'; url: string }
   | { type: 'openFile'; path: string; line?: number; column?: number }
+  | { type: 'openMedia'; file: string }
   | { type: 'openDiff'; diffId: string }
   | { type: 'applyDiff'; diffId: string }
   | { type: 'rejectDiff'; diffId: string }
@@ -175,9 +176,14 @@ export interface SidebarQuestion {
 export interface SidebarSession {
   id: string;
   name: string;
+  /** Material Symbols icon name the activity rail shows for this chat. */
+  icon?: string;
   updatedAt?: number;
   messageCount?: number;
 }
+
+/** A file an agent sent into the chat; `file` is relative to the sidebar's media base. */
+export interface SidebarMedia { name: string; mimeType: string; file: string }
 
 export interface SidebarModel {
   id: string;
@@ -247,7 +253,8 @@ export type SidebarTimelineItem =
   | { id: string; kind: 'subagent'; agentId: string }
   | { id: string; kind: 'diff'; diff: SidebarDiff }
   | { id: string; kind: 'approval'; title: string; detail: string; status: 'pending' | 'allowed' | 'rejected' }
-  | { id: string; kind: 'question'; questions: SidebarQuestion[]; status: 'pending' | 'answered' | 'skipped'; answers?: string[] };
+  | { id: string; kind: 'question'; questions: SidebarQuestion[]; status: 'pending' | 'answered' | 'skipped'; answers?: string[] }
+  | { id: string; kind: 'media'; caption?: string; items: SidebarMedia[] };
 
 export type SidebarHostMessage =
   | { type: 'timelineState'; sessionId: string; timeline: SidebarTimelineItem[]; subagents: Record<string, SidebarSubagent> }
@@ -279,6 +286,7 @@ export type SidebarHostMessage =
   | { type: 'assistantDelta'; sessionId: string; text: string; entryId?: string }
   | { type: 'assistantMessage'; sessionId: string; text: string; timestamp?: number }
   | { type: 'userMessage'; sessionId: string; text: string; entryId?: string }
+  | { type: 'mediaMessage'; sessionId: string; entryId: string; caption?: string; items: SidebarMedia[] }
   | { type: 'runState'; sessionId: string; state: 'idle' | 'thinking' | 'tool' | 'cancelling'; label?: string }
   | { type: 'toolEvent'; event: SidebarToolEvent; sessionId?: string; entryId?: string }
   | { type: 'toolState'; tools: SidebarToolEvent[] }
@@ -321,6 +329,8 @@ export interface SidebarViewState {
   jobs: Record<string, SidebarJob>;
   accessibility: SidebarAccessibility;
   sync: SidebarSync;
+  /** Webview URL of the folder agent-sent media is copied to, without a trailing slash. */
+  mediaBase?: string;
   error?: string;
 }
 
@@ -352,7 +362,7 @@ export function getSidebarHtml(
   return `<!doctype html>
 <html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}'; img-src data:; font-src ${webview.cspSource};">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}'; img-src data: ${webview.cspSource}; media-src ${webview.cspSource}; font-src ${webview.cspSource};">
 <style nonce="${nonce}">@font-face{font-family:'Material Symbols Rounded';font-style:normal;font-weight:100 700;src:url('${escapeHtml(assets.font)}') format('woff2')}:root{${rootVars}}</style>
 <link rel="stylesheet" href="${escapeHtml(assets.stylesheet)}">
 <title>DeepSeek Harness</title></head><body${bodyClasses ? ` class="${bodyClasses}"` : ''}>
@@ -409,7 +419,7 @@ export function getSidebarHtml(
     <label>Name<input id="model-name" maxlength="80" required placeholder="My model"></label>
     <label>Provider<select id="model-provider" required><option value="">Select a provider</option><option value="codex-cli">Codex (ChatGPT)</option><option value="claude-cli">Claude Code</option><option value="cursor-acp">Cursor</option><option value="deepseek-official">DeepSeek</option><option value="openrouter">OpenRouter</option></select></label>
     <label id="model-backend-field">Model ID<input id="model-backend" placeholder="Provider model ID"></label>
-    <label id="model-cursor-field" hidden>Cursor model<select id="model-cursor-backend"></select></label>
+    <label id="model-cursor-field" hidden>Cursor model<input id="model-cursor-backend" list="model-cursor-options" maxlength="120" spellcheck="false" autocomplete="off" placeholder="auto, or a model slug such as gpt-5"><datalist id="model-cursor-options"></datalist></label>
     <label>Account<select id="model-account"></select></label>
     <label>Speed options<input id="model-speed-options" placeholder="Choose a provider first"></label>
     <p id="model-speed-help" class="helper">The base model is None. Each speed choice routes to the model ID you enter.</p>

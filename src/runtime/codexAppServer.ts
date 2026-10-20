@@ -4,6 +4,7 @@ import type { CliTurn } from './oauthCli';
 import { canDelegate, delegationInstructions } from './delegation';
 import { codexServiceTier } from './models';
 import { cancellationDeadline, terminateProcessTree } from './cancellation';
+import { isUsageLimitText, UsageLimitError } from './limits';
 
 type Json = Record<string, unknown>;
 
@@ -83,6 +84,13 @@ export class CodexAppServerRuntime {
       else forceCancel();
     };
     const value = (item: Json, key: string): string | undefined => typeof item[key] === 'string' ? item[key] as string : undefined;
+    /** Message plus the error code, such as usageLimitExceeded, which may be a string or a one-key object. */
+    const errorText = (error: Json): string => {
+      const info = error.codexErrorInfo;
+      const code = typeof info === 'string' ? info : info && typeof info === 'object' ? Object.keys(info as Json).join(' ') : '';
+      return [value(error, 'message'), code].filter(Boolean).join(' ');
+    };
+    let lastError = '';
     const toolInfo = (item: Json): { title: string; detail?: string } | undefined => {
       const type = value(item, 'type');
       if (!type || type === 'agentMessage' || type === 'reasoning' || type === 'collabAgentToolCall' || type === 'subAgentActivity') return undefined;
@@ -188,12 +196,16 @@ export class CodexAppServerRuntime {
           }
         }
       }
+      if (method === 'error' && params.error && typeof params.error === 'object') lastError = errorText(params.error as Json) || lastError;
       if (method === 'turn/completed') {
         const item = params.turn as Json | undefined;
         if (!turnId || item?.id === turnId) {
           completed = true;
           const status = item && value(item, 'status');
-          if (status === 'failed' && !this.cancelled) failTurn(new Error('Codex turn failed. Check the selected account and model.'));
+          const reason = (item?.error && typeof item.error === 'object' ? errorText(item.error as Json) : '') || lastError;
+          if (status === 'failed' && !this.cancelled) failTurn(isUsageLimitText(reason)
+            ? new UsageLimitError(`Codex usage limit: ${reason.slice(0, 300)}`)
+            : new Error(`Codex turn failed.${reason ? ` ${reason.slice(0, 300)}` : ''} Check the selected account and model.`));
           else completeTurn();
         }
       }

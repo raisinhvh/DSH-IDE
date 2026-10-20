@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
-import { mkdir, writeFile, readFile } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative } from 'node:path';
+import { copyFile, mkdir, writeFile, readFile, rm, stat } from 'node:fs/promises';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
 import * as vscode from 'vscode';
 import { AccountRegistry, ModelEntry, ModelRegistry, ResolvedModel } from './accounts';
@@ -12,7 +12,9 @@ import { ReviewController, ReviewProposal } from './review/controller';
 import { DelegateAgentInfo, DelegateHost, DelegateResult, DelegateToolInfo } from './delegate/host';
 import { InstructionItem, InstructionRoots, listInstructions, locateInstruction, readInstruction, removeInstruction, saveInstruction } from './instructions/store';
 import { shareInstructions } from './instructions/share';
-import { chatTitlePrompt, cleanChatTitle, firstMessageTitle } from './runtime/naming';
+import { chatTitlePrompt, firstMessageTitle, parseChatName } from './runtime/naming';
+import { isUsageLimit } from './runtime/limits';
+import { MAX_MEDIA_BYTES, MAX_MEDIA_FILES, MEDIA_INSTRUCTIONS, mediaType, SEND_MEDIA, SEND_MEDIA_TOOL } from './runtime/media';
 import { ToolpackRegistry } from './toolpacks/registry';
 import { ConfigSync } from './sync/controller';
 import { SYNCED_SETTINGS } from './sync/configSync';
@@ -25,9 +27,9 @@ import { addDecision, createJob, runJob } from './goal/runner';
 import { parseSlash } from './slash/registry';
 import { terminateProcessTree } from './runtime/cancellation';
 import { answersByQuestion, formatAnswers, parseQuestions } from './sidebar/questions';
-import { delegationInstructions, isDelegationTool, isNativeSubagentTool, TOOLPACK_SCOPE } from './runtime/delegation';
+import { AfterTurn, CANCEL_SUBAGENT, delegationInstructions, isDelegationTool, isNativeSubagentTool, TOOLPACK_SCOPE, WAIT_SUBAGENTS } from './runtime/delegation';
 import { AcpRuntime, RuntimeEvent } from './runtime/acp';
-import { OAuthCliRuntime } from './runtime/oauthCli';
+import { CliTurn, OAuthCliRuntime } from './runtime/oauthCli';
 import { MirrorChange, mirrorPathExcluded, WorkspaceMirror } from './runtime/shadow';
 import { FileSummaries, readToolPath, SUMMARY_INSTRUCTIONS, SUMMARY_TOOL } from './summaries/store';
 import { buildHandoff, CHAT_HISTORY_TOOL, chatHistoryReply, ChatMessage, handoffSummaryPrompt, KEEP_WITH_TOOL } from './runtime/handoff';
@@ -41,6 +43,8 @@ interface SessionRecord {
   name: string;
   /** The user renamed this chat, so automatic titles must not replace the name. */
   renamed?: boolean;
+  /** Material Symbols icon the activity rail shows, picked by the name model. */
+  icon?: string;
   modelName: string;
   provider: string;
   backend: string;
@@ -102,14 +106,20 @@ interface ChildRun {
   changed: Set<string>;
   outOfScope: Set<string>;
   files: string[];
+  /** Started with background: true, so it outlives an interrupted parent turn. */
+  background?: boolean;
   runtimeKey?: string;
   sessionId?: string;
   onUpdate?(update: Record<string, unknown>): void;
   cancel(): void;
 }
+/** A subagent started with background: true, kept until the parent agent collects its result. */
+interface BackgroundTask { id: string; label: string; afterTurn: AfterTurn; done: boolean; result?: DelegateResult; finished: Promise<void>; run?: ChildRun }
 const PARENT: Actor = { owner: 'parent', label: '', readOnly: false };
 const EDIT_TOOLS = /^(Edit|Write|MultiEdit|NotebookEdit)$/;
 const DELEGATE_SERVER = 'dsh-delegate';
+/** How long an account that reported a usage limit is tried after the others. */
+const LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
 
 interface TurnOptions { shown?: string; job?: boolean; onFinish?(reply: string, cancelled: boolean): void }
 
@@ -147,6 +157,7 @@ interface Chat {
   runtimeKey?: string;
   locks: Map<string, { owner: string; label: string }>;
   children: Set<ChildRun>;
+  background: Map<string, BackgroundTask>;
 }
 
 class ExtensionHost implements vscode.Disposable {
@@ -215,7 +226,7 @@ class ExtensionHost implements vscode.Disposable {
         this.timelineTimer = undefined;
         void this.context.workspaceState.update(TIMELINES_KEY, this.timelines);
       }, 300);
-    });
+    }, vscode.Uri.joinPath(context.globalStorageUri, 'media'));
     this.sync = new ConfigSync(context, {
       roots: () => ({ ...this.instructionRoots(), toolpacks: join(context.globalStorageUri.fsPath, 'toolpacks') }),
       accounts: () => [...this.oauthAccounts.list(), ...this.accounts.list()].map(({ id, provider, label }) => ({ id, provider, label })),
@@ -355,7 +366,7 @@ class ExtensionHost implements vscode.Disposable {
 
   private trimChats(): void {
     // Bound retained runtimes/watchers while keeping recent navigation warm.
-    const idle = [...this.chats.values()].filter(chat => !chat.running && !chat.jobActive && chat.record.id !== this.active?.id && !this.chatLoads.has(chat.record.id));
+    const idle = [...this.chats.values()].filter(chat => !chat.running && !chat.jobActive && !chat.background.size && chat.record.id !== this.active?.id && !this.chatLoads.has(chat.record.id));
     for (const chat of idle.slice(0, Math.max(0, idle.length - 2))) void this.guarded(() => this.unloadChat(chat.record.id));
   }
 
@@ -572,6 +583,7 @@ class ExtensionHost implements vscode.Disposable {
     const record = this.sessions().find(item => item.id === id);
     if (!record) return;
     if (this.chats.get(id)?.jobActive) this.cancel(true, id);
+    else if (this.chats.get(id)?.background.size && !this.chats.get(id)?.running) this.cancel(true, id);
     else if (this.chats.get(id)?.running) throw new Error('Cancel this chat before deleting it.');
     const wasActive = this.active?.id === id || (!this.active && this.context.workspaceState.get<string>(ACTIVE_SESSION_KEY) === id);
     this.deletedSessions.add(id);
@@ -590,6 +602,7 @@ class ExtensionHost implements vscode.Disposable {
     // An in-flight creation must finish disposing its watcher before its files
     // are removed; otherwise copying and recursive deletion can race.
     await this.chatLoads.get(id)?.catch(() => undefined);
+    await rm(join(this.context.globalStorageUri.fsPath, 'media', id), { recursive: true, force: true }).catch(() => undefined);
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (folder?.uri.scheme === 'file') await WorkspaceMirror.remove(folder.uri, this.context.globalStorageUri.fsPath, record.mirrorId).catch(error => this.output.appendLine(`Could not remove chat files: ${String(error)}`));
   }
@@ -597,7 +610,7 @@ class ExtensionHost implements vscode.Disposable {
   private refreshSessions(): void {
     this.sidebar.postMessage({
       type: 'sessionState',
-      sessions: this.sessions().map(item => ({ id: item.id, name: item.name, updatedAt: item.updatedAt })),
+      sessions: this.sessions().map(item => ({ id: item.id, name: item.name, icon: item.icon, updatedAt: item.updatedAt })),
       activeSessionId: this.active?.id || this.context.workspaceState.get<string>(ACTIVE_SESSION_KEY),
     });
   }
@@ -853,20 +866,22 @@ class ExtensionHost implements vscode.Disposable {
     return { runtime, key };
   }
 
-  private readonly pendingApprovals = new Map<string, { sessionId: string; resolve: (allow: boolean) => void }>();
+  private readonly pendingApprovals = new Map<string, { sessionId: string; background: boolean; resolve: (allow: boolean) => void }>();
 
-  private askInChat(sessionId: string | undefined, title: string, detail: string): Promise<boolean> {
+  /** `background` marks a request from a background subagent, which stays open when the parent's turn ends. */
+  private askInChat(sessionId: string | undefined, title: string, detail: string, background = false): Promise<boolean> {
     if (!sessionId) return Promise.resolve(false);
     const id = randomUUID();
     void vscode.commands.executeCommand('workbench.view.extension.dsh');
     return new Promise<boolean>(resolve => {
-      this.pendingApprovals.set(id, { sessionId, resolve });
+      this.pendingApprovals.set(id, { sessionId, background, resolve });
       this.sidebar.postMessage({ type: 'approvalRequest', sessionId, id, title, detail: detail.slice(0, 2000) });
     });
   }
 
-  private settleChatApprovals(chatId: string): void {
-    for (const [id, pending] of [...this.pendingApprovals]) if (pending.sessionId === chatId) this.settleApproval(id, false);
+  /** Rejects a chat's open requests. With `keepBackground`, requests from background subagents stay open. */
+  private settleChatApprovals(chatId: string, keepBackground = false): void {
+    for (const [id, pending] of [...this.pendingApprovals]) if (pending.sessionId === chatId && !(keepBackground && pending.background)) this.settleApproval(id, false);
     for (const [id, pending] of [...this.pendingQuestions]) if (pending.sessionId === chatId) this.settleQuestion(id, null);
   }
 
@@ -921,7 +936,7 @@ class ExtensionHost implements vscode.Disposable {
    * Tools of packs turned on in the owner's chat are offered directly.
    */
   private bridgeTools(owner?: string): DelegateToolInfo[] {
-    const tools: DelegateToolInfo[] = this.summariesOn() ? [SUMMARY_TOOL] : [];
+    const tools: DelegateToolInfo[] = this.summariesOn() ? [SUMMARY_TOOL, SEND_MEDIA_TOOL] : [SEND_MEDIA_TOOL];
     const packs = this.toolpacks.running();
     if (packs.length) {
       const chat = owner ? this.chatForOwner(owner) : undefined;
@@ -1099,7 +1114,7 @@ class ExtensionHost implements vscode.Disposable {
     const chat: Chat = {
       record, mirror, review, cli: new OAuthCliRuntime(), running: false, cancelRequested: false, jobActive: false, jobCancelled: false, jobNotes: [], jobInterrupted: false, queue: [], turnEntryId: '',
       segment: 0, startedTools: new Set(), subagentIds: new Set(), delegationToolIds: new Set(), subagentText: new Map(), turnReply: '', handoffPending: false,
-      ownerId, runtime: slot?.runtime, runtimeKey: slot?.key, locks: new Map(), children: new Set(),
+      ownerId, runtime: slot?.runtime, runtimeKey: slot?.key, locks: new Map(), children: new Set(), background: new Map(),
     };
     this.chats.set(record.id, chat);
     return chat;
@@ -1226,7 +1241,8 @@ class ExtensionHost implements vscode.Disposable {
   private replayTranscript(id: string): void {
     if (this.sidebar.hasTimeline(id)) return;
     const saved = this.timelines[id];
-    if (saved) {
+    // Earlier versions could save an empty timeline over a chat's history on reload; its transcript still has the messages.
+    if (saved?.timeline.length || (saved && !this.transcripts.get(id)?.length)) {
       for (const entry of saved.timeline) {
         if (entry.kind === 'tool' && entry.event.state === 'running') entry.event.state = 'cancelled';
         if (entry.kind === 'approval' && entry.status === 'pending') entry.status = 'rejected';
@@ -1591,8 +1607,10 @@ class ExtensionHost implements vscode.Disposable {
       const account = selected && isOAuthProvider(selected.provider)
         ? selected.account && selected.account !== 'default' ? this.oauthAccounts.get(selected.account) : this.oauthAccounts.getDefault(selected.provider)
         : selected?.account && selected.account !== 'default' ? this.accounts.get(selected.account) : selected && this.accounts.getDefault(selected.provider);
+      // Claude and Codex accounts form one pool per provider, so a chat that failed over to another account stays on it.
+      const pooled = !!effective && isOAuthProvider(effective.provider) && this.oauthAccounts.get(this.active.accountId)?.provider === effective.provider;
       if (effective && (this.active.provider !== effective.provider || this.active.backend !== effective.backend || this.active.effort !== effort ||
-        (effective.provider !== 'cursor-acp' && account && this.active.accountId !== account.id))) await this.switchModel(target);
+        (effective.provider !== 'cursor-acp' && account && this.active.accountId !== account.id && !pooled))) await this.switchModel(target);
     }
     const chat = target;
     const record = chat.record;
@@ -1665,20 +1683,24 @@ class ExtensionHost implements vscode.Disposable {
       const fresh = !session || chat.sent?.session !== session;
       const sendInstructions = !oauth && (fresh || chat.sent?.instructions !== instructions);
       const sendContext = !!context && (fresh || chat.sent?.context !== context);
-      const fullPrompt = [
-        handoff.trim(),
+      // Background subagents that finished since the last turn ("hold" ones, or "resume" ones overtaken by this message).
+      const background = this.takeBackgroundResults(chat);
+      const buildPrompt = (opening: string, withContext: boolean): string => [
+        opening.trim(),
         sendInstructions ? instructions : '',
-        sendContext ? context : '',
+        withContext ? context : '',
         packsOn.length ? `The user turned on toolpacks: ${packsOn.join(', ')}. Use their tools directly if they are in your tool list; otherwise call ${LOAD_TOOLPACK} to see them.` : '',
         fileContext.length ? 'Attached context files (read as needed):\n' + fileContext.join('\n') : '',
+        background ? `Results from background subagents you started earlier:\n\n${background}` : '',
         `User request:\n${prompt}`,
       ].filter(Boolean).join('\n\n');
+      const fullPrompt = buildPrompt(handoff, sendContext);
       if (oauth) {
         const account = this.oauthAccounts.get(record.accountId);
         if (!account) throw new Error('The selected OAuth account is missing. Connect it again.');
         await this.shareGlobalInstructions(account);
         if (chat.cancelRequested) return;
-        record.cliSessionId = await chat.cli.prompt({ account, cwd: chat.mirror.cwd, backend: record.backend, system: instructions,
+        record.cliSessionId = await this.promptPooled(chat.cli, { account, cwd: chat.mirror.cwd, backend: record.backend, system: instructions,
           prompt: fullPrompt, sessionId: record.cliSessionId, effort: record.effort, readOnly: this.jobReadOnly(chat), fullAccess: this.approvalMode === 'full' && !this.jobReadOnly(chat), speed: this.choiceFor(this.availableModel(record.modelName)).speed,
           onText: postText,
           onMessageBreak: breakMessage,
@@ -1688,6 +1710,13 @@ class ExtensionHost implements vscode.Disposable {
           delegate: this.delegateConfig(chat.ownerId),
           onApproval: (description, info) => this.decideApproval(chat, PARENT, description, info),
           onQuestions: input => this.askNativeQuestions(chat, input),
+        }, () => chat.cancelRequested, async (next, failed) => {
+          // The new account has none of this chat's session, so it gets the conversation so far as a handoff.
+          record.accountId = next.id; record.cliSessionId = undefined;
+          await this.saveSession(record, false);
+          breakMessage();
+          postTool(`account:${randomUUID()}`, 'Account switch', `${failed.label} hit its usage limit; continuing on ${next.label}.`, 'complete');
+          return { prompt: buildPrompt(await this.handoffText(history.slice(0, -1), bridged, chat.mirror.cwd), !!context) };
         });
         await this.saveSession(record);
       } else {
@@ -1699,7 +1728,8 @@ class ExtensionHost implements vscode.Disposable {
     } catch (error) {
       if (!chat.cancelRequested) throw error;
     } finally {
-      this.settleChatApprovals(record.id);
+      this.settleChatApprovals(record.id, true);
+      for (const task of [...chat.background.values()]) if (!task.done && task.afterTurn === 'cancel') { chat.background.delete(task.id); task.run?.cancel(); }
       if (chat.turnReply.trim()) this.transcripts.get(record.id)?.push({ role: 'assistant', text: chat.turnReply.trim() });
       const reply = chat.turnReply;
       const cancelled = chat.cancelRequested;
@@ -1713,6 +1743,47 @@ class ExtensionHost implements vscode.Disposable {
       const next = chat.jobActive ? undefined : chat.queue.shift();
       if (next) this.postQueue(chat);
       if (next && this.chats.get(record.id) === chat) void this.guarded(() => this.sendPrompt(next.prompt, undefined, next.images, record.id));
+      else if (!next) this.backgroundSettled(chat);
+    }
+  }
+
+  /** Accounts of the same provider in failover order: `first`, then the rest in list order, with recently limited ones last. */
+  private accountPool(first: OAuthCliAccount): OAuthCliAccount[] {
+    const all = this.oauthAccounts.list(first.provider);
+    const index = all.findIndex(account => account.id === first.id);
+    const ordered = index < 0 ? [first, ...all] : [...all.slice(index), ...all.slice(0, index)];
+    const limited = (account: OAuthCliAccount): boolean => Date.now() - (this.limitedAt.get(account.id) || 0) < LIMIT_COOLDOWN_MS;
+    return [...ordered.filter(account => !limited(account)), ...ordered.filter(limited)];
+  }
+
+  /** When each account last reported a usage limit, so later runs try it last. */
+  private readonly limitedAt = new Map<string, number>();
+
+  /**
+   * Runs a Claude or Codex turn, moving on to the next account of the same provider each time one reports a usage limit.
+   * `retarget` adjusts the turn for the new account; the session id is always dropped because sessions belong to one account.
+   */
+  private async promptPooled(cli: OAuthCliRuntime, turn: CliTurn, cancelled: () => boolean,
+    retarget?: (next: OAuthCliAccount, failed: OAuthCliAccount) => Promise<Partial<CliTurn>> | Partial<CliTurn>): Promise<string | undefined> {
+    const pool = this.accountPool(turn.account);
+    let current = { ...turn, account: pool[0] };
+    if (current.account.id !== turn.account.id) {
+      await this.shareGlobalInstructions(current.account);
+      current = { ...current, sessionId: undefined, ...(await retarget?.(current.account, turn.account)) };
+    }
+    for (let index = 0; ; index++) {
+      try { return await cli.prompt(current); }
+      catch (error) {
+        if (!isUsageLimit(error) || cancelled()) throw error;
+        this.limitedAt.set(current.account.id, Date.now());
+        const next = pool[index + 1];
+        const message = error instanceof Error ? error.message : String(error);
+        this.output.appendLine(`${runtimeLabel(current.account.provider)} account "${current.account.label}" hit its usage limit: ${message}`);
+        if (!next) throw new Error(pool.length > 1 ? `All ${pool.length} ${runtimeLabel(current.account.provider)} accounts have hit their usage limits. ${message}` : message);
+        await this.shareGlobalInstructions(next);
+        if (cancelled()) throw error;
+        current = { ...current, account: next, sessionId: undefined, ...(await retarget?.(next, current.account)) };
+      }
     }
   }
 
@@ -1740,6 +1811,7 @@ class ExtensionHost implements vscode.Disposable {
     return [
       `DSH IDE. Workspace: ${this.root().name}. ${scope}`,
       delegationInstructions(bridged),
+      bridged ? MEDIA_INSTRUCTIONS : '',
       bridged && this.summariesOn() ? SUMMARY_INSTRUCTIONS : '',
     ].filter(Boolean).join('\n\n');
   }
@@ -1874,10 +1946,12 @@ class ExtensionHost implements vscode.Disposable {
     try {
       choice = this.modelSetting('nameModel');
       if (!this.feature('autoName') || !choice.model) return;
-      const title = cleanChatTitle(await this.runOneShot({ ...choice, model: choice.model }, cwd, chatTitlePrompt(prompt)));
+      const named = parseChatName(await this.runOneShot({ ...choice, model: choice.model }, cwd, chatTitlePrompt(prompt)));
       const record = this.chats.get(sessionId)?.record ?? this.sessions().find(item => item.id === sessionId);
-      if (!title || !record || record.renamed || this.deletedSessions.has(sessionId)) return;
-      record.name = title;
+      if (!named || !record || this.deletedSessions.has(sessionId)) return;
+      // A user rename keeps its name, but the chat still gets an icon.
+      if (!record.renamed) record.name = named.title;
+      if (named.icon) record.icon = named.icon;
       await this.saveSession(record, false);
     } catch (error) {
       this.output.appendLine(`Naming a chat with "${choice.model}" failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -1896,9 +1970,11 @@ class ExtensionHost implements vscode.Disposable {
     try {
       if ('oauthAccount' in route) {
         const cli = new OAuthCliRuntime();
-        limit(() => cli.cancel());
-        await cli.prompt({ account: route.oauthAccount, cwd, backend, effort: choice.effort, speed: choice.speed, readOnly: true, prompt,
-          onText: text => { reply += text; }, onTool: () => undefined, onApproval: async () => 'Tools are not available for this request.' });
+        let timedOut = false;
+        limit(() => { timedOut = true; cli.cancel(); });
+        await this.promptPooled(cli, { account: route.oauthAccount, cwd, backend, effort: choice.effort, speed: choice.speed, readOnly: true, prompt,
+          onText: text => { reply += text; }, onTool: () => undefined, onApproval: async () => 'Tools are not available for this request.' },
+        () => timedOut, () => { reply = ''; return {}; });
         return reply;
       }
       const slot = await this.ensureRuntime(route, cwd, `oneshot:${randomUUID()}`);
@@ -1947,8 +2023,9 @@ class ExtensionHost implements vscode.Disposable {
   private async handleDelegateCall(owner: string, tool: string, args: Record<string, unknown>): Promise<DelegateResult> {
     const child = [...this.childRuns].find(item => item.owner === owner);
     if (child) {
-      if (child.parent.cancelRequested) return { text: 'Cancelled.', isError: true };
+      if (child.parent.cancelRequested && !child.background) return { text: 'Cancelled.', isError: true };
       if (tool === SUMMARY_TOOL.name) return this.readSummaries(child.parent, args);
+      if (tool === SEND_MEDIA) return this.sendMedia(child.parent, args, child.label);
       return this.packCall(child.parent, tool, args) ?? { text: `Subagents may only use toolpack and file summary tools, not "${tool}".`, isError: true };
     }
     const chat = [...this.chats.values()].find(item => item.ownerId === owner);
@@ -1968,8 +2045,11 @@ class ExtensionHost implements vscode.Disposable {
       return { text: chatHistoryReply(chat.running ? history.slice(0, -1) : history, Number(args.count) || 10) };
     }
     if (tool === 'delegate_task') return this.runSubagent(chat, args);
+    if (tool === WAIT_SUBAGENTS) return this.waitSubagents(chat, args);
+    if (tool === CANCEL_SUBAGENT) return this.cancelSubagent(chat, args);
     if (tool === 'ask_questions') return this.askQuestions(chat, args);
     if (tool === SUMMARY_TOOL.name) return this.readSummaries(chat, args);
+    if (tool === SEND_MEDIA) return this.sendMedia(chat, args);
     return this.packCall(chat, tool, args) ?? { text: `Unknown tool "${tool}".`, isError: true };
   }
 
@@ -1981,10 +2061,102 @@ class ExtensionHost implements vscode.Disposable {
     if (!profile) return fail(`Unknown subagent "${name}". Available: ${this.subagentInfos().map(info => info.name).join(', ') || '(none)'}.`);
     if (!task) return fail('"task" is required.');
     const files = (Array.isArray(args.files) ? args.files : []).filter((item): item is string => typeof item === 'string');
-    return this.runSubagentCore(chat, profile, task, files);
+    if (args.background !== true) return this.runSubagentCore(chat, profile, task, files);
+    const afterTurn: AfterTurn = args.after_turn === 'hold' || args.after_turn === 'cancel' ? args.after_turn : 'resume';
+    const id = `bg-${randomUUID().slice(0, 8)}`;
+    const entry: BackgroundTask = { id, label: profile.name, afterTurn, done: false, finished: Promise.resolve() };
+    chat.background.set(id, entry);
+    entry.finished = this.runSubagentCore(chat, profile, task, files, run => { entry.run = run; })
+      .catch((error): DelegateResult => ({ text: `Subagent "${profile.name}" failed: ${error instanceof Error ? error.message : String(error)}`, isError: true }))
+      .then(result => { entry.done = true; entry.result = result; entry.run = undefined; this.backgroundSettled(chat); });
+    return { text: `Started subagent "${profile.name}" in the background as task ${id}. Keep working; call ${WAIT_SUBAGENTS} to yield until it finishes and get its report.`
+      + ` If your turn ends first: ${afterTurn === 'resume' ? 'its result is sent to you in a new turn' : afterTurn === 'hold' ? 'its result is attached to the user\'s next message' : 'it is cancelled'}.` };
   }
 
-  private async runSubagentCore(chat: Chat, profile: SubagentProfile, task: string, paths: string[]): Promise<DelegateResult> {
+  /** Background tasks finished and not yet collected, removed from the chat and formatted as one report. */
+  private takeBackgroundResults(chat: Chat, ids?: string[]): string {
+    const done = [...chat.background.values()].filter(task => task.done && (!ids || ids.includes(task.id)));
+    for (const task of done) chat.background.delete(task.id);
+    return done.map(task => `### ${task.id} (${task.label})${task.result?.isError ? ' FAILED' : ''}\n${task.result?.text || '(no report)'}`).join('\n\n');
+  }
+
+  private async waitSubagents(chat: Chat, args: Record<string, unknown>): Promise<DelegateResult> {
+    const asked = Array.isArray(args.ids) ? args.ids.filter((item): item is string => typeof item === 'string') : undefined;
+    const unknown = asked?.filter(id => !chat.background.has(id)) || [];
+    const tasks = [...chat.background.values()].filter(task => !asked || asked.includes(task.id));
+    if (!tasks.length) return { text: unknown.length ? `No background subagent with id ${unknown.join(', ')} is waiting to be collected.` : 'No background subagents are running or waiting to be collected.', isError: !!unknown.length };
+    const seconds = Number.isFinite(Number(args.timeout_seconds)) ? Math.max(0, Math.min(3000, Number(args.timeout_seconds))) : 1800;
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<void>(resolve => { timer = setTimeout(resolve, seconds * 1000); });
+    // Cancelling the parent turn ends the wait; the subagents themselves keep running unless cancelled.
+    const stopped = new Promise<void>(resolve => { const poll = setInterval(() => { if (chat.cancelRequested || !chat.running) { clearInterval(poll); resolve(); } }, 200); void timeout.then(() => clearInterval(poll)); });
+    const finished = args.any === true ? Promise.race(tasks.map(task => task.finished)) : Promise.all(tasks.map(task => task.finished));
+    try { await Promise.race([finished, timeout, stopped]); } finally { clearTimeout(timer); }
+    const report = this.takeBackgroundResults(chat, tasks.map(task => task.id));
+    const running = tasks.filter(task => !task.done).map(task => `${task.id} (${task.label})`);
+    return { text: [report, running.length ? `Still running: ${running.join(', ')}.` : '', unknown.length ? `Unknown ids: ${unknown.join(', ')}.` : ''].filter(Boolean).join('\n\n') || 'Nothing finished yet.' };
+  }
+
+  private cancelSubagent(chat: Chat, args: Record<string, unknown>): DelegateResult {
+    const id = typeof args.id === 'string' ? args.id.trim() : '';
+    const task = chat.background.get(id);
+    if (!task) return { text: `No background subagent with id "${id}".`, isError: true };
+    chat.background.delete(id);
+    task.run?.cancel();
+    return { text: `Cancelled background subagent ${id} (${task.label}).` };
+  }
+
+  /** Called when a background subagent finishes: once every "resume" task of an idle chat is done, their results start a new turn. */
+  private backgroundSettled(chat: Chat): void {
+    const id = chat.record.id;
+    if (this.deletedSessions.has(id) || this.chats.get(id) !== chat || chat.running || chat.jobActive || this.promptStarts.has(id)) return;
+    const tasks = [...chat.background.values()];
+    if (tasks.some(task => !task.done)) { this.postRun(id, 'tool', `${tasks.filter(task => !task.done).length} subagent${tasks.filter(task => !task.done).length === 1 ? '' : 's'} working…`); return; }
+    this.postRun(id, 'idle', 'Ready');
+    const ready = tasks.filter(task => task.afterTurn === 'resume');
+    if (!ready.length) return;
+    const labels = ready.map(task => task.label).join(', ');
+    void this.guarded(() => this.sendPrompt(`Background subagent results (your earlier turn ended before you collected them). Continue the task with them.\n\n${this.takeBackgroundResults(chat, ready.map(task => task.id))}`,
+      undefined, [], id, 'queue', { shown: `Subagent results: ${labels}` }));
+  }
+
+  /** Copies files an agent sent into extension storage and shows them in the chat. */
+  private async sendMedia(chat: Chat, args: Record<string, unknown>, from?: string): Promise<DelegateResult> {
+    const paths = (Array.isArray(args.paths) ? args.paths : typeof args.path === 'string' ? [args.path] : []).filter((item): item is string => typeof item === 'string' && !!item.trim());
+    if (!paths.length) return { text: '"paths" must list at least one file.', isError: true };
+    if (paths.length > MAX_MEDIA_FILES) return { text: `Send at most ${MAX_MEDIA_FILES} files at a time.`, isError: true };
+    const dir = join(this.context.globalStorageUri.fsPath, 'media', chat.record.id);
+    await mkdir(dir, { recursive: true });
+    const items: { name: string; mimeType: string; file: string }[] = [];
+    const problems: string[] = [];
+    for (const raw of paths) {
+      const source = isAbsolute(raw) ? raw : resolvePath(chat.mirror.cwd, raw);
+      try {
+        const info = await stat(source);
+        if (!info.isFile()) { problems.push(`${raw}: not a file`); continue; }
+        if (info.size > MAX_MEDIA_BYTES) { problems.push(`${raw}: larger than ${MAX_MEDIA_BYTES / 1024 / 1024} MB`); continue; }
+        const name = `${randomUUID()}${extname(source).toLowerCase().slice(0, 12)}`;
+        await copyFile(source, join(dir, name));
+        items.push({ name: basename(source), mimeType: mediaType(source), file: `${chat.record.id}/${name}` });
+      } catch (error) { problems.push(`${raw}: ${error instanceof Error ? error.message : String(error)}`); }
+    }
+    if (!items.length) return { text: `No files were sent. ${problems.join('; ')}`, isError: true };
+    const caption = typeof args.caption === 'string' && args.caption.trim() ? args.caption.trim().slice(0, 4000) : undefined;
+    // Media from the parent's own turn is placed between its text segments, like a tool call.
+    if (!from && chat.running) chat.segment++;
+    this.sidebar.postMessage({ type: 'mediaMessage', sessionId: chat.record.id, entryId: `media:${randomUUID()}`, caption: from ? `**${from}:** ${caption || ''}`.trim() : caption, items });
+    return { text: `Shown to the user: ${items.map(item => item.name).join(', ')}.${problems.length ? ` Not sent: ${problems.join('; ')}` : ''}` };
+  }
+
+  private async openMedia(file: string): Promise<void> {
+    const root = join(this.context.globalStorageUri.fsPath, 'media');
+    const path = resolvePath(root, file);
+    const rel = relative(root, path);
+    if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw new Error('That file is not in the chat media folder.');
+    await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(path));
+  }
+
+  private async runSubagentCore(chat: Chat, profile: SubagentProfile, task: string, paths: string[], onBackground?: (run: ChildRun) => void): Promise<DelegateResult> {
     const fail = (text: string): DelegateResult => ({ text, isError: true });
     const name = profile.name;
     const entry = this.availableModel(profile.model);
@@ -2008,8 +2180,9 @@ class ExtensionHost implements vscode.Disposable {
     const post = (event: { title?: string; prompt?: string; model?: string; state?: 'running' | 'complete' | 'error'; files?: string[]; text?: string; messageId?: string; role?: 'assistant' | 'tool' }): void => {
       this.sidebar.postMessage({ type: 'subagentEvent', sessionId: chat.record.id, agentId, ...event });
     };
-    const run: ChildRun = { parent: chat, owner, label: profile.name, readOnly, changed: new Set(), outOfScope: new Set(), files: readOnly ? [] : files, cancel: () => undefined };
+    const run: ChildRun = { parent: chat, owner, label: profile.name, readOnly, changed: new Set(), outOfScope: new Set(), files: readOnly ? [] : files, background: !!onBackground, cancel: () => undefined };
     this.childRuns.add(run); chat.children.add(run);
+    onBackground?.(run);
     if (!readOnly) for (const file of files) chat.locks.set(file, { owner, label: profile.name });
     const modelLabel = `${entry.name}${profile.effort ? ` · ${profile.effort}` : ''}${speed ? ` · ${speed}` : ''}`;
     post({ title: profile.name, prompt: task, model: modelLabel, state: 'running', files: readOnly ? [] : files });
@@ -2046,8 +2219,9 @@ class ExtensionHost implements vscode.Disposable {
         run.cancel = () => { cancelled = true; cli.cancel(); };
         await this.shareGlobalInstructions(route.oauthAccount);
         if (cancelled) throw new Error('Cancelled.');
-        await cli.prompt({ account: route.oauthAccount, cwd: chat.mirror.cwd, backend, effort, speed, readOnly, fullAccess: this.approvalMode === 'full',
-          delegate: profile.tools === false ? undefined : this.delegateConfig(owner, true), prompt: cliPrompt, onText, onTool, onMessageBreak: () => { gap = true; }, onApproval: (description, info) => this.decideApproval(chat, { owner, label: profile.name, readOnly }, description, info) });
+        await this.promptPooled(cli, { account: route.oauthAccount, cwd: chat.mirror.cwd, backend, effort, speed, readOnly, fullAccess: this.approvalMode === 'full',
+          delegate: profile.tools === false ? undefined : this.delegateConfig(owner, true), prompt: cliPrompt, onText, onTool, onMessageBreak: () => { gap = true; }, onApproval: (description, info) => this.decideApproval(chat, { owner, label: profile.name, readOnly }, description, info) },
+        () => cancelled, (next, failed) => { post({ text: `Account switch: ${failed.label} hit its usage limit; continuing on ${next.label}`, messageId: `account:${next.id}`, role: 'tool' }); gap = true; return {}; });
       } else {
         const slot = await this.ensureRuntime(route, chat.mirror.cwd, owner);
         if (!slot) throw new Error('No runtime is available for this subagent model.');
@@ -2112,12 +2286,14 @@ class ExtensionHost implements vscode.Disposable {
     if (!chat) return;
     if (clearQueue && chat.jobActive) { chat.jobCancelled = true; chat.jobNotes = []; }
     if (chat.jobActive || clearQueue) for (const child of [...chat.children]) child.cancel();
+    // Cancel stops background subagents too; a message that interrupts the turn leaves them running.
+    if (clearQueue) chat.background.clear();
     if (clearQueue && chat.queue.length) { chat.queue = []; this.postQueue(chat); }
-    this.settleChatApprovals(chat.record.id);
+    this.settleChatApprovals(chat.record.id, !clearQueue);
     if (chat.running) {
       chat.cancelRequested = true;
       this.postRun(chat.record.id, 'cancelling', 'Cancelling…');
-      for (const child of [...chat.children]) child.cancel();
+      for (const child of [...chat.children]) if (!child.background) child.cancel();
       if (isOAuthProvider(chat.record.provider)) chat.cli.cancel(); else chat.runtime?.cancel(this.rid(chat.record));
     }
   }
@@ -2178,11 +2354,10 @@ class ExtensionHost implements vscode.Disposable {
     }
     if (!Array.isArray(effortOptions) || effortOptions.length > 10 || effortOptions.some(item => typeof item !== 'string' || !/^[a-z][a-z0-9_-]{0,29}$/.test(item)) ||
       new Set(effortOptions).size !== effortOptions.length) throw new Error('Effort choices must be distinct provider effort values.');
-    if (message.provider === 'cursor-acp' && backend !== 'auto' && !this.cursorModels.some(model => model.backend === backend)) {
-      throw new Error('Start a Cursor session to load its available models before choosing one.');
-    }
-    if (message.provider === 'cursor-acp' && speedOptions.some(item => item.backend !== 'auto' && !this.cursorModels.some(model => model.backend === item.backend))) {
-      throw new Error('A speed route uses a Cursor model that is not available. Start a Cursor session to refresh its models.');
+    // Cursor models may be typed as slugs before a session has listed them; Cursor itself rejects unknown ones when the chat starts.
+    const cursorSlug = /^[A-Za-z0-9][A-Za-z0-9._:/@[\]=,+-]{0,119}$/;
+    if (message.provider === 'cursor-acp' && [backend, ...speedOptions.map(item => item.backend)].some(slug => !cursorSlug.test(slug))) {
+      throw new Error('Cursor model slugs may only use letters, digits and . _ : / @ [ ] = , + -');
     }
     if (message.provider !== 'cursor-acp' && account !== 'default' &&
       (isOAuthProvider(message.provider) ? this.oauthAccounts.get(account)?.provider : this.accounts.get(account)?.provider) !== message.provider) {
@@ -2380,7 +2555,8 @@ class ExtensionHost implements vscode.Disposable {
   }
 
   private async decideApprovalInner(chat: Chat, actor: Actor, description: string, info?: ToolInfo): Promise<boolean | string> {
-    if (chat.cancelRequested) return false;
+    const background = !!this.backgroundRun(actor.owner);
+    if (chat.cancelRequested && !background) return false;
     if (!vscode.workspace.isTrusted) return false;
     if (info && this.jobReadOnly(chat) && (EDIT_TOOLS.test(info.tool) || info.autoAllowEdits)) return 'The job is in a read-only phase (drafting or reviewing); do not edit files.';
     if (info && isNativeSubagentTool(info.tool)) return 'Use DSH delegate_task with a configured subagent profile.';
@@ -2392,7 +2568,12 @@ class ExtensionHost implements vscode.Disposable {
       if (info.autoAllowEdits) return true;
     }
     if (this.approvalMode === 'full' || (this.approvalMode === 'auto' && !isRiskyAction(description))) return true;
-    return this.askInChat(chat.record.id, actor.owner === PARENT.owner ? 'Permission requested' : `Subagent "${actor.label}" requests permission`, description);
+    return this.askInChat(chat.record.id, actor.owner === PARENT.owner ? 'Permission requested' : `Subagent "${actor.label}" requests permission`, description, background);
+  }
+
+  private backgroundRun(owner: string): ChildRun | undefined {
+    const run = [...this.childRuns].find(item => item.owner === owner);
+    return run?.background ? run : undefined;
   }
 
   private relPath(chat: Chat, input: Record<string, unknown>): string | undefined {
@@ -2543,6 +2724,7 @@ class ExtensionHost implements vscode.Disposable {
           }
           break;
         }
+        case 'openMedia': await this.openMedia(String(message.file || '')); break;
         case 'applyDiff': await this.review?.apply(message.diffId); break;
         case 'openDiff': await this.review?.open(message.diffId); break;
         case 'rejectDiff': await this.review?.reject(message.diffId); break;

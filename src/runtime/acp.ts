@@ -151,9 +151,16 @@ export class AcpRuntime implements vscode.Disposable {
   }
 
   public async setModel(sessionId: string, model: string): Promise<void> {
-    const options = this.models(sessionId);
-    if (!options.some(option => option.value === model)) throw new Error(`Model '${model}' is unavailable in this agent session.`);
-    const result = await this.request('session/set_config_option', { sessionId, configId: 'model', value: model });
+    // Typed slugs may differ in case from the listed values, or name a model the session did not list; the agent has the final say.
+    const wanted = model.trim().toLowerCase();
+    const listed = this.models(sessionId).find(option => option.value === model)
+      ?? this.models(sessionId).find(option => option.value.toLowerCase() === wanted || option.name.toLowerCase() === wanted);
+    let result: Json;
+    try { result = await this.request('session/set_config_option', { sessionId, configId: 'model', value: listed?.value ?? model.trim() }); }
+    catch (error) {
+      if (listed) throw error;
+      throw new Error(`Cursor did not accept the model '${model}'. Check the slug (run "agent models" in a terminal to list them). ${error instanceof Error ? error.message : String(error)}`);
+    }
     this.recordModels(sessionId, result);
   }
 

@@ -46,7 +46,7 @@ function navigationHost(records) {
 
 function promptChat(record, calls = []) {
   return {
-    record, running: false, cancelRequested: false, queue: [], turnEntryId: '', segment: 0,
+    record, running: false, cancelRequested: false, queue: [], background: new Map(), turnEntryId: '', segment: 0,
     startedTools: new Set(), subagentIds: new Set(), delegationToolIds: new Set(), subagentText: new Map(),
     turnReply: '', handoffPending: false, ownerId: 'owner', mirror: { cwd: '/workspace', beginTurn: async () => {}, endTurn: async () => { calls.push('scan'); } },
     runtime: { isRunning: true, prompt: async (_id, prompt) => { calls.push(['runtime prompt', prompt]); } },
@@ -97,8 +97,8 @@ test('switches publish the selected chat before slow persistence finishes', asyn
 test('switching warm idle chats keeps their runtime and review state', async () => {
   const records = [{ id: 'one', modelName: 'Model' }, { id: 'two', modelName: 'Model' }];
   const { host } = navigationHost(records);
-  const first = { record: records[0], running: false };
-  const second = { record: records[1], running: false };
+  const first = { record: records[0], running: false, background: new Map() };
+  const second = { record: records[1], running: false, background: new Map() };
   host.chats.set('one', first); host.chats.set('two', second);
   host.unloadChat = () => { throw new Error('Navigation must keep warm chats'); };
   host.prepareChat = () => { throw new Error('Navigation must reuse warm chats'); };
@@ -299,7 +299,7 @@ test('deletion updates navigation before backend close and prevents late saves',
   const { host, store, messages } = navigationHost(records);
   const gate = deferred();
   let disposed = false;
-  host.chats.set('one', { record: records[0], running: false,
+  host.chats.set('one', { record: records[0], running: false, background: new Map(),
     runtime: { closeSession: () => gate.promise },
     review: { dispose() { disposed = true; } }, mirror: { dispose() {} },
   });
@@ -318,7 +318,7 @@ test('deletion updates navigation before backend close and prevents late saves',
 test('retained chat limit protects active and running chats', () => {
   const records = Array.from({ length: 6 }, (_, index) => ({ id: String(index) }));
   const { host } = navigationHost(records);
-  host.chats = new Map(records.map((record, index) => [record.id, { record, running: index === 1 }]));
+  host.chats = new Map(records.map((record, index) => [record.id, { record, running: index === 1, background: new Map() }]));
   const evicted = [];
   host.unloadChat = async id => { evicted.push(id); host.chats.delete(id); };
   host.trimChats();
@@ -491,4 +491,26 @@ test('uploads preserve non-image bytes and reject malformed or oversized data', 
     await assert.rejects(host.saveImages([{ name: 'bad', data: '!bad!' }]), /Invalid attachment/);
     await assert.rejects(host.saveImages([{ name: 'large', data: Buffer.alloc(10 * 1024 * 1024 + 1).toString('base64') }]), /10 MB/);
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('messages for a chat whose history is not shown yet do not save over that history', () => {
+  const saves = [];
+  const sidebar = new DshSidebarProvider({}, undefined, (sessionId, timeline) => saves.push([sessionId, timeline.length]));
+  // A reload posts job and run state for the reopened chat before its saved timeline is replayed.
+  sidebar.postMessage({ type: 'jobState', sessionId: 'one', job: null });
+  sidebar.postMessage({ type: 'runState', sessionId: 'one', state: 'idle', label: 'Ready' });
+  assert.deepEqual(saves, []);
+  sidebar.postMessage({ type: 'timelineState', sessionId: 'one', timeline: [{ id: 'old', kind: 'message', role: 'user', text: 'earlier' }], subagents: {} });
+  sidebar.postMessage({ type: 'runState', sessionId: 'one', state: 'idle', label: 'Ready' });
+  assert.deepEqual(saves, [['one', 1], ['one', 1]]);
+});
+
+test('a chat whose saved timeline was emptied is rebuilt from its transcript', () => {
+  const records = [{ id: 'one', modelName: 'Model' }];
+  const { host } = navigationHost(records);
+  host.sidebar = new DshSidebarProvider({});
+  host.timelines.one = { timeline: [], subagents: {} };
+  host.transcripts.set('one', [{ role: 'user', text: 'hi' }, { role: 'assistant', text: 'hello' }]);
+  host.replayTranscript('one');
+  assert.deepEqual(host.sidebar.timeline('one').map(entry => entry.text), ['hi', 'hello']);
 });

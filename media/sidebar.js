@@ -198,6 +198,7 @@
 
   function setRailVisible(rail, visible) {
     const shown = !rail.hidden && !rail.dataset.hiding;
+    if (!visible) hideRailFlyout(true);
     if (visible === shown) return;
     rail.toggleAnimation?.cancel();
     delete rail.dataset.hiding;
@@ -217,7 +218,8 @@
   /** A tab that is no longer needed is pulled out of the flow at its current spot and flicked off to the left. */
   function leaveRail(rail, tab, box) {
     railTabs.delete(tab.dataset.key);
-    tab.onclick = null;
+    if (railFlyout?.dataset.key === tab.dataset.key) hideRailFlyout(true);
+    tab.onclick = tab.onpointerenter = tab.onpointerleave = tab.onfocus = tab.onblur = null;
     if (calm() || !box?.height) { tab.remove(); return; }
     const frame = rail.getBoundingClientRect();
     tab.getAnimations?.().forEach(animation => animation.cancel());
@@ -242,6 +244,66 @@
       { scale: '.97', offset: .62 },
       { scale: '1' },
     ], { duration: 700, easing: 'cubic-bezier(.25, .8, .35, 1)' });
+  }
+
+  const railIcon = session => typeof session.icon === 'string' && session.icon.trim() ? session.icon.trim() : 'chat_bubble';
+  // Hovering or focusing a tab grows it to the right with the chat name. The rail clips its children,
+  // so the grown tab is one fixed overlay laid exactly over the tab instead of the tab itself.
+  let railFlyout = null;
+  function ensureRailFlyout() {
+    if (railFlyout) return railFlyout;
+    const fly = document.createElement('button'); fly.type = 'button'; fly.className = 'rail-flyout'; fly.hidden = true; fly.tabIndex = -1; fly.setAttribute('aria-hidden', 'true');
+    fly.glyph = icon('chat_bubble'); fly.glyph.className = 'symbol rail-icon';
+    fly.label = document.createElement('span'); fly.label.className = 'rail-flyout-name';
+    fly.append(fly.glyph, fly.label);
+    fly.onclick = () => { const id = fly.dataset.key; hideRailFlyout(true); if (id) openFromRail(id); };
+    fly.onpointerleave = event => { if (event.relatedTarget !== railTabs.get(fly.dataset.key)) hideRailFlyout(); };
+    document.body.appendChild(fly);
+    return railFlyout = fly;
+  }
+
+  function syncRailFlyout(tab) {
+    const fly = railFlyout;
+    for (const name of ['running', 'blocked', 'done', 'active']) fly.classList.toggle(name, tab.classList.contains(name));
+    fly.glyph.textContent = tab.dataset.icon || 'chat_bubble';
+    fly.label.textContent = state.sessions.find(item => item.id === tab.dataset.key)?.name || '';
+  }
+
+  function showRailFlyout(tab, focused) {
+    if (tab.classList.contains('leaving') || !tab.isConnected) return;
+    const box = tab.getBoundingClientRect();
+    if (!box.width) return;
+    const fly = ensureRailFlyout();
+    const same = !fly.hidden && fly.dataset.key === tab.dataset.key;
+    const from = same ? fly.getBoundingClientRect().width : box.width;
+    fly.dataset.key = tab.dataset.key; fly.dataset.base = String(box.width);
+    syncRailFlyout(tab);
+    fly.classList.toggle('focused', !!focused);
+    fly.widthAnimation?.cancel(); fly.widthAnimation = undefined;
+    Object.assign(fly.style, { left: `${box.left}px`, top: `${box.top}px`, height: `${box.height}px`, minWidth: `${box.width}px`, width: 'max-content' });
+    fly.style.setProperty('--rail-base', `${box.width}px`);
+    fly.hidden = false;
+    const to = Math.max(box.width, Math.min(fly.offsetWidth, window.innerWidth - box.left - 6));
+    fly.style.width = `${to}px`;
+    // Start from the plain icon so the name cross-fades in rather than appearing already shown.
+    if (!same) { fly.classList.remove('open'); void fly.offsetWidth; }
+    fly.classList.add('open');
+    if (!calm() && Math.abs(to - from) > .5) fly.widthAnimation = play(fly, [{ width: `${from}px` }, { width: `${to}px` }], { duration: 420, easing: railSpring });
+  }
+
+  function hideRailFlyout(now) {
+    const fly = railFlyout;
+    if (!fly || fly.hidden) return;
+    fly.classList.remove('open', 'focused');
+    fly.widthAnimation?.cancel(); fly.widthAnimation = undefined;
+    const base = Number(fly.dataset.base) || 0;
+    if (now || calm() || !base) { fly.hidden = true; return; }
+    const from = fly.getBoundingClientRect().width;
+    fly.style.width = `${base}px`;
+    const shrink = play(fly, [{ width: `${from}px` }, { width: `${base}px` }], { duration: 220, easing: 'cubic-bezier(.4, 0, .2, 1)' });
+    fly.widthAnimation = shrink;
+    const done = () => { if (fly.widthAnimation === shrink) { fly.hidden = true; fly.widthAnimation = undefined; } };
+    if (shrink) shrink.onfinish = done; else done();
   }
 
   /** Reuses tab nodes so color and width changes transition, and animates every arrival, departure, move and state change. */
@@ -277,8 +339,9 @@
       tab.className = ['rail-tab', status, session.id === state.activeSessionId ? 'active' : ''].filter(Boolean).join(' ');
       tab.title = session.name + ': ' + detail;
       tab.setAttribute('aria-label', session.name + '. ' + detail);
-      tab.firstChild.textContent = session.name;
+      tab.dataset.icon = tab.firstChild.textContent = railIcon(session);
     };
+    rail.onscroll = () => hideRailFlyout(true);
     // Put tabs in order, moving only the ones out of place: a moved node loses its running CSS transitions.
     const changes = [];
     let cursor = head.nextSibling;
@@ -287,10 +350,13 @@
       const fresh = !tab;
       if (fresh) {
         tab = document.createElement('button'); tab.type = 'button'; tab.dataset.key = session.id;
-        const label = document.createElement('span'); label.className = 'rail-label';
-        const bar = document.createElement('span'); bar.className = 'rail-bar'; bar.setAttribute('aria-hidden', 'true');
-        tab.append(label, bar);
+        const glyph = icon('chat_bubble'); glyph.className = 'symbol rail-icon'; glyph.setAttribute('aria-hidden', 'true');
+        tab.append(glyph);
         tab.onclick = () => openFromRail(session.id);
+        tab.onpointerenter = () => showRailFlyout(tab);
+        tab.onpointerleave = event => { if (!railFlyout || event.relatedTarget !== railFlyout) hideRailFlyout(); };
+        tab.onfocus = () => showRailFlyout(tab, true);
+        tab.onblur = () => { if (!railFlyout?.matches(':hover')) hideRailFlyout(); };
         railTabs.set(session.id, tab);
         applyTab(tab, session, status);
       }
@@ -304,12 +370,19 @@
     for (const change of changes) {
       if (change.fresh) continue;
       change.changed = change.tab.dataset.status !== change.status;
-      change.renamed = change.tab.firstChild.textContent !== change.session.name;
+      change.reiconed = change.tab.dataset.icon !== railIcon(change.session);
       applyTab(change.tab, change.session, change.status);
+    }
+    // An open flyout follows its tab's look; if the tab was moved out from under the pointer, the flyout goes.
+    const flown = railFlyout && !railFlyout.hidden ? railTabs.get(railFlyout.dataset.key) : undefined;
+    if (flown) {
+      const old = before.get(flown.dataset.key);
+      if (old?.height && Math.abs(old.top - flown.getBoundingClientRect().top) > .5) hideRailFlyout(true);
+      else syncRailFlyout(flown);
     }
     if (!motion) { railReady = true; return; }
     let arrivals = 0;
-    for (const { id, tab, fresh, changed, renamed } of changes) {
+    for (const { id, tab, fresh, changed, reiconed } of changes) {
       if (fresh) {
         // Springs in from the rail edge with a little overshoot; tabs present on first load arrive one after another.
         play(tab, [
@@ -331,10 +404,7 @@
         tab.moveAnimation = move;
         if (move) move.onfinish = () => { if (tab.moveAnimation === move) tab.style.zIndex = ''; };
       }
-      if (renamed) {
-        play(tab.firstChild, [{ opacity: 0, filter: 'blur(2px)' }, { opacity: 1, filter: 'blur(0px)' }], { duration: 320, easing: 'ease-out' });
-        if (old?.height && now.height > old.height) play(tab, [{ clipPath: `inset(0 0 ${now.height - old.height}px 0 round 11px)` }, { clipPath: 'inset(0 0 0px 0 round 11px)' }], { duration: 420, easing: railSpring });
-      }
+      if (reiconed) play(tab.firstChild, [{ opacity: 0, filter: 'blur(3px)', scale: '.6' }, { opacity: 1, filter: 'blur(0px)', scale: '1' }], { duration: 360, easing: railSpring });
       if (changed) pulseRailTab(tab);
     }
     railReady = true;
@@ -591,6 +661,32 @@
     node.dataset.signature = signature;
   }
 
+  // Media the agent sends is served from state.mediaBase; anything that will not play inline opens through the host.
+  const mediaUrl = file => state.mediaBase + '/' + String(file).split('/').map(encodeURIComponent).join('/');
+  function mediaChip(item) {
+    const chip = button('', 'Open ' + item.name, () => send({ type: 'openMedia', file: item.file }), 'media-file');
+    const name = document.createElement('span'); name.className = 'media-file-name'; name.textContent = item.name;
+    chip.append(icon('description'), name); return chip;
+  }
+  function mediaItem(item) {
+    const kind = state.mediaBase && item.file ? /^(image|video|audio)\//.exec(item.mimeType || '')?.[1] : undefined;
+    if (!kind) return mediaChip(item);
+    const figure = document.createElement('figure'); figure.className = 'media-item media-' + kind;
+    const player = document.createElement(kind === 'image' ? 'img' : kind);
+    if (kind === 'image') {
+      player.loading = 'lazy'; player.alt = item.name;
+      const open = button('', 'Open ' + item.name, () => send({ type: 'openMedia', file: item.file }), 'media-open');
+      open.appendChild(player); figure.appendChild(open);
+    } else {
+      player.controls = true; if (kind === 'video') player.preload = 'metadata';
+      figure.appendChild(player);
+    }
+    player.onerror = () => figure.replaceWith(mediaChip(item));
+    player.src = mediaUrl(item.file);
+    if (kind !== 'audio') { const caption = document.createElement('figcaption'); caption.className = 'media-name'; caption.textContent = item.name; caption.title = item.name; figure.appendChild(caption); }
+    return figure;
+  }
+
   function renderFeed() {
     const feed = el('feed');
     const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
@@ -830,6 +926,14 @@
               block.append(prompt, answer); node.appendChild(block);
             });
           }
+          node.dataset.text = signature;
+        }
+      } else if (entry.kind === 'media') {
+        const signature = JSON.stringify([entry.caption || '', entry.items || []]);
+        if (node.dataset.text !== signature) {
+          node.className = 'feed-entry bubble assistant markdown media-entry'; node.textContent = '';
+          if (entry.caption) { const content = document.createElement('div'); content.className = 'message-content'; renderMarkdown(content, entry.caption); node.appendChild(content); }
+          for (const item of entry.items || []) node.appendChild(mediaItem(item));
           node.dataset.text = signature;
         }
       } else if (entry.kind === 'subagent') {
@@ -1096,12 +1200,14 @@
     const cursor = provider === 'cursor-acp';
     el('model-backend-field').hidden = cursor;
     el('model-cursor-field').hidden = !cursor;
-    const cursorSelect = el('model-cursor-backend'); const previousCursor = cursorSelect.value;
-    cursorSelect.textContent = '';
+    // Any slug can be typed; models Cursor has listed are offered as suggestions.
+    const cursorOptions = el('model-cursor-options');
+    cursorOptions.textContent = '';
     const entries = [{ value: 'auto', name: 'Auto' }, ...(state.cursorBackends || []).filter(item => item.value !== 'auto')];
     const seen = new Set();
-    for (const entry of entries) { if (seen.has(entry.value)) continue; seen.add(entry.value); const option = document.createElement('option'); option.value = entry.value; option.textContent = entry.name; cursorSelect.appendChild(option); }
-    if (seen.has(previousCursor)) cursorSelect.value = previousCursor;
+    for (const entry of entries) { if (seen.has(entry.value)) continue; seen.add(entry.value); const option = document.createElement('option'); option.value = entry.value; option.textContent = entry.name; cursorOptions.appendChild(option); }
+    el('model-cursor-backend').required = cursor;
+    if (cursor && !el('model-cursor-backend').value.trim()) el('model-cursor-backend').value = 'auto';
     const account = el('model-account'); const previousAccount = account.value;
     account.textContent = '';
     const options = cursor ? [{ value: 'cursor-login', label: 'Cursor sign-in' }] : [
@@ -1110,7 +1216,7 @@
     ];
     for (const item of options) { const option = document.createElement('option'); option.value = item.value; option.textContent = item.label; account.appendChild(option); }
     if (options.some(item => item.value === previousAccount)) account.value = previousAccount;
-    el('model-form-help').textContent = cursor ? 'Cursor models load after your first chat.' : provider === 'codex-cli' || provider === 'claude-cli' ? 'Use default or enter a model ID.' : 'Enter the provider model ID.';
+    el('model-form-help').textContent = cursor ? 'Type auto or any Cursor model slug ("agent models" in a terminal lists them). Models Cursor has listed are suggested.' : provider === 'codex-cli' || provider === 'claude-cli' ? 'Use default or enter a model ID.' : 'Enter the provider model ID.';
     const nativeSpeed = provider === 'codex-cli' || provider === 'claude-cli';
     el('model-speed-options').placeholder = nativeSpeed ? (provider === 'codex-cli' ? 'Fast, Ultrafast' : 'Fast') : 'Fast=model-id';
     el('model-speed-help').textContent = nativeSpeed ? 'Enter Fast' + (provider === 'codex-cli' ? ' or Ultrafast' : '') + '. Speed settings use the base model ID. None uses standard speed.' : 'Each choice routes to a separate available model ID. The bundled DSH API adapter does not expose speed tiers.';
@@ -1123,6 +1229,7 @@
     el('model-name').value = model ? model.name : '';
     el('model-provider').value = model ? model.provider : '';
     el('model-backend').value = model && model.provider !== 'cursor-acp' ? model.backend : '';
+    el('model-cursor-backend').value = model?.provider === 'cursor-acp' ? model.backend : '';
     el('model-speed-options').value = model?.speedOptions?.filter(item => item.label !== 'None').map(item => model.provider === 'codex-cli' || model.provider === 'claude-cli' ? item.label : item.label + '=' + item.backend).join(', ') || '';
     el('model-effort-options').value = model?.effortOptions?.join(', ') || '';
     updateModelSources();
@@ -1721,7 +1828,7 @@
   el('model-cancel').onclick = () => { el('model-form').hidden = true; };
   el('model-form').onsubmit = event => {
     event.preventDefault(); const provider = el('model-provider').value;
-    const backend = provider === 'cursor-acp' ? el('model-cursor-backend').value : el('model-backend').value.trim();
+    const backend = provider === 'cursor-acp' ? el('model-cursor-backend').value.trim() : el('model-backend').value.trim();
     const name = el('model-name').value.trim(); const account = el('model-account').value;
     const speedText = el('model-speed-options').value.trim();
     const speedParts = speedText ? speedText.split(',') : [];
@@ -1849,6 +1956,11 @@
       case 'questionRequest':
         (state.timeline[message.sessionId] ||= []).push({ id: `question:${message.id}`, kind: 'question', questions: message.questions || [], status: 'pending' });
         break;
+      case 'mediaMessage': {
+        const timeline = state.timeline[message.sessionId] ||= [];
+        if (!timeline.some(item => item.id === message.entryId)) timeline.push({ id: message.entryId, kind: 'media', caption: message.caption, items: message.items || [] });
+        break;
+      }
       case 'questionResolved': {
         const entry = (state.timeline[message.sessionId] || []).find(item => item.id === `question:${message.id}`);
         if (entry) { entry.status = message.answers === null ? 'skipped' : 'answered'; if (message.answers !== null) entry.answers = message.answers; }
@@ -1871,7 +1983,7 @@
       }
       case 'error': state.error = message.message; el('account-submit').disabled = false; if (el('account-form').dataset.oauth === 'true') el('account-submit').textContent = 'Continue in browser'; break;
     }
-    if (['userMessage', 'assistantDelta', 'assistantMessage', 'toolEvent', 'subagentEvent', 'toolState', 'diff', 'diffState', 'runState', 'approvalRequest', 'approvalResolved', 'questionRequest', 'questionResolved', 'timelineState', 'jobState'].includes(message.type)) {
+    if (['userMessage', 'assistantDelta', 'assistantMessage', 'toolEvent', 'subagentEvent', 'toolState', 'diff', 'diffState', 'runState', 'approvalRequest', 'approvalResolved', 'questionRequest', 'questionResolved', 'timelineState', 'jobState', 'mediaMessage'].includes(message.type)) {
       renderFeed();
       if (message.type === 'runState') renderNotice();
       if (/^(approval|question)(Request|Resolved)$|^timelineState$/.test(message.type)) renderRail();

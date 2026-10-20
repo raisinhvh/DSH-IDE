@@ -22,12 +22,15 @@ export class DshSidebarProvider implements vscode.WebviewViewProvider {
     private readonly extensionUri: vscode.Uri,
     private readonly onMessage?: SidebarMessageHandler,
     private readonly saveTimeline?: (sessionId: string, timeline: SidebarTimelineItem[], subagents: Record<string, SidebarSubagent>) => void,
+    /** Folder that agent-sent media is copied into, so the webview may load it. */
+    private readonly mediaRoot?: vscode.Uri,
   ) {}
 
   public resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.view = webviewView;
-    webviewView.webview.options = { enableScripts: true, localResourceRoots: [this.extensionUri] };
+    webviewView.webview.options = { enableScripts: true, localResourceRoots: this.mediaRoot ? [this.extensionUri, this.mediaRoot] : [this.extensionUri] };
     const asset = (name: string): string => webviewView.webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', name)).toString();
+    if (this.mediaRoot) this.state.mediaBase = webviewView.webview.asWebviewUri(this.mediaRoot).toString().replace(/\/+$/, '');
     webviewView.webview.html = getSidebarHtml(webviewView.webview, this.state, {
       stylesheet: asset('sidebar.css'), script: asset('sidebar.js'), font: asset('MaterialSymbolsRounded.woff2'), markdown: asset('markdown-it.min.js'),
     });
@@ -42,7 +45,9 @@ export class DshSidebarProvider implements vscode.WebviewViewProvider {
   public postMessage(message: SidebarHostMessage): Thenable<boolean> | undefined {
     this.reduce(message);
     const sessionId = 'sessionId' in message ? message.sessionId : undefined;
-    if (sessionId) this.saveTimeline?.(sessionId, this.state.timeline[sessionId] || [], this.state.subagents[sessionId] || {});
+    // Only a chat whose timeline this view holds is saved: messages such as jobState or runState arrive for a chat
+    // before its saved history is replayed after a reload, and saving then would overwrite that history with nothing.
+    if (sessionId && this.state.timeline[sessionId]) this.saveTimeline?.(sessionId, this.state.timeline[sessionId], this.state.subagents[sessionId] || {});
     return this.view?.webview.postMessage(message);
   }
 
@@ -93,6 +98,11 @@ export class DshSidebarProvider implements vscode.WebviewViewProvider {
         const entry = timeline.find(item => item.id === id);
         if (entry?.kind === 'message') entry.text += message.text;
         else timeline.push({ id, kind: 'message', role: 'assistant', text: message.text });
+        break;
+      }
+      case 'mediaMessage': {
+        const timeline = this.state.timeline[message.sessionId] ||= [];
+        if (!timeline.some(item => item.id === message.entryId)) timeline.push({ id: message.entryId, kind: 'media', caption: message.caption, items: message.items });
         break;
       }
       case 'assistantMessage': {

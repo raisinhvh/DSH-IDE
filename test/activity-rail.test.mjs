@@ -113,6 +113,19 @@ test('viewing the active chat clears its unread state; answering an approval ret
 const tabOf = (rail, id) => rail.children.find(child => child.dataset.key === id);
 const framesOf = tab => tab.calls.map(call => call.frames);
 
+test('tabs show the chat icon, fall back to a chat bubble, and fade in a new icon', () => {
+  const { context, rail } = harness();
+  context.state.sessions[0].icon = 'science';
+  context.renderRail();
+  assert.equal(tabOf(rail, 'run').firstChild.textContent, 'science');
+  assert.equal(tabOf(rail, 'ask').firstChild.textContent, 'chat_bubble');
+  context.state.sessions[1].icon = 'bug_report';
+  context.renderRail();
+  const glyph = tabOf(rail, 'ask').firstChild;
+  assert.equal(glyph.textContent, 'bug_report');
+  assert.ok(glyph.calls.some(call => call.frames[0].filter === 'blur(3px)'), 'the new icon fades in from a blur');
+});
+
 test('tabs present on load spring in from the left one after another', () => {
   const { context, rail } = harness();
   context.renderRail();

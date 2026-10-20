@@ -5,6 +5,7 @@ import { CodexAppServerRuntime } from './codexAppServer';
 import { canDelegate, delegationInstructions, isNativeSubagentTool } from './delegation';
 import { terminateProcessTree } from './cancellation';
 import { claudeSpeedSettings } from './models';
+import { isLimitNotice, isUsageLimitText, UsageLimitError } from './limits';
 
 export interface CliTurn {
   account: OAuthCliAccount;
@@ -198,7 +199,14 @@ export class OAuthCliRuntime {
                 } else if (!parentToolId) turn.onTool(block.tool_use_id, toolNames.get(block.tool_use_id) || 'Claude tool', undefined, block.is_error ? 'error' : 'complete');
               }
             }
-            if (event.type === 'result' && event.is_error === true) { child.kill(); finish(new Error('Claude Code turn failed. Check the CLI login and model.')); return; }
+            if (event.type === 'result') {
+              const result = typeof event.result === 'string' ? event.result.trim() : '';
+              // A spent plan comes back as a result whose only text is the limit notice.
+              if (result && (event.is_error === true ? isUsageLimitText(result) : isLimitNotice(result))) {
+                child.kill(); finish(new UsageLimitError(`Claude Code usage limit: ${result.slice(0, 300)}`)); return;
+              }
+              if (event.is_error === true) { child.kill(); finish(new Error(`Claude Code turn failed.${result ? ` ${result.slice(0, 300)}` : ''} Check the CLI login and model.`)); return; }
+            }
             if (event.type === 'result' && !emitted && typeof event.result === 'string') emit(event.result);
           }
         }
@@ -206,7 +214,9 @@ export class OAuthCliRuntime {
       child.stderr.setEncoding('utf8');
       child.stderr.on('data', (chunk: string) => { errorText = (errorText + chunk).slice(-4000); });
       child.on('error', () => finish(new Error(`${codex ? 'Codex' : 'Claude Code'} CLI could not start. Check the configured path.`)));
-      child.on('close', code => finish(code === 0 || this.cancelled ? undefined : new Error(`${codex ? 'Codex' : 'Claude Code'} exited with code ${code}. ${errorText.includes('not logged') ? 'Sign in again from Accounts.' : 'Open the CLI for details.'}`)));
+      child.on('close', code => finish(code === 0 || this.cancelled ? undefined : isUsageLimitText(errorText)
+        ? new UsageLimitError(`${codex ? 'Codex' : 'Claude Code'} usage limit: ${errorText.trim().slice(-300)}`)
+        : new Error(`${codex ? 'Codex' : 'Claude Code'} exited with code ${code}. ${errorText.includes('not logged') ? 'Sign in again from Accounts.' : 'Open the CLI for details.'}`)));
       const text = turn.images?.length ? `${turn.prompt}\n\nAttached images (view these files):\n${turn.images.map(image => image.path).join('\n')}` : turn.prompt;
       child.stdin.on('error', () => undefined);
       child.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text }] } }) + '\n');
