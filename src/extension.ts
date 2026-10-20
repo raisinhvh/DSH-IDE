@@ -121,7 +121,15 @@ const DELEGATE_SERVER = 'dsh-delegate';
 /** How long an account that reported a usage limit is tried after the others. */
 const LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
 
-interface TurnOptions { shown?: string; job?: boolean; onFinish?(reply: string, cancelled: boolean): void }
+interface TurnOptions {
+  shown?: string;
+  job?: boolean;
+  /** Sent by DSH, not typed by the user (job steps, background subagent results): no user message is shown for it. */
+  internal?: boolean;
+  onFinish?(reply: string, cancelled: boolean): void;
+}
+/** A transcript entry; `internal` marks prompts DSH sent on its own, which are never shown as the user's messages. */
+type TranscriptItem = ChatMessage & { internal?: boolean };
 
 function toSidebarJob(job: JobState): SidebarJob {
   const { phase, round, maxRounds, stopReason, criteria } = job;
@@ -190,7 +198,7 @@ class ExtensionHost implements vscode.Disposable {
   private selectedModel: string;
   private modelChoices: Record<string, ModelChoice>;
   private approvalMode: ApprovalMode;
-  private readonly transcripts = new Map<string, { role: 'user' | 'assistant'; text: string }[]>();
+  private readonly transcripts = new Map<string, TranscriptItem[]>();
   private readonly timelines: Record<string, SavedTimeline>;
   private timelineTimer?: NodeJS.Timeout;
   private cursorModels: ModelEntry[];
@@ -206,7 +214,7 @@ class ExtensionHost implements vscode.Disposable {
     this.oauthAccounts = new OAuthCliAccounts(context);
     this.models = new ModelRegistry(context, this.accounts);
     this.cursorModels = context.workspaceState.get<ModelEntry[]>(CURSOR_MODELS_KEY, []);
-    for (const [id, items] of Object.entries(context.workspaceState.get<Record<string, { role: 'user' | 'assistant'; text: string }[]>>(TRANSCRIPTS_KEY, {}))) this.transcripts.set(id, items);
+    for (const [id, items] of Object.entries(context.workspaceState.get<Record<string, TranscriptItem[]>>(TRANSCRIPTS_KEY, {}))) this.transcripts.set(id, items);
     this.selectedModel = context.workspaceState.get<string>(SELECTED_MODEL_KEY) || this.models.list(true)[0]?.name || '';
     this.modelChoices = context.workspaceState.get<Record<string, ModelChoice>>(MODEL_CHOICES_KEY, {});
     const savedApproval = context.workspaceState.get<ApprovalMode>(APPROVAL_KEY);
@@ -1231,7 +1239,7 @@ class ExtensionHost implements vscode.Disposable {
 
   private async saveTranscripts(): Promise<void> {
     const keep = new Set(this.sessions().map(item => item.id));
-    const data: Record<string, { role: 'user' | 'assistant'; text: string }[]> = {};
+    const data: Record<string, TranscriptItem[]> = {};
     for (const [id, items] of this.transcripts) if (keep.has(id)) data[id] = items;
     await this.context.workspaceState.update(TRANSCRIPTS_KEY, data);
     for (const id of Object.keys(this.timelines)) if (!keep.has(id)) delete this.timelines[id];
@@ -1252,6 +1260,7 @@ class ExtensionHost implements vscode.Disposable {
       return;
     }
     (this.transcripts.get(id) || []).forEach((item, index) => {
+      if (item.internal) return;
       if (item.role === 'user') this.sidebar.postMessage({ type: 'userMessage', sessionId: id, entryId: `history:${index}`, text: item.text });
       else this.sidebar.postMessage({ type: 'assistantDelta', sessionId: id, entryId: `history:${index}`, text: item.text });
     });
@@ -1283,7 +1292,7 @@ class ExtensionHost implements vscode.Disposable {
     const userIndex = timeline.slice(0, index).filter(entry => entry.kind === 'message' && entry.role === 'user').length;
     const history = this.transcripts.get(sessionId) || [];
     let users = 0;
-    const cut = history.findIndex(item => item.role === 'user' && users++ === userIndex);
+    const cut = history.findIndex(item => item.role === 'user' && !item.internal && users++ === userIndex);
     this.transcripts.set(sessionId, cut >= 0 ? history.slice(0, cut) : retained.flatMap(entry => entry.kind === 'message' ? [{ role: entry.role, text: entry.text }] : []));
     const agents = this.sidebar.subagents(sessionId);
     const retainedAgents = Object.fromEntries(retained.flatMap(entry => entry.kind === 'subagent' && agents[entry.agentId] ? [[entry.agentId, agents[entry.agentId]]] : []));
@@ -1438,10 +1447,11 @@ class ExtensionHost implements vscode.Disposable {
       if (cancelled()) return undefined;
       let reply: string | undefined;
       const files = attachments; attachments = [];
-      const shown = original ?? label; original = undefined;
+      // Only the first turn carries the user's own /job message; later steps are DSH's and show no user message.
+      const shown = original; const internal = original === undefined; original = undefined;
       chat.jobInterrupted = false;
       try {
-        await this.sendPrompt(prompt, undefined, files.length ? files : undefined, record.id, 'interrupt', { job: true, shown,
+        await this.sendPrompt(prompt, undefined, files.length ? files : undefined, record.id, 'interrupt', { job: true, shown, internal,
           onFinish: (text, wasCancelled) => { if (!wasCancelled && !cancelled()) reply = text; } });
       } catch (error) { reply = undefined; this.output.appendLine(`Job turn failed: ${String(error)}`); }
       return reply;
@@ -1456,7 +1466,6 @@ class ExtensionHost implements vscode.Disposable {
         if (!model || !model.enabled) throw new Error('Separate review agent is on, but no review model is chosen in Customize.');
         chat.turnEntryId = randomUUID();
         chat.jobInterrupted = false;
-        this.sidebar.postMessage({ type: 'userMessage', sessionId: record.id, entryId: `user:${chat.turnEntryId}`, text: label });
         this.postRun(record.id, 'thinking', label);
         try {
           const result = await this.runSubagentCore(chat, { name: 'Reviewer', model: model.name, effort: choice.effort, speed: choice.speed, mode: 'read-only' }, prompt, []);
@@ -1570,7 +1579,7 @@ class ExtensionHost implements vscode.Disposable {
     let displayed = false;
     const display = (): void => {
       this.replayTranscript(recordToLoad.id);
-      this.sidebar.postMessage({ type: 'userMessage', sessionId: recordToLoad.id, entryId: `user:${turnEntryId}`, text: shown });
+      if (!options.internal) this.sidebar.postMessage({ type: 'userMessage', sessionId: recordToLoad.id, entryId: `user:${turnEntryId}`, text: shown });
       displayed = true;
     };
     // Show accepted idle-chat messages before any file I/O or cold backend load.
@@ -1671,7 +1680,7 @@ class ExtensionHost implements vscode.Disposable {
       const handoff = chat.handoffPending ? await this.handoffText(history, bridged, chat.mirror.cwd) : '';
       if (chat.cancelRequested) return;
       chat.handoffPending = false;
-      history.push({ role: 'user', text: historyPrompt + (fileContext.length ? '\nContext files:\n' + fileContext.join('\n') : '') });
+      history.push({ role: 'user', text: historyPrompt + (fileContext.length ? '\nContext files:\n' + fileContext.join('\n') : ''), ...(options.internal ? { internal: true } : {}) });
       chat.turnReply = '';
       const packsOn = this.turnOnPacks(chat, prompt);
       // Claude and Codex take the fixed instructions as system/developer text on every run, so they never enter the
@@ -2115,9 +2124,8 @@ class ExtensionHost implements vscode.Disposable {
     this.postRun(id, 'idle', 'Ready');
     const ready = tasks.filter(task => task.afterTurn === 'resume');
     if (!ready.length) return;
-    const labels = ready.map(task => task.label).join(', ');
     void this.guarded(() => this.sendPrompt(`Background subagent results (your earlier turn ended before you collected them). Continue the task with them.\n\n${this.takeBackgroundResults(chat, ready.map(task => task.id))}`,
-      undefined, [], id, 'queue', { shown: `Subagent results: ${labels}` }));
+      undefined, [], id, 'queue', { internal: true }));
   }
 
   /** Copies files an agent sent into extension storage and shows them in the chat. */

@@ -514,3 +514,22 @@ test('a chat whose saved timeline was emptied is rebuilt from its transcript', (
   host.replayTranscript('one');
   assert.deepEqual(host.sidebar.timeline('one').map(entry => entry.text), ['hi', 'hello']);
 });
+
+test('turns DSH starts on its own never appear as the user speaking', async () => {
+  const record = { id: 'one', modelName: 'Model', provider: 'cursor-acp', backend: 'auto' };
+  const { host, messages } = preparePromptHost([record]);
+  const calls = [];
+  const chat = promptChat(record, calls);
+  host.chats.set(record.id, chat);
+  host.loadChat = async () => chat;
+  await host.sendPrompt('Background subagent results: ...', undefined, [], record.id, 'queue', { internal: true });
+  assert.equal(calls.filter(call => Array.isArray(call)).length, 1);
+  assert.equal(messages.filter(message => message.type === 'userMessage').length, 0);
+  assert.equal(host.transcripts.get('one')[0].internal, true);
+  // A rebuilt history skips them as well.
+  host.sidebar = new DshSidebarProvider({});
+  delete host.replayTranscript;
+  host.transcripts.set('two', [{ role: 'user', text: 'mine' }, { role: 'user', text: 'internal', internal: true }, { role: 'assistant', text: 'reply' }]);
+  host.replayTranscript('two');
+  assert.deepEqual(host.sidebar.timeline('two').map(entry => entry.text), ['mine', 'reply']);
+});
