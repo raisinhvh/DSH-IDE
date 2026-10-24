@@ -1,6 +1,6 @@
 import { test, after } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { transform } from 'esbuild';
@@ -56,6 +56,19 @@ test('runs a multi-tool pack in a child process and namespaces its tools', async
   assert.equal((await registry.call('echo_say', { text: 'x' })).isError, true);
   await registry.remove('echo');
   assert.equal(registry.list().length, 0);
+});
+
+test('records a pack\'s synced settings files in meta.json and rejects bad declarations', async () => {
+  const file = join(dir, 'conf.ts');
+  await writeFile(file, "export default { name: 'conf', description: 'Config', sync: { files: ['config.json'], secrets: ['apiKey'] }, tools: [{ name: 'get', description: 'Get', run: () => 'ok' }] };");
+  await registry.add(file);
+  const meta = JSON.parse(await readFile(join(dir, 'packs', 'conf', 'meta.json'), 'utf8'));
+  assert.deepEqual(meta.sync, { files: ['config.json'], secrets: ['apiKey'] });
+  await registry.setEnabled('conf', false);
+  assert.deepEqual(JSON.parse(await readFile(join(dir, 'packs', 'conf', 'meta.json'), 'utf8')).sync, meta.sync, 'toggling keeps the declaration');
+  await registry.remove('conf');
+  await writeFile(file, "export default { name: 'conf', description: 'Config', sync: { files: ['../up.json'] }, tools: [{ name: 'get', description: 'Get', run: () => 'ok' }] };");
+  await assert.rejects(() => registry.add(file), /sync\.files/);
 });
 
 test('parses and formats ask_questions input', () => {

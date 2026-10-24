@@ -1,4 +1,4 @@
-import { HostToWorker, TOOLPACK_NAME, ToolpackContext, ToolpackDefinition, ToolpackManifest, WorkerToHost } from './types';
+import { HostToWorker, TOOLPACK_NAME, TOOLPACK_SYNC_FILE, ToolpackContext, ToolpackDefinition, ToolpackManifest, WorkerToHost } from './types';
 import { normalizeToolpackResult } from './result';
 
 const send = (message: WorkerToHost): void => { process.send?.(message); };
@@ -21,6 +21,13 @@ function validate(value: unknown): ToolpackDefinition {
         if (typeof tool.description !== 'string' || !tool.description.trim()) throw new Error(`Tool "${tool.name}" needs a description.`);
         if (typeof tool.run !== 'function') throw new Error(`Tool "${tool.name}" needs a run function.`);
     }
+    const sync = candidate.sync;
+    if (sync !== undefined) {
+        const names = (value: unknown, max: number, valid: (item: string) => boolean): boolean =>
+            Array.isArray(value) && value.length <= max && value.every(item => typeof item === 'string' && valid(item));
+        if (!sync || typeof sync !== 'object' || !names(sync.files, 8, item => TOOLPACK_SYNC_FILE.test(item))) throw new Error('Toolpack "sync.files" must list up to 8 .json file names in dataDir.');
+        if (sync.secrets !== undefined && !names(sync.secrets, 64, item => item.length > 0 && item.length <= 64)) throw new Error('Toolpack "sync.secrets" must list up to 64 key names.');
+    }
     return candidate as ToolpackDefinition;
 }
 
@@ -29,6 +36,7 @@ function manifest(definition: ToolpackDefinition): ToolpackManifest {
         name: definition.name,
         description: definition.description,
         tools: definition.tools.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema ?? { type: 'object', properties: {} } })),
+        ...(definition.sync ? { sync: { files: [...definition.sync.files], ...(definition.sync.secrets ? { secrets: [...definition.sync.secrets] } : {}) } } : {}),
     };
 }
 

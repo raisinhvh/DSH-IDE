@@ -11,10 +11,12 @@
   state.runStates ||= {};
   state.subagentProfiles ||= [];
   state.instructions ||= [];
-  state.features ||= { activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: false };
+  state.features ||= { activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: false, smartAuto: false };
   state.nameModel ||= {};
   state.reviewModel ||= {};
   state.summaryModel ||= {};
+  state.deciderModel ||= {};
+  state.smartAutoRanks ||= [];
   state.jobs ||= {};
   state.slashCommands ||= [];
   state.accessibility ||= {};
@@ -87,6 +89,8 @@
     shownKeys.set(root, current);
   }
   const keyed = (node, key) => { node.dataset.key = key; return node; };
+  // Must match SMART_AUTO in src/runtime/smartAuto.ts.
+  const smartAutoId = 'Smart Auto';
   const providerNames = { 'codex-cli': 'Codex', 'claude-cli': 'Claude Code', 'cursor-acp': 'Cursor', 'deepseek-official': 'DeepSeek', openrouter: 'OpenRouter' };
   const accountGroups = [
     { provider: 'codex-cli', title: 'ChatGPT Accounts', icon: 'smart_toy', oauth: true },
@@ -113,21 +117,30 @@
     notice.textContent = state.error || '';
   }
 
+  // Matches the host's check: Smart Auto needs the feature on, an available decider and at least one available ranked model.
+  const smartAutoReady = () => {
+    const available = id => state.models.some(item => item.id === id && item.enabled !== false);
+    return !!state.features.smartAuto && available(state.deciderModel.model) && state.smartAutoRanks.some(rank => available(rank.model));
+  };
+
   function renderPicker() {
     const menu = el('model-menu'); menu.textContent = '';
     const models = state.models.filter(item => item.enabled !== false);
-    const selected = models.find(item => item.id === state.selectedModelId) || models[0];
-    el('model-picker-label').textContent = selected ? selected.name : 'Choose model';
-    el('model-picker').title = selected ? (providerNames[selected.provider] || selected.provider) : 'Choose model';
-    for (const model of models) {
+    const auto = smartAutoReady();
+    const autoSelected = auto && state.selectedModelId === smartAutoId;
+    const selected = autoSelected ? undefined : models.find(item => item.id === state.selectedModelId) || models[0];
+    el('model-picker-label').textContent = autoSelected ? smartAutoId : selected ? selected.name : 'Choose model';
+    el('model-picker').title = autoSelected ? 'A decider model picks a ranked model for each message' : selected ? (providerNames[selected.provider] || selected.provider) : 'Choose model';
+    const options = auto ? [{ id: smartAutoId, name: smartAutoId, detail: 'Picks per message' }, ...models] : models;
+    for (const model of options) {
       const item = button('', 'Use ' + model.name, () => {
         state.selectedModelId = model.id; menu.hidden = true; el('model-picker').setAttribute('aria-expanded', 'false');
         send({ type: 'selectModel', modelId: model.id }); renderPicker();
       }, 'model-option');
       item.setAttribute('role', 'option');
-      item.setAttribute('aria-selected', String(model.id === selected?.id));
+      item.setAttribute('aria-selected', String(model.id === (autoSelected ? smartAutoId : selected?.id)));
       const name = document.createElement('span'); name.className = 'model-option-name'; name.textContent = model.name;
-      const provider = document.createElement('span'); provider.className = 'model-option-provider'; provider.textContent = providerNames[model.provider] || model.provider;
+      const provider = document.createElement('span'); provider.className = 'model-option-provider'; provider.textContent = model.detail || providerNames[model.provider] || model.provider;
       item.append(name, provider); menu.appendChild(item);
     }
     const selectedModel = state.models.find(item => item.id === state.selectedModelId);
@@ -936,6 +949,14 @@
           for (const item of entry.items || []) node.appendChild(mediaItem(item));
           node.dataset.text = signature;
         }
+      } else if (entry.kind === 'note') {
+        const signature = [entry.icon || '', entry.text].join('\0');
+        if (node.dataset.text !== signature) {
+          node.className = 'feed-entry feed-note'; node.textContent = '';
+          if (entry.icon) node.appendChild(icon(entry.icon));
+          const text = document.createElement('span'); text.textContent = entry.text; node.appendChild(text);
+          node.dataset.text = signature;
+        }
       } else if (entry.kind === 'subagent') {
         const agent = state.subagents?.[sessionId]?.[entry.agentId];
         if (!agent) { node.remove(); continue; }
@@ -1372,6 +1393,7 @@
     { key: 'autoName', icon: 'title', title: 'Name chats automatically', desc: 'A name model turns your first message into a short title. Renaming a chat yourself keeps your name.' },
     { key: 'reviewAgent', icon: 'rate_review', title: 'Separate review agent', desc: 'A separate read-only agent reviews each /job round. When off, the chat agent reviews its own work in the same chat.' },
     { key: 'fileSummaries', icon: 'summarize', title: 'File summaries', desc: 'When an agent first reads a file or edits one, a summary model writes a short summary of it: its purpose and bare definitions. Agents check summaries before reading whole files.' },
+    { key: 'smartAuto', icon: 'auto_awesome', title: 'Smart Auto', desc: 'Adds Smart Auto to the model menu. For each message you send, a decider model picks a model and effort from your ranked list.' },
     { key: 'shareRules', icon: 'share', title: 'Share global rules and skills', desc: 'Before each Claude or Codex turn, copies your all-workspace rules and skills into that account. DSH already reads them.' },
     { key: 'editorContext', icon: 'code', title: 'Send editor context', desc: 'Adds your open files, cursor position, selection and diagnostics to each message.' },
     { key: 'mirror', icon: 'content_copy', title: 'Private workspace copy', desc: 'Each new chat edits its own copy of the workspace. Turn off to let agents edit your real files, so they see your changes and each other\'s. Applies to new chats.' },
@@ -1404,10 +1426,57 @@
     return detail;
   }
 
+  /** Smart Auto's ranked models, smartest first. Every change is saved at once. */
+  function smartAutoRankFields() {
+    const models = state.models.filter(item => item.enabled !== false);
+    const ranks = state.smartAutoRanks;
+    const detail = document.createElement('div'); detail.className = 'feature-detail smart-ranks';
+    const heading = document.createElement('div'); heading.className = 'smart-ranks-title'; heading.textContent = 'Ranked models (1 = smartest)';
+    detail.appendChild(heading);
+    const save = next => { state.smartAutoRanks = next; customizeKey = ''; renderCustomize(); renderPicker(); send({ type: 'saveSmartAutoRanks', ranks: next }); };
+    const replace = (index, rank) => save(ranks.map((item, at) => at === index ? rank : item));
+    const move = (index, by) => { const next = [...ranks]; [next[index], next[index + by]] = [next[index + by], next[index]]; save(next); };
+    ranks.forEach((rank, index) => {
+      const model = models.find(item => item.id === rank.model);
+      const item = document.createElement('div'); item.className = 'smart-rank-item';
+      const row = document.createElement('div'); row.className = 'smart-rank';
+      const number = document.createElement('span'); number.className = 'smart-rank-number'; number.textContent = String(index + 1);
+      const modelSelect = document.createElement('select'); modelSelect.setAttribute('aria-label', 'Model for rank ' + (index + 1));
+      fillSelect(modelSelect, [...(model ? [] : [{ value: rank.model, label: rank.model + ' (missing)' }]), ...models.map(item => ({ value: item.id, label: item.name }))], rank.model);
+      modelSelect.onchange = () => replace(index, { model: modelSelect.value, note: rank.note });
+      row.append(number, modelSelect);
+      if (model?.effortOptions?.length) {
+        const effortSelect = document.createElement('select'); effortSelect.setAttribute('aria-label', 'Effort for rank ' + (index + 1));
+        fillSelect(effortSelect, [{ value: '', label: 'Default' }, ...model.effortOptions.map(value => ({ value, label: value }))], rank.effort || '');
+        effortSelect.onchange = () => replace(index, { ...rank, effort: effortSelect.value || undefined });
+        row.appendChild(effortSelect);
+      }
+      const up = button('', 'Move up', () => move(index, -1), 'icon-button', 'arrow_upward'); up.disabled = index === 0;
+      const down = button('', 'Move down', () => move(index, 1), 'icon-button', 'arrow_downward'); down.disabled = index === ranks.length - 1;
+      row.append(up, down, button('', 'Remove from ranking', () => save(ranks.filter((_, at) => at !== index)), 'icon-button', 'close'));
+      const note = document.createElement('input'); note.type = 'text'; note.className = 'smart-rank-note'; note.maxLength = 500;
+      note.placeholder = 'When to use it (optional)'; note.value = rank.note || ''; note.setAttribute('aria-label', 'Note for rank ' + (index + 1));
+      // Saved on blur without a rebuild, so focus can move straight to the next field.
+      note.onchange = () => {
+        const next = ranks.map((item, at) => at === index ? { ...item, note: note.value.trim() || undefined } : item);
+        state.smartAutoRanks = next; customizeKey = customizeStateKey(); send({ type: 'saveSmartAutoRanks', ranks: next });
+      };
+      item.append(row, note);
+      detail.appendChild(item);
+    });
+    if (models.length && ranks.length < 12) detail.appendChild(button('Add model', 'Add a model to the ranking', () => save([...ranks, { model: models[0].id }]), 'text-button'));
+    const help = document.createElement('p'); help.className = 'helper';
+    help.textContent = ranks.length ? 'Notes tell the decider when to pick a model. The same model can appear more than once with different efforts.' : 'Add the models Smart Auto may use, smartest first.';
+    detail.appendChild(help);
+    return detail;
+  }
+
+  const customizeStateKey = () => JSON.stringify([state.features, state.nameModel, state.reviewModel, state.summaryModel, state.deciderModel, state.smartAutoRanks, state.models.map(item => [item.id, item.enabled, item.effortOptions, item.speedOptions])]);
+
   function renderCustomize() {
     const root = el('feature-list');
     // Skip identical rebuilds so an open select is not reset by unrelated state messages.
-    const key = JSON.stringify([state.features, state.nameModel, state.reviewModel, state.summaryModel, state.models.map(item => [item.id, item.enabled, item.effortOptions, item.speedOptions])]);
+    const key = customizeStateKey();
     if (key === customizeKey && root.childElementCount) return;
     customizeKey = key;
     rebuild(root, () => {
@@ -1421,6 +1490,7 @@
         });
         if (feature.key === 'autoName' && enabled) row.appendChild(featureModelFields('nameModel', 'saveNameModel', 'Name model', 'None (use the first message)', 'Pick a fast, cheap model. It only sees your first message.', 'Without a name model, chats are named after the first message.'));
         if (feature.key === 'reviewAgent' && enabled) row.appendChild(featureModelFields('reviewModel', 'saveReviewModel', 'Review model', 'Choose a model', 'It reads the working copy and checks every criterion.', 'Pick a model, or each /job stops when it reaches review.'));
+        if (feature.key === 'smartAuto' && enabled) row.append(featureModelFields('deciderModel', 'saveDeciderModel', 'Decider model', 'Choose a model', 'Pick a fast, cheap model. It sees your message and the last few exchanges, then picks a model below.', 'Pick a decider model to use Smart Auto.'), smartAutoRankFields());
         if (feature.key === 'fileSummaries' && enabled) row.appendChild(featureModelFields('summaryModel', 'saveSummaryModel', 'Summary model', 'Choose a model', 'Pick a fast, cheap model. It runs in the background and only sees the files it summarizes.', 'Pick a model to start writing summaries.'));
         root.appendChild(row);
       }
@@ -1881,6 +1951,7 @@
       case 'instructionsState': state.instructions = message.items || []; break;
       case 'customizeState':
         state.features = message.features || state.features; state.nameModel = message.nameModel || {}; state.reviewModel = message.reviewModel || {}; state.summaryModel = message.summaryModel || {};
+        state.deciderModel = message.deciderModel || {}; state.smartAutoRanks = message.smartAutoRanks || [];
         state.accessibility = message.accessibility || state.accessibility;
         applyAccessibility(state.accessibility);
         break;
@@ -1959,6 +2030,11 @@
       case 'mediaMessage': {
         const timeline = state.timeline[message.sessionId] ||= [];
         if (!timeline.some(item => item.id === message.entryId)) timeline.push({ id: message.entryId, kind: 'media', caption: message.caption, items: message.items || [] });
+        break;
+      }
+      case 'noteMessage': {
+        const timeline = state.timeline[message.sessionId] ||= [];
+        if (!timeline.some(item => item.id === message.entryId)) timeline.push({ id: message.entryId, kind: 'note', icon: message.icon, text: message.text });
         break;
       }
       case 'questionResolved': {

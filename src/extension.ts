@@ -17,7 +17,7 @@ import { isUsageLimit } from './runtime/limits';
 import { MAX_MEDIA_BYTES, MAX_MEDIA_FILES, MEDIA_INSTRUCTIONS, mediaType, SEND_MEDIA, SEND_MEDIA_TOOL } from './runtime/media';
 import { ToolpackRegistry } from './toolpacks/registry';
 import { ConfigSync } from './sync/controller';
-import { SYNCED_SETTINGS } from './sync/configSync';
+import { SYNCED_SETTINGS, accountForModel } from './sync/configSync';
 import { currentVersion, installVersion, latestVersion, updatedRoot } from './update/dshUpdate';
 import { installExtensionRelease, latestExtensionRelease } from './update/extensionUpdate';
 import { planUpdates, UpdateOffer, UpdatePlan } from './update/plan';
@@ -35,7 +35,8 @@ import { FileSummaries, readToolPath, SUMMARY_INSTRUCTIONS, SUMMARY_TOOL } from 
 import { buildHandoff, CHAT_HISTORY_TOOL, chatHistoryReply, ChatMessage, handoffSummaryPrompt, KEEP_WITH_TOOL } from './runtime/handoff';
 import { describePackTools, LOAD_TOOLPACK, loadToolpackTool, packCommands, RUN_TOOLPACK_TOOL, runToolpackTool } from './toolpacks/access';
 import { DshSidebarProvider, SidebarWebviewMessage } from './sidebar/provider';
-import { ApprovalMode, CursorAccountState, SidebarAccessibility, SidebarFeatureKey, SidebarFeatures, SidebarImage, SidebarJob, SidebarNameModel, SidebarQuestion, SidebarTimelineItem, SidebarSubagent, defaultFeatures, normalizeAccessibility } from './sidebar/view';
+import { ApprovalMode, CursorAccountState, SidebarAccessibility, SidebarFeatureKey, SidebarFeatures, SidebarImage, SidebarJob, SidebarNameModel, SidebarQuestion, SidebarSmartAutoRank, SidebarTimelineItem, SidebarSubagent, defaultFeatures, normalizeAccessibility } from './sidebar/view';
+import { deciderPrompt, MAX_NOTE, MAX_RANKS, normalizeRanks, parseDecision, rankLabel, SMART_AUTO, SmartAutoRank } from './runtime/smartAuto';
 
 interface SessionRecord {
   id: string;
@@ -56,6 +57,8 @@ interface SessionRecord {
   /** The agent edits the real workspace instead of a private copy (dsh.runtime.mirror off when the chat was created). */
   direct?: boolean;
   effort?: string;
+  /** Smart Auto picks this chat's model for each message the user sends. */
+  smartAuto?: boolean;
   /** Toolpacks turned on in this chat, by a /pack command or an agent's load_toolpack call. */
   toolpacks?: string[];
   updatedAt: number;
@@ -87,9 +90,9 @@ type ModelChoice = { speed?: string; effort?: string };
 const FEATURE_SETTINGS: Record<SidebarFeatureKey, string> = {
   activityRail: 'features.activityRail', autoName: 'features.autoName', shareRules: 'features.shareRules', editorContext: 'features.editorContext',
   reduceMotion: 'features.reduceMotion', updateChecks: 'updates.check', mirror: 'runtime.mirror', reviewAgent: 'features.reviewAgent',
-  fileSummaries: 'features.fileSummaries',
+  fileSummaries: 'features.fileSummaries', smartAuto: 'features.smartAuto',
 };
-type ModelSettingKey = 'nameModel' | 'reviewModel' | 'summaryModel';
+type ModelSettingKey = 'nameModel' | 'reviewModel' | 'summaryModel' | 'deciderModel';
 type ResolvedRoute = ResolvedModel | { model: ModelEntry } | { model: ModelEntry; oauthAccount: OAuthCliAccount };
 
 function isOAuthProvider(value: string): value is OAuthCliProvider { return value === 'codex-cli' || value === 'claude-cli'; }
@@ -166,6 +169,8 @@ interface Chat {
   locks: Map<string, { owner: string; label: string }>;
   children: Set<ChildRun>;
   background: Map<string, BackgroundTask>;
+  /** Stops the Smart Auto decider while it is choosing this turn's model. */
+  stopDecider?: () => void;
 }
 
 class ExtensionHost implements vscode.Disposable {
@@ -256,7 +261,8 @@ class ExtensionHost implements vscode.Disposable {
       vscode.workspace.onDidChangeConfiguration(event => {
         if (event.affectsConfiguration('dsh.models')) this.refreshModels();
         if (event.affectsConfiguration('dsh.subagents')) this.refreshSubagents();
-        if (['dsh.features', 'dsh.nameModel', 'dsh.reviewModel', 'dsh.summaryModel', 'dsh.updates.check', 'dsh.accessibility'].some(key => event.affectsConfiguration(key))) this.refreshCustomize();
+        if (['dsh.features', 'dsh.nameModel', 'dsh.reviewModel', 'dsh.summaryModel', 'dsh.deciderModel', 'dsh.smartAutoRanks', 'dsh.updates.check', 'dsh.accessibility'].some(key => event.affectsConfiguration(key))) this.refreshCustomize();
+        if (['dsh.models', 'dsh.features.smartAuto', 'dsh.deciderModel', 'dsh.smartAutoRanks'].some(key => event.affectsConfiguration(key))) void this.guarded(() => this.dropSmartAuto());
         if (SYNCED_SETTINGS.some(key => event.affectsConfiguration(`dsh.${key}`))) this.sync.schedule();
       }),
       vscode.window.onDidChangeWindowState(state => { if (state.focused) this.sync.check(true); }),
@@ -697,12 +703,12 @@ class ExtensionHost implements vscode.Disposable {
       return;
     }
     if (isOAuthProvider(model.provider)) {
-      const account = model.account && model.account !== 'default' ? this.oauthAccounts.get(model.account) : this.oauthAccounts.getDefault(model.provider);
+      const account = accountForModel(this.oauthAccounts, model);
       this.sidebar.postMessage({ type: 'accountState', provider: model.provider, label: account?.label || 'Connect an account', connected: !!account });
       this.status.tooltip = `${model.name} · ${account?.label || 'no account'}`;
       return;
     }
-    const account = model.account && model.account !== 'default' ? this.accounts.get(model.account) : this.accounts.getDefault(model.provider);
+    const account = accountForModel(this.accounts, model);
     this.sidebar.postMessage({ type: 'accountState', provider: model.provider, label: account?.label || 'Add an account', connected: !!account });
     this.status.tooltip = `${model.name} · ${model.provider} · ${account?.label || 'no account'}`;
   }
@@ -715,14 +721,14 @@ class ExtensionHost implements vscode.Disposable {
     const model = override ?? this.effectiveModel(selected);
     if (model.provider === 'cursor-acp') return { model };
     if (isOAuthProvider(model.provider)) {
-      const oauthAccount = model.account && model.account !== 'default' ? this.oauthAccounts.get(model.account) : this.oauthAccounts.getDefault(model.provider);
+      const oauthAccount = accountForModel(this.oauthAccounts, model);
       if (!oauthAccount) {
         this.sidebar.postMessage({ type: 'showPage', page: 'accounts' });
         throw new Error(`Connect a ${model.provider === 'codex-cli' ? 'ChatGPT' : 'Claude'} account in Accounts first.`);
       }
       return { model, oauthAccount };
     }
-    if (!this.accounts.getDefault(model.provider) && (!model.account || model.account === 'default')) {
+    if (!accountForModel(this.accounts, model) && (!model.account || model.account === 'default')) {
       this.sidebar.postMessage({ type: 'showPage', page: 'accounts' });
       throw new Error(`Add a ${model.provider} API key account in Accounts before starting a chat.`);
     }
@@ -1055,11 +1061,12 @@ class ExtensionHost implements vscode.Disposable {
 
   private rid(record: SessionRecord): string { return record.runtimeId || record.id; }
 
-  private async switchModel(chat: Chat, override?: ModelEntry): Promise<void> {
+  /** `effort` replaces the chat's effort; without it an override keeps the chat's effort and a picker switch uses the picker's. */
+  private async switchModel(chat: Chat, override?: ModelEntry, effort?: string): Promise<void> {
     const record = chat.record;
     const route = await this.resolveRoute(override);
     const model = route.model;
-    const effort = override ? record.effort : this.choiceFor(this.availableModel(model.name)).effort;
+    effort = effort ?? (override ? record.effort : this.choiceFor(this.availableModel(model.name)).effort);
     const accountId = 'oauthAccount' in route ? route.oauthAccount.id : 'account' in route ? route.account.id : 'cursor-login';
     const cwd = chat.mirror.cwd;
     const oauth = isOAuthProvider(model.provider);
@@ -1093,12 +1100,13 @@ class ExtensionHost implements vscode.Disposable {
 
   private async newChat(): Promise<void> {
     this.root();
-    const selected = this.availableModel(this.selectedModel);
-    if (!selected) throw new Error('Pick a model first.');
-    const model = this.effectiveModel(selected);
-    const account = isOAuthProvider(model.provider)
-      ? model.account && model.account !== 'default' ? this.oauthAccounts.get(model.account) : this.oauthAccounts.getDefault(model.provider)
-      : model.account && model.account !== 'default' ? this.accounts.get(model.account) : this.accounts.getDefault(model.provider);
+    // A Smart Auto chat starts on its smartest model; the decider replaces it when the first message is sent.
+    const auto = this.selectedModel === SMART_AUTO;
+    const first = auto ? this.smartAutoCandidates()[0] : undefined;
+    const selected = auto ? first?.entry : this.availableModel(this.selectedModel);
+    if (!selected) throw new Error(auto ? 'Smart Auto has no available ranked models. Set them in Customize.' : 'Pick a model first.');
+    const model = auto ? selected : this.effectiveModel(selected);
+    const account = isOAuthProvider(model.provider) ? accountForModel(this.oauthAccounts, model) : accountForModel(this.accounts, model);
     if (model.provider !== 'cursor-acp' && !account) throw new Error('Connect an account in Accounts before starting a chat.');
     // Creating a chat is a local navigation operation. Copy files and start the
     // provider only when the chat is used, rather than blocking the New button.
@@ -1107,7 +1115,8 @@ class ExtensionHost implements vscode.Disposable {
       // Fixed per chat: the provider session is tied to its working directory.
       direct: vscode.workspace.getConfiguration('dsh').get<boolean>('runtime.mirror', true) ? undefined : true,
       modelName: model.name, provider: model.provider, backend: model.backend,
-      effort: this.choiceFor(selected).effort, accountId: account?.id || 'cursor-login', updatedAt: Date.now(),
+      effort: auto ? first?.effort : this.choiceFor(selected).effort, accountId: account?.id || 'cursor-login', updatedAt: Date.now(),
+      ...(auto ? { smartAuto: true } : {}),
     };
     this.active = record;
     this.postJob(record);
@@ -1359,8 +1368,10 @@ class ExtensionHost implements vscode.Disposable {
   private async afterActivate(record: SessionRecord, idle: boolean): Promise<void> {
     this.postJob(record);
     this.replayTranscript(record.id);
-    this.selectedModel = record.modelName;
-    const selected = this.availableModel(record.modelName);
+    const auto = !!record.smartAuto && this.smartAutoReady();
+    this.selectedModel = auto ? SMART_AUTO : record.modelName;
+    // Smart Auto's picks are not the user's own speed and effort choices for that model.
+    const selected = auto ? undefined : this.availableModel(record.modelName);
     if (selected) {
       this.modelChoices[selected.name] = {
         speed: selected.speedOptions?.find(item => item.backend === record.backend)?.label,
@@ -1609,17 +1620,21 @@ class ExtensionHost implements vscode.Disposable {
     }
     if (fromQueue && !target) return;
     if (!displayed) display();
-    if (this.active?.id === target.record.id && !fromQueue) {
+    const active = this.active;
+    const picking = active?.id === target.record.id && !fromQueue;
+    // Smart Auto picks the model for messages the user sent, not for job steps or DSH's own prompts.
+    const autoChat = picking ? this.selectedModel === SMART_AUTO : !!target.record.smartAuto;
+    const auto = autoChat && !options.job && !options.internal;
+    if (active && picking && !autoChat) {
+      target.record.smartAuto = undefined;
       const selected = this.availableModel(this.selectedModel);
       const effective = selected && this.effectiveModel(selected);
       const effort = this.choiceFor(selected).effort;
-      const account = selected && isOAuthProvider(selected.provider)
-        ? selected.account && selected.account !== 'default' ? this.oauthAccounts.get(selected.account) : this.oauthAccounts.getDefault(selected.provider)
-        : selected?.account && selected.account !== 'default' ? this.accounts.get(selected.account) : selected && this.accounts.getDefault(selected.provider);
+      const account = selected && (isOAuthProvider(selected.provider) ? accountForModel(this.oauthAccounts, selected) : accountForModel(this.accounts, selected));
       // Claude and Codex accounts form one pool per provider, so a chat that failed over to another account stays on it.
-      const pooled = !!effective && isOAuthProvider(effective.provider) && this.oauthAccounts.get(this.active.accountId)?.provider === effective.provider;
-      if (effective && (this.active.provider !== effective.provider || this.active.backend !== effective.backend || this.active.effort !== effort ||
-        (effective.provider !== 'cursor-acp' && account && this.active.accountId !== account.id && !pooled))) await this.switchModel(target);
+      const pooled = !!effective && isOAuthProvider(effective.provider) && this.oauthAccounts.get(active.accountId)?.provider === effective.provider;
+      if (effective && (active.provider !== effective.provider || active.backend !== effective.backend || active.effort !== effort ||
+        (effective.provider !== 'cursor-acp' && account && active.accountId !== account.id && !pooled))) await this.switchModel(target);
     }
     const chat = target;
     const record = chat.record;
@@ -1668,6 +1683,10 @@ class ExtensionHost implements vscode.Disposable {
       await this.saveSession(record);
       await chat.mirror.beginTurn();
       if (chat.cancelRequested) return;
+      if (auto) {
+        await this.smartAutoPick(chat, prompt, turnEntryId);
+        if (chat.cancelRequested) return;
+      }
       if (!isOAuthProvider(record.provider) && !chat.runtime?.isRunning) {
         const configured = this.availableModel(record.modelName);
         if (!configured) throw new Error('The model for this chat is no longer configured.');
@@ -1710,7 +1729,8 @@ class ExtensionHost implements vscode.Disposable {
         await this.shareGlobalInstructions(account);
         if (chat.cancelRequested) return;
         record.cliSessionId = await this.promptPooled(chat.cli, { account, cwd: chat.mirror.cwd, backend: record.backend, system: instructions,
-          prompt: fullPrompt, sessionId: record.cliSessionId, effort: record.effort, readOnly: this.jobReadOnly(chat), fullAccess: this.approvalMode === 'full' && !this.jobReadOnly(chat), speed: this.choiceFor(this.availableModel(record.modelName)).speed,
+          prompt: fullPrompt, sessionId: record.cliSessionId, effort: record.effort, readOnly: this.jobReadOnly(chat), fullAccess: this.approvalMode === 'full' && !this.jobReadOnly(chat),
+          speed: record.smartAuto ? undefined : this.choiceFor(this.availableModel(record.modelName)).speed,
           onText: postText,
           onMessageBreak: breakMessage,
           onTool: postTool,
@@ -1902,7 +1922,80 @@ class ExtensionHost implements vscode.Disposable {
   private refreshCustomize(): void {
     const features = Object.fromEntries((Object.keys(FEATURE_SETTINGS) as SidebarFeatureKey[]).map(key => [key, this.feature(key)])) as SidebarFeatures;
     this.sidebar.postMessage({ type: 'customizeState', features, nameModel: this.modelSetting('nameModel'), reviewModel: this.modelSetting('reviewModel'), summaryModel: this.modelSetting('summaryModel'),
+      deciderModel: this.modelSetting('deciderModel'), smartAutoRanks: this.smartAutoRanks(),
       accessibility: normalizeAccessibility(vscode.workspace.getConfiguration('dsh').get<unknown>('accessibility')) });
+  }
+
+  private smartAutoRanks(): SmartAutoRank[] {
+    return normalizeRanks(vscode.workspace.getConfiguration('dsh').get<unknown>('smartAutoRanks'));
+  }
+
+  /** Ranked entries whose model is still configured and enabled, smartest first. */
+  private smartAutoCandidates(): (SmartAutoRank & { entry: ModelEntry })[] {
+    return this.smartAutoRanks().flatMap(rank => {
+      const entry = this.availableModel(rank.model);
+      return entry && entry.enabled !== false ? [{ ...rank, entry }] : [];
+    });
+  }
+
+  private smartAutoReady(): boolean {
+    const name = this.modelSetting('deciderModel').model;
+    const decider = name ? this.availableModel(name) : undefined;
+    return this.feature('smartAuto') && !!decider && decider.enabled !== false && this.smartAutoCandidates().length > 0;
+  }
+
+  /** Leaves Smart Auto for a real model once it is turned off or can no longer pick one. */
+  private async dropSmartAuto(): Promise<void> {
+    if (this.selectedModel !== SMART_AUTO || this.smartAutoReady()) return;
+    const current = this.active && this.availableModel(this.active.modelName);
+    this.selectedModel = current?.enabled ? current.name : this.models.list(true)[0]?.name || '';
+    await this.context.workspaceState.update(SELECTED_MODEL_KEY, this.selectedModel);
+    this.refreshModels(); await this.refreshAccount();
+  }
+
+  private async saveSmartAutoRanks(value: SidebarSmartAutoRank[]): Promise<void> {
+    if (!Array.isArray(value) || value.length > MAX_RANKS) throw new Error(`Smart Auto can rank up to ${MAX_RANKS} models.`);
+    const ranks = value.map(item => {
+      const model = this.availableModel(String(item?.model || '').trim());
+      if (!model) throw new Error(`Model "${item?.model}" is not available.`);
+      const effort = item.effort || undefined;
+      if (effort && !model.effortOptions?.includes(effort)) throw new Error(`Effort "${effort}" is not offered by ${model.name}.`);
+      const note = typeof item.note === 'string' && item.note.trim() ? item.note.trim() : undefined;
+      if (note && note.length > MAX_NOTE) throw new Error(`Smart Auto notes can be up to ${MAX_NOTE} characters.`);
+      return { model: model.name, effort, note };
+    });
+    await vscode.workspace.getConfiguration('dsh').update('smartAutoRanks', ranks.length ? ranks : undefined, vscode.ConfigurationTarget.Global);
+    this.refreshCustomize();
+  }
+
+  /**
+   * Has the decider model pick this turn's model from the ranked list, switches the chat to it and notes the pick
+   * in the chat. Throws when the decider fails or its reply names no listed model, so the message is not sent.
+   */
+  private async smartAutoPick(chat: Chat, prompt: string, turnEntryId: string): Promise<void> {
+    const record = chat.record;
+    const decider = this.modelSetting('deciderModel');
+    const candidates = this.smartAutoCandidates();
+    if (!this.feature('smartAuto') || !decider.model || !candidates.length) throw new Error('Smart Auto needs a decider model and at least one ranked model. Set them in Customize.');
+    this.postRun(record.id, 'thinking', 'Smart Auto is choosing a model…');
+    const history = (this.transcripts.get(record.id) || []).filter(item => !item.internal);
+    let reply: string;
+    try {
+      reply = await this.runOneShot({ ...decider, model: decider.model }, chat.mirror.cwd, deciderPrompt(candidates, history, prompt), 120_000, stop => { chat.stopDecider = stop; });
+    } catch (error) {
+      if (chat.cancelRequested) return;
+      throw new Error(`Smart Auto: the decider "${decider.model}" failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally { chat.stopDecider = undefined; }
+    if (chat.cancelRequested) return;
+    const decision = parseDecision(reply, candidates.length);
+    if (!decision) throw new Error(`Smart Auto: the decider "${decider.model}" did not name a listed model. It replied: ${reply.trim().slice(0, 200) || '(nothing)'}`);
+    const pick = candidates[decision.rank - 1];
+    const effort = pick.effort || '';
+    if (record.modelName !== pick.entry.name || record.backend !== pick.entry.backend || (record.effort || '') !== effort) await this.switchModel(chat, pick.entry, effort);
+    record.smartAuto = true;
+    this.sidebar.postMessage({ type: 'noteMessage', sessionId: record.id, entryId: `note:${turnEntryId}`, icon: 'auto_awesome',
+      text: `Smart Auto → ${rankLabel(pick)}${decision.reason ? ` · ${decision.reason}` : ''}` });
+    this.postRun(record.id, 'thinking', 'Thinking…');
   }
 
   private async saveAccessibility(value: SidebarAccessibility): Promise<void> {
@@ -1967,15 +2060,15 @@ class ExtensionHost implements vscode.Disposable {
     }
   }
 
-  /** Runs one prompt on a configured model with tools denied, and returns the reply text. */
-  private async runOneShot(choice: { model: string; effort?: string; speed?: string }, cwd: string, prompt: string, timeoutMs = 120_000): Promise<string> {
+  /** Runs one prompt on a configured model with tools denied, and returns the reply text. `onCancel` receives a function that stops the run. */
+  private async runOneShot(choice: { model: string; effort?: string; speed?: string }, cwd: string, prompt: string, timeoutMs = 120_000, onCancel?: (cancel: () => void) => void): Promise<string> {
     const entry = this.availableModel(choice.model);
     if (!entry || entry.enabled === false) throw new Error(`Model "${choice.model}" is not available.`);
     const backend = entry.speedOptions?.find(item => item.label === choice.speed)?.backend || entry.backend;
     const route = await this.resolveRoute({ ...entry, backend });
     let reply = '';
     let timer: NodeJS.Timeout | undefined;
-    const limit = (cancel: () => void): void => { timer = setTimeout(cancel, timeoutMs); };
+    const limit = (cancel: () => void): void => { timer = setTimeout(cancel, timeoutMs); onCancel?.(cancel); };
     try {
       if ('oauthAccount' in route) {
         const cli = new OAuthCliRuntime();
@@ -2301,19 +2394,30 @@ class ExtensionHost implements vscode.Disposable {
     if (chat.running) {
       chat.cancelRequested = true;
       this.postRun(chat.record.id, 'cancelling', 'Cancelling…');
+      chat.stopDecider?.();
       for (const child of [...chat.children]) if (!child.background) child.cancel();
       if (isOAuthProvider(chat.record.provider)) chat.cli.cancel(); else chat.runtime?.cancel(this.rid(chat.record));
     }
   }
 
   private async pickModel(): Promise<void> {
-    const pick = await vscode.window.showQuickPick(this.availableModels().filter(model => model.enabled).map(model => ({
-      label: model.name, description: `${model.provider} · ${model.backend}`, name: model.name,
-    })), { placeHolder: 'Select a model' });
+    const pick = await vscode.window.showQuickPick([
+      ...(this.smartAutoReady() ? [{ label: SMART_AUTO, description: 'A decider model picks a ranked model for each message', name: SMART_AUTO }] : []),
+      ...this.availableModels().filter(model => model.enabled).map(model => ({
+        label: model.name, description: `${model.provider} · ${model.backend}`, name: model.name,
+      })),
+    ], { placeHolder: 'Select a model' });
     if (pick) await this.selectModel(pick.name);
   }
 
   private async selectModel(name: string): Promise<void> {
+    if (name === SMART_AUTO) {
+      if (!this.smartAutoReady()) throw new Error('Smart Auto needs a decider model and at least one ranked model. Set them in Customize.');
+      this.selectedModel = name;
+      await this.context.workspaceState.update(SELECTED_MODEL_KEY, name);
+      this.refreshModels();
+      return;
+    }
     const model = this.availableModel(name);
     if (!model || !model.enabled) throw new Error(`Model '${name}' is unavailable.`);
     this.selectedModel = name;
@@ -2351,6 +2455,7 @@ class ExtensionHost implements vscode.Disposable {
     const name = message.name.trim();
     const backend = message.backend.trim();
     if (!name || !backend || name.length > 80) throw new Error('A model name and backend ID are required.');
+    if (name === SMART_AUTO) throw new Error(`"${SMART_AUTO}" is reserved for the model picker. Choose another name.`);
     const account = message.provider === 'cursor-acp' ? 'cursor-login' : message.account || 'default';
     const speedOptions = message.speedOptions || [];
     const effortOptions = message.effortOptions || [];
@@ -2371,7 +2476,14 @@ class ExtensionHost implements vscode.Disposable {
       (isOAuthProvider(message.provider) ? this.oauthAccounts.get(account)?.provider : this.accounts.get(account)?.provider) !== message.provider) {
       throw new Error('The selected account does not belong to this provider.');
     }
-    await this.models.set({ name, provider: message.provider, backend, account, enabled: true, speedOptions, effortOptions }, message.originalName);
+    // The label lets Config Sync match the account on other PCs. A model still on "default" because this PC
+    // lacks its synced account keeps that label, so editing it here does not unbind it everywhere.
+    const previous = message.originalName ? this.models.get(message.originalName) : undefined;
+    const chosen = account === 'default' || message.provider === 'cursor-acp' ? undefined
+      : isOAuthProvider(message.provider) ? this.oauthAccounts.get(account) : this.accounts.get(account);
+    const accountLabel = chosen?.label
+      ?? (account === 'default' && previous?.provider === message.provider && (!previous.account || previous.account === 'default') ? previous.accountLabel : undefined);
+    await this.models.set({ name, provider: message.provider, backend, account, ...(accountLabel ? { accountLabel } : {}), enabled: true, speedOptions, effortOptions }, message.originalName);
     if (message.originalName && message.originalName !== name && this.modelChoices[message.originalName]) {
       this.modelChoices[name] = this.modelChoices[message.originalName];
       delete this.modelChoices[message.originalName];
@@ -2652,6 +2764,8 @@ class ExtensionHost implements vscode.Disposable {
         case 'saveReviewModel': await this.saveModelSetting('reviewModel', message.reviewModel); break;
         case 'saveNameModel': await this.saveModelSetting('nameModel', message.nameModel); break;
         case 'saveSummaryModel': await this.saveModelSetting('summaryModel', message.summaryModel); break;
+        case 'saveDeciderModel': await this.saveModelSetting('deciderModel', message.deciderModel); break;
+        case 'saveSmartAutoRanks': await this.saveSmartAutoRanks(message.ranks); break;
         case 'saveAccessibility': await this.saveAccessibility(message.accessibility); break;
         case 'deleteAllSessions': await this.deleteAllSessions(); break;
         case 'syncAction': await this.syncAction(message.action); break;

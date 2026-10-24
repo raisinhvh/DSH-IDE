@@ -4,8 +4,9 @@ import { dirname, join, resolve, sep } from 'node:path';
 
 /** `dsh.*` settings that travel with the config, read from and written to user settings only. */
 export const SYNCED_SETTINGS = [
-  'models', 'subagents', 'nameModel', 'reviewModel', 'summaryModel', 'mcpServers', 'accessibility',
+  'models', 'subagents', 'nameModel', 'reviewModel', 'summaryModel', 'deciderModel', 'smartAutoRanks', 'mcpServers', 'accessibility',
   'features.activityRail', 'features.autoName', 'features.shareRules', 'features.editorContext', 'features.reduceMotion', 'features.reviewAgent', 'features.fileSummaries',
+  'features.smartAuto',
   'updates.check', 'runtime.mirror',
 ] as const;
 
@@ -20,8 +21,10 @@ export interface ConfigBundle {
   settings: Record<string, unknown>;
   /** Keyed by `dsh/AGENTS.md`, `dsh/skills/...` or `agents/skills/...`. */
   files: Record<string, SyncFile>;
-  toolpacks: Record<string, { enabled: boolean; source: string }>;
+  toolpacks: Record<string, ToolpackBundle>;
 }
+/** `settings` holds the pack's declared dataDir JSON files by name, without their secret keys. */
+export interface ToolpackBundle { enabled: boolean; source: string; settings?: Record<string, Record<string, unknown>> }
 export interface AccountRef { id: string; provider: string; label: string }
 
 const MAX_FILE_BYTES = 1024 * 1024;
@@ -30,6 +33,11 @@ const MAX_FILES = 2000;
 const MAX_DEPTH = 8;
 const SKIPPED_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.venv', 'venv', '__pycache__']);
 const PACK_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+/** Same rule as TOOLPACK_SYNC_FILE: a plain .json name directly in the pack's data folder. */
+const SETTINGS_FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.json$/;
+const MAX_SETTINGS_BYTES = 256 * 1024;
+/** Values under keys like these never leave the PC, whether or not the pack lists them. */
+const SECRET_KEY = /key|token|secret|password|passwd|credential|auth|cookie|session/i;
 
 /** JSON with sorted keys and without undefined members, so equal configs hash equally. */
 export function stableJson(value: unknown): string {
@@ -64,6 +72,9 @@ export function parseBundle(text: string): ConfigBundle {
   }
   for (const [id, pack] of Object.entries(bundle.toolpacks)) {
     if (!PACK_ID.test(id) || !record(pack) || typeof pack.source !== 'string' || typeof pack.enabled !== 'boolean') throw new Error(`The GitHub config has an invalid toolpack: ${id}`);
+    if (pack.settings !== undefined && (!record(pack.settings) || Object.entries(pack.settings).some(([file, value]) => !SETTINGS_FILE.test(file) || !record(value)))) {
+      throw new Error(`The GitHub config has invalid settings for toolpack: ${id}`);
+    }
   }
   return bundle as ConfigBundle;
 }
@@ -143,7 +154,30 @@ export async function applyFiles(roots: SyncRoots, files: Record<string, SyncFil
   }
 }
 
-/** Uploaded toolpack sources and their on/off state. Runtime `data` folders stay local. */
+interface PackSync { files: string[]; secrets: Set<string> }
+
+/** The settings files a pack declared (recorded in meta.json by the registry). */
+async function packSync(dir: string, id: string): Promise<{ enabled: boolean; sync?: PackSync }> {
+  let meta: { enabled?: unknown; sync?: { files?: unknown; secrets?: unknown } } = {};
+  try { meta = JSON.parse(await fs.readFile(join(dir, id, 'meta.json'), 'utf8')); }
+  catch { /* missing meta means enabled, as in the registry */ }
+  const names = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+  const files = names(meta.sync?.files).filter(file => SETTINGS_FILE.test(file));
+  return { enabled: meta.enabled !== false, ...(files.length ? { sync: { files, secrets: new Set(names(meta.sync?.secrets)) } } : {}) };
+}
+
+const isSecret = (sync: PackSync, key: string): boolean => sync.secrets.has(key) || SECRET_KEY.test(key);
+
+async function readSettings(file: string): Promise<Record<string, unknown> | undefined> {
+  try {
+    const text = await fs.readFile(file, 'utf8');
+    if (Buffer.byteLength(text) > MAX_SETTINGS_BYTES) return undefined;
+    const value = JSON.parse(text) as unknown;
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  } catch { return undefined; }
+}
+
+/** Uploaded toolpack sources, their on/off state and declared settings. Other `data` files stay local. */
 export async function collectToolpacks(dir: string): Promise<ConfigBundle['toolpacks']> {
   const packs: ConfigBundle['toolpacks'] = {};
   let entries;
@@ -153,13 +187,38 @@ export async function collectToolpacks(dir: string): Promise<ConfigBundle['toolp
     if (!entry.isDirectory() || entry.name.startsWith('.') || !PACK_ID.test(entry.name)) continue;
     try {
       const source = await fs.readFile(join(dir, entry.name, 'pack.ts'), 'utf8');
-      let enabled = true;
-      try { enabled = (JSON.parse(await fs.readFile(join(dir, entry.name, 'meta.json'), 'utf8')) as { enabled?: unknown }).enabled !== false; }
-      catch { /* missing meta means enabled, as in the registry */ }
-      packs[entry.name] = { enabled, source };
+      const { enabled, sync } = await packSync(dir, entry.name);
+      const settings: Record<string, Record<string, unknown>> = {};
+      for (const file of sync?.files ?? []) {
+        const value = await readSettings(join(dir, entry.name, 'data', file));
+        // Secrets are left out rather than blanked, so PCs holding different secrets still hash the same.
+        if (value) settings[file] = Object.fromEntries(Object.entries(value).filter(([key]) => !isSecret(sync!, key)));
+      }
+      packs[entry.name] = { enabled, source, ...(Object.keys(settings).length ? { settings } : {}) };
     } catch { /* not a complete toolpack */ }
   }
   return packs;
+}
+
+/**
+ * Writes a pack's synced settings files. Non-secret values come from the bundle; secret keys keep this
+ * PC's values (or stay unset). Only files the installed pack declares are written.
+ */
+export async function applyToolpackSettings(dir: string, id: string, settings: Record<string, Record<string, unknown>>): Promise<void> {
+  const { sync } = await packSync(dir, id);
+  if (!sync) return;
+  for (const file of sync.files) {
+    const remote = settings[file];
+    if (!remote) continue;
+    const path = join(dir, id, 'data', file);
+    const local = await readSettings(path) ?? {};
+    const next: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(remote)) if (!isSecret(sync, key)) next[key] = value;
+    for (const [key, value] of Object.entries(local)) if (isSecret(sync, key)) next[key] = value;
+    if (stableJson(next) === stableJson(local)) continue;
+    await fs.mkdir(dirname(path), { recursive: true });
+    await fs.writeFile(path, JSON.stringify(next, null, 2) + '\n');
+  }
 }
 
 type Pair = { name?: unknown; value?: unknown };
@@ -211,26 +270,52 @@ export function restoreMcpSecrets(remote: unknown, local: unknown): unknown {
   });
 }
 
-/** Account ids are per-PC, so models carry the account's label instead. */
+/**
+ * Account ids are per-PC, so models carry the account's label instead. A label this PC could not resolve
+ * is passed on unchanged, so a PC without that account never strips the binding from the others.
+ */
 export function portableModels(models: unknown, accounts: AccountRef[]): unknown {
   if (!Array.isArray(models)) return models;
   return models.map(model => {
     if (!model || typeof model !== 'object') return model;
-    const { account, ...rest } = model as Record<string, unknown>;
+    const { account, accountLabel, ...rest } = model as Record<string, unknown>;
     const found = typeof account === 'string' && account !== 'default' ? accounts.find(item => item.id === account) : undefined;
-    return found ? { ...rest, accountLabel: found.label } : model;
+    const label = found?.label ?? (typeof accountLabel === 'string' && accountLabel ? accountLabel : undefined);
+    return label ? { ...rest, accountLabel: label } : model;
   });
 }
 
-/** Resolves `accountLabel` to an account on this PC with the same provider and label, else the provider default. */
+/**
+ * Resolves `accountLabel` to an account on this PC with the same provider and label, else the provider
+ * default. The label stays on the model so it can still be matched once that account is added here.
+ */
 export function localModels(models: unknown, accounts: AccountRef[]): unknown {
   if (!Array.isArray(models)) return models;
   return models.map(model => {
     if (!model || typeof model !== 'object' || !('accountLabel' in model)) return model;
     const { accountLabel, ...rest } = model as Record<string, unknown>;
     const found = accounts.find(item => item.provider === rest.provider && item.label === accountLabel);
-    return { ...rest, account: found?.id || 'default' };
+    return { ...rest, account: found?.id || 'default', accountLabel };
   });
+}
+
+/** Account lookups shared by API-key and OAuth registries. */
+export interface AccountSource<T extends { id: string; provider: string; label: string }> {
+  get(id: string): T | undefined;
+  list(): T[];
+  getDefault(provider: string): T | undefined;
+}
+
+/** The account a model uses: its own account, else one with its synced label, else the provider default. */
+export function accountForModel<T extends { id: string; provider: string; label: string }>(
+  accounts: AccountSource<T>, model: { provider: string; account?: string; accountLabel?: string },
+): T | undefined {
+  const bound = model.account && model.account !== 'default' ? model.account : undefined;
+  const byId = bound ? accounts.get(bound) : undefined;
+  if (byId) return byId;
+  const byLabel = model.accountLabel ? accounts.list().find(item => item.provider === model.provider && item.label === model.accountLabel) : undefined;
+  if (byLabel) return byLabel;
+  return bound ? undefined : accounts.getDefault(model.provider);
 }
 
 export interface GistInfo { id: string; url: string; updatedAt: string }

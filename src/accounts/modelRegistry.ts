@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { AccountRegistry } from "./accountRegistry";
+import { accountForModel } from "../sync/configSync";
 import { ModelEntry, ResolvedModel } from "./types";
 
 const MODELS_KEY = "dsh.models.v1";
@@ -45,9 +46,7 @@ export class ModelRegistry {
     const model = this.get(name);
     if (!model) throw new Error(`Unknown model '${name}'`);
     if (!model.enabled) throw new Error(`Model '${name}' is disabled`);
-    const account = model.account && model.account !== "default"
-      ? this.accounts.get(model.account)
-      : this.accounts.getDefault(model.provider);
+    const account = accountForModel(this.accounts, model);
     if (!account) throw new Error(`No account configured for provider '${model.provider}'`);
     if (account.provider !== model.provider) {
       throw new Error(`Account '${account.id}' does not belong to provider '${model.provider}'`);

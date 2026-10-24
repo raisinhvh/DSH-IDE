@@ -150,6 +150,9 @@ The extension contributes:
 | `dsh.features.activityRail` | Show the activity rail left of the chat (the top chat tabs return when off) | `true` |
 | `dsh.features.autoName` | Name new chats with `dsh.nameModel` | `true` |
 | `dsh.nameModel` | Model (and optional effort/speed) that writes chat titles from the first message | `{}` (first-message titles) |
+| `dsh.features.smartAuto` | Offer **Smart Auto** in the model menu | `false` |
+| `dsh.deciderModel` | Model (and optional effort/speed) that picks Smart Auto's model for each message | `{}` |
+| `dsh.smartAutoRanks` | Models Smart Auto chooses from, smartest first: `[{ "model", "effort"?, "note"? }]`, up to 12 | `[]` |
 | `dsh.features.shareRules` | Copy global rules and skills into Claude Code and Codex account directories before each turn | `true` |
 | `dsh.features.editorContext` | Add open files, cursor, selection and diagnostics to each message | `true` |
 | `dsh.features.reduceMotion` | Turn off sidebar animations (shown on the Accessibility page) | `false` |
@@ -175,6 +178,7 @@ The extension contributes:
 
 - **Activity rail**: a narrow rail left of the chat holds one vertical tab per chat that needs tracking. Running chats are gray with a loading bar. A chat waiting for an approval or an answer turns amber and moves to the top. A chat that finished while you were looking at another chat, a settings page, or another view turns blue, moves up and widens. Opening a blue tab removes it from the rail. Idle chats you have already seen stay in **Recent**. With the rail on, the top of the chat shows only the open chat's name and **Recent**.
 - **Name chats automatically**: a chat first shows its first message as its name. When a name model is selected, it runs once in the background on that first message and replaces the name with a short title. Tools are denied for that run, and it stops after two minutes. Renaming a chat yourself keeps your name.
+- **Smart Auto**: pick a decider model and rank models with an effort each, 1 being the smartest. Each entry can have an optional note on when to use it (for example "UI work and CSS"). While **Smart Auto** is selected in the model menu, the decider reads each message you send, plus the last six messages of the chat and your notes, and picks an entry. The chat switches to that model and effort, and a short note in the chat shows the pick and its reason. Ranked models run at their default speed. Job steps and DSH's own prompts stay on the chat's current model. If the decider fails or names no listed model, the message is not sent and an error is shown.
 - **Share global rules and skills**: Claude Code and Codex run with a private configuration directory per account, so they do not read `~/.dsh/AGENTS.md` or `~/.agents/skills`. Before each Claude or Codex turn (including subagents), DSH copies the global rules into a marked block in that account's `CLAUDE.md` or `AGENTS.md`. It also copies global skills into the account's `skills/` folder and records them in `skills/.dsh-shared.json`. Codex already reads `~/.agents/skills` itself, so only `~/.dsh/skills` is copied for Codex. Files outside the marked block and skills DSH did not copy are never changed. Turning the switch off removes the copies on the next turn.
 
 MCP command and URL entries require workspace trust. The extension passes this setting through to DSH; it does not implement MCP servers itself.

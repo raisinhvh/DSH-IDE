@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, access, rm } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  applyFiles, collectFiles, collectToolpacks, findConfigGist, hashBundle, localModels, parseBundle, portableModels,
+  accountForModel, applyFiles, applyToolpackSettings, collectFiles, collectToolpacks, findConfigGist, hashBundle, localModels, parseBundle, portableModels,
   readConfigGist, restoreMcpSecrets, serializeBundle, stripMcpSecrets, syncPath, writeConfigGist, GIST_FILE,
 } from '../dist/sync/configSync.mjs';
 
@@ -116,7 +116,55 @@ test('models carry account labels across PCs', () => {
   assert.deepEqual(portable[1], models[1]);
   assert.equal(localModels(portable, there)[0].account, 'acct-9');
   assert.equal(localModels(portable, [])[0].account, 'default');
-  assert.equal('accountLabel' in localModels(portable, [])[0], false);
+  // A PC without that account keeps the label, so its next upload does not unbind the model elsewhere.
+  const unresolved = localModels(portable, []);
+  assert.equal(unresolved[0].accountLabel, 'Work');
+  assert.deepEqual(portableModels(unresolved, []), portable);
+  assert.deepEqual(portableModels(localModels(portable, there), there), portable);
+});
+
+test('models resolve their account by id, then synced label, then provider default', () => {
+  const work = { id: 'acct-9', provider: 'claude-cli', label: 'Work' };
+  const home = { id: 'acct-2', provider: 'claude-cli', label: 'Home' };
+  const source = { get: id => [work, home].find(item => item.id === id), list: () => [work, home], getDefault: () => home };
+  assert.equal(accountForModel(source, { provider: 'claude-cli', account: 'acct-9' }), work);
+  assert.equal(accountForModel(source, { provider: 'claude-cli', account: 'default', accountLabel: 'Work' }), work);
+  assert.equal(accountForModel(source, { provider: 'claude-cli', account: 'gone', accountLabel: 'Work' }), work);
+  assert.equal(accountForModel(source, { provider: 'claude-cli', account: 'default', accountLabel: 'Other' }), home);
+  assert.equal(accountForModel(source, { provider: 'claude-cli', account: 'gone' }), undefined);
+  assert.equal(accountForModel(source, { provider: 'codex-cli', account: 'default', accountLabel: 'Work' }), home, 'labels only match the same provider');
+});
+
+test('toolpack settings sync without secrets, and downloads keep this PC\'s secrets', async t => {
+  const r = await roots(t);
+  const meta = { description: 'Roblox', enabled: true, sync: { files: ['opencloud.json', '../evil.json'], secrets: ['apiKey'] } };
+  await put(join(r.toolpacks, 'roblox', 'pack.ts'), 'export default {}');
+  await put(join(r.toolpacks, 'roblox', 'meta.json'), JSON.stringify(meta));
+  await put(join(r.toolpacks, 'roblox', 'data', 'opencloud.json'), JSON.stringify({ apiKey: 'k-1', groupId: '42', hfToken: 't', nested: { a: 1 } }));
+  await put(join(r.toolpacks, 'roblox', 'data', 'uploads.json'), '{"x":1}');
+  const packs = await collectToolpacks(r.toolpacks);
+  assert.deepEqual(packs.roblox.settings, { 'opencloud.json': { groupId: '42', nested: { a: 1 } } });
+  assert.equal(JSON.stringify(packs).includes('k-1'), false);
+  assert.ok(parseBundle(serializeBundle(bundle({}, {}, packs))));
+  assert.throws(() => parseBundle(serializeBundle(bundle({}, {}, { roblox: { ...packs.roblox, settings: { '../x.json': {} } } }))), /invalid settings/);
+
+  // Another PC with its own key and an older group id.
+  const other = await roots(t);
+  await put(join(other.toolpacks, 'roblox', 'pack.ts'), 'export default {}');
+  await put(join(other.toolpacks, 'roblox', 'meta.json'), JSON.stringify(meta));
+  await put(join(other.toolpacks, 'roblox', 'data', 'opencloud.json'), JSON.stringify({ apiKey: 'k-2', groupId: '7', stale: true }));
+  await applyToolpackSettings(other.toolpacks, 'roblox', packs.roblox.settings);
+  assert.deepEqual(JSON.parse(await readFile(join(other.toolpacks, 'roblox', 'data', 'opencloud.json'), 'utf8')), { apiKey: 'k-2', groupId: '42', nested: { a: 1 } });
+  assert.deepEqual((await collectToolpacks(other.toolpacks)).roblox, packs.roblox, 'both PCs now hash the same');
+
+  // A PC with no settings yet gets the non-secret values only.
+  const fresh = await roots(t);
+  await put(join(fresh.toolpacks, 'roblox', 'meta.json'), JSON.stringify(meta));
+  await applyToolpackSettings(fresh.toolpacks, 'roblox', packs.roblox.settings);
+  assert.deepEqual(JSON.parse(await readFile(join(fresh.toolpacks, 'roblox', 'data', 'opencloud.json'), 'utf8')), { groupId: '42', nested: { a: 1 } });
+  // Undeclared files are never written.
+  await applyToolpackSettings(fresh.toolpacks, 'roblox', { 'other.json': { a: 1 } });
+  assert.equal(await exists(join(fresh.toolpacks, 'roblox', 'data', 'other.json')), false);
 });
 
 function fakeGitHub() {

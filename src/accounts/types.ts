@@ -17,6 +17,8 @@ export interface ModelEntry {
   readonly backend: string;
   /** `default` resolves to the provider's active account. */
   readonly account?: string;
+  /** Label of the account, kept by Config Sync so another PC can match its own account with that label. */
+  readonly accountLabel?: string;
   readonly enabled: boolean;
   /** Speed presets. Codex and Claude CLI use native speed settings and keep the base backend. Other providers use backend routes. */
   readonly speedOptions?: { label: string; backend: string }[];

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import * as vscode from 'vscode';
 import { SidebarSync } from '../sidebar/view';
 import {
-  AccountRef, ConfigBundle, SYNCED_SETTINGS, SyncRoots, applyFiles, collectFiles, collectToolpacks, findConfigGist, hashBundle,
+  AccountRef, ConfigBundle, SYNCED_SETTINGS, SyncRoots, applyFiles, applyToolpackSettings, collectFiles, collectToolpacks, findConfigGist, hashBundle,
   localModels, portableModels, readConfigGist, restoreMcpSecrets, stableJson, stripMcpSecrets, writeConfigGist,
 } from './configSync';
 
@@ -157,6 +157,8 @@ export class ConfigSync implements vscode.Disposable {
           } finally { await fs.rm(staging, { recursive: true, force: true }); }
         }
         if (this.host.toolpacks.list().find(item => item.id === id)?.enabled !== pack.enabled) await this.host.toolpacks.setEnabled(id, pack.enabled);
+        // After install, so the pack's own meta.json says which files it syncs.
+        if (pack.settings) await applyToolpackSettings(dir, id, pack.settings);
       } catch (error) { failures.push(`${id}: ${error instanceof Error ? error.message : String(error)}`); }
     }
     return failures;

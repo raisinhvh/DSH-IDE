@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { ChildProcess, fork } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { basename, join } from 'node:path';
-import { HostToWorker, ToolDescriptor, ToolpackManifest, WorkerToHost, ToolpackResult } from './types';
+import { HostToWorker, ToolDescriptor, ToolpackManifest, ToolpackSync, WorkerToHost, ToolpackResult } from './types';
 import { truncateToolpackResult } from './result';
 
 export interface ToolpackInfo {
@@ -33,9 +33,11 @@ interface Entry {
     child?: ChildProcess;
     pending: Map<number, { resolve(result: ToolpackResult): void; timer: NodeJS.Timeout }>;
     stopping?: boolean;
+    sync?: ToolpackSync;
 }
 
-interface Meta { description: string; enabled: boolean }
+/** meta.json. `sync` is kept here so Config Sync can read it without starting the pack. */
+interface Meta { description: string; enabled: boolean; sync?: ToolpackSync }
 
 const LOG_LIMIT = 50;
 
@@ -101,7 +103,7 @@ export class ToolpackRegistry {
             await fs.mkdir(folder, { recursive: true });
             await fs.writeFile(join(folder, 'pack.ts'), source);
             await fs.writeFile(join(folder, 'pack.js'), javascript);
-            const meta: Meta = { description: manifest.description, enabled: previous ? previous.info.enabled : true };
+            const meta: Meta = { description: manifest.description, enabled: previous ? previous.info.enabled : true, ...(manifest.sync ? { sync: manifest.sync } : {}) };
             await fs.writeFile(join(folder, 'meta.json'), JSON.stringify(meta));
             const entry = this.newEntry(id, meta);
             this.entries.set(id, entry);
@@ -125,7 +127,7 @@ export class ToolpackRegistry {
         const entry = this.entries.get(id);
         if (!entry) return;
         entry.info.enabled = enabled;
-        await this.writeMeta(id, { description: entry.info.description, enabled });
+        await this.writeMeta(id, { description: entry.info.description, enabled, ...(entry.sync ? { sync: entry.sync } : {}) });
         if (enabled) await this.reload(id);
         else { await this.halt(id); this.emit(); }
     }
@@ -148,6 +150,8 @@ export class ToolpackRegistry {
             entry.pending.set(id, { resolve, timer });
             this.post(entry.child!, { type: 'call', id, tool: name, args });
         });
+        // The call may have changed settings that Config Sync carries; listeners re-check them.
+        if (entry.sync) this.emit();
         const max = this.options.maxOutputChars ?? 60_000;
         return truncateToolpackResult(result, max);
     }
@@ -166,7 +170,7 @@ export class ToolpackRegistry {
     }
 
     private newEntry(id: string, meta: Meta): Entry {
-        return { info: { id, description: meta.description, enabled: meta.enabled, state: 'stopped', status: '', tools: [], logs: [] }, descriptors: [], pending: new Map() };
+        return { info: { id, description: meta.description, enabled: meta.enabled, state: 'stopped', status: '', tools: [], logs: [] }, descriptors: [], pending: new Map(), sync: meta.sync };
     }
 
     private snapshot(id: string): ToolpackInfo { return this.list().find(item => item.id === id)!; }
@@ -181,7 +185,7 @@ export class ToolpackRegistry {
         try {
             await fs.access(join(this.options.dir, id, 'pack.js'));
             const meta = JSON.parse(await fs.readFile(join(this.options.dir, id, 'meta.json'), 'utf8')) as Partial<Meta>;
-            return { description: typeof meta.description === 'string' ? meta.description : '', enabled: meta.enabled !== false };
+            return { description: typeof meta.description === 'string' ? meta.description : '', enabled: meta.enabled !== false, ...(meta.sync ? { sync: meta.sync } : {}) };
         } catch { return undefined; }
     }
 
@@ -238,6 +242,11 @@ export class ToolpackRegistry {
                     entry.info.description = message.manifest.description;
                     entry.info.tools = message.manifest.tools.map(tool => ({ name: tool.name, description: tool.description }));
                     entry.descriptors = message.manifest.tools.map(tool => ({ name: `${id}_${tool.name}`, description: tool.description, inputSchema: tool.inputSchema }));
+                    // Packs installed before sync declarations existed pick theirs up on the next start.
+                    if (JSON.stringify(entry.sync ?? null) !== JSON.stringify(message.manifest.sync ?? null)) {
+                        entry.sync = message.manifest.sync;
+                        void this.writeMeta(id, { description: entry.info.description, enabled: entry.info.enabled, ...(entry.sync ? { sync: entry.sync } : {}) }).catch(() => undefined);
+                    }
                     this.post(child, { type: 'start' });
                 } else if (message.type === 'started') {
                     entry.info.state = 'running';

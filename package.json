@@ -2,7 +2,7 @@
   "name": "dsh-ide",
   "displayName": "DeepSeek Harness for IDE",
   "description": "A native VS Code and Cursor front end for DeepSeek Harness",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "publisher": "dsh-local",
   "license": "MIT",
   "repository": {
@@ -26,7 +26,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "build": "esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/extension.js --external:vscode --external:@deepseek-ai/dsh --external:esbuild && esbuild src/toolpacks/worker.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/toolpack-worker.js && esbuild src/mcp/delegateServer.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/delegate-server.js",
-    "build:test": "esbuild src/review/hunks.ts src/review/guards.ts src/review/renames.ts src/sidebar/view.ts src/sidebar/questions.ts src/update/version.ts src/update/plan.ts src/update/extensionUpdate.ts src/toolpacks/registry.ts src/runtime/models.ts src/runtime/naming.ts src/runtime/limits.ts src/instructions/store.ts src/instructions/share.ts src/sync/configSync.ts src/slash/registry.ts src/goal/parse.ts src/goal/prompts.ts src/goal/runner.ts src/summaries/store.ts src/toolpacks/access.ts src/runtime/handoff.ts --bundle --platform=node --format=esm --target=node20 --outdir=dist --out-extension:.js=.mjs && esbuild src/toolpacks/worker.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/toolpack-worker.js",
+    "build:test": "esbuild src/review/hunks.ts src/review/guards.ts src/review/renames.ts src/sidebar/view.ts src/sidebar/questions.ts src/update/version.ts src/update/plan.ts src/update/extensionUpdate.ts src/toolpacks/registry.ts src/runtime/models.ts src/runtime/naming.ts src/runtime/limits.ts src/instructions/store.ts src/instructions/share.ts src/sync/configSync.ts src/slash/registry.ts src/goal/parse.ts src/goal/prompts.ts src/goal/runner.ts src/summaries/store.ts src/toolpacks/access.ts src/runtime/handoff.ts src/runtime/smartAuto.ts --bundle --platform=node --format=esm --target=node20 --outdir=dist --out-extension:.js=.mjs && esbuild src/toolpacks/worker.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/toolpack-worker.js",
     "test": "npm run build:test && node test/run.mjs",
     "package": "npm run check && npm run build && vsce package --allow-missing-repository"
   },
@@ -171,6 +171,12 @@
           "scope": "application",
           "description": "When an agent first reads a file or edits one, have the model in dsh.summaryModel write a short summary of it (purpose and bare definitions) in the background. Agents get a read_file_summaries tool and are told to check summaries before reading whole files. Summaries are kept in DSH's extension storage, per workspace."
         },
+        "dsh.features.smartAuto": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "description": "Offer Smart Auto in the model menu. For each message you send, the model in dsh.deciderModel picks a model and effort from dsh.smartAutoRanks."
+        },
         "dsh.features.shareRules": {
           "type": "boolean",
           "default": true,
@@ -305,6 +311,54 @@
             "speed": {
               "type": "string",
               "description": "Speed label from the model's speed options."
+            }
+          }
+        },
+        "dsh.deciderModel": {
+          "type": "object",
+          "default": {},
+          "scope": "application",
+          "description": "Model that picks Smart Auto's model for each message (used when dsh.features.smartAuto is on). Example: { \"model\": \"DeepSeek V4 Flash\", \"effort\": \"low\" }.",
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "Name of an entry from dsh.models (or a Cursor model)."
+            },
+            "effort": {
+              "type": "string",
+              "description": "Reasoning effort from the model's effort options."
+            },
+            "speed": {
+              "type": "string",
+              "description": "Speed label from the model's speed options."
+            }
+          }
+        },
+        "dsh.smartAutoRanks": {
+          "type": "array",
+          "default": [],
+          "scope": "application",
+          "description": "Models Smart Auto chooses from, smartest first. Example: [{ \"model\": \"Claude Opus\", \"effort\": \"high\" }, { \"model\": \"Claude Opus\", \"effort\": \"low\" }, { \"model\": \"DeepSeek V4 Flash\" }].",
+          "maxItems": 12,
+          "items": {
+            "type": "object",
+            "required": [
+              "model"
+            ],
+            "properties": {
+              "model": {
+                "type": "string",
+                "description": "Name of an entry from dsh.models (or a Cursor model)."
+              },
+              "effort": {
+                "type": "string",
+                "description": "Reasoning effort from the model's effort options. Leave out for the model's default."
+              },
+              "note": {
+                "type": "string",
+                "maxLength": 500,
+                "description": "Optional guidance for the decider on when to use this entry, such as \"UI work and CSS\"."
+              }
             }
           }
         },

@@ -21,12 +21,21 @@ export interface ToolpackTool {
     run(args: Record<string, unknown>, ctx: ToolpackContext): unknown | Promise<unknown>;
 }
 
+/** Settings files in the pack's dataDir that Config Sync carries to other PCs. */
+export interface ToolpackSync {
+    /** JSON object files directly in dataDir, e.g. `config.json`. */
+    files: string[];
+    /** Top-level keys that stay on each PC and are never uploaded. Keys that look like keys, tokens or passwords are always kept local. */
+    secrets?: string[];
+}
+
 /** What an uploaded .ts file must `export default`. */
 export interface ToolpackDefinition {
     /** Lowercase id (a-z, 0-9, _). Agents see tools as `<name>_<tool name>`. */
     name: string;
     description: string;
     tools: ToolpackTool[];
+    sync?: ToolpackSync;
     /** Runs once when the pack starts. May open servers or connections. */
     setup?(ctx: ToolpackContext): void | Promise<void>;
     teardown?(): void | Promise<void>;
@@ -42,7 +51,11 @@ export interface ToolpackManifest {
     name: string;
     description: string;
     tools: ToolDescriptor[];
+    sync?: ToolpackSync;
 }
+
+/** dataDir settings files a pack may declare: plain names, no folders. */
+export const TOOLPACK_SYNC_FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.json$/;
 
 export type HostToWorker =
     | { type: 'load'; file: string; dataDir: string }

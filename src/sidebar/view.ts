@@ -62,10 +62,12 @@ export function accessibilityStyle(value: SidebarAccessibility): { vars: Record<
     classes: [value.highContrast ? 'a11y-contrast' : '', value.largeTargets ? 'a11y-targets' : '', value.underlineLinks ? 'a11y-underline' : ''].filter(Boolean),
   };
 }
-export type SidebarFeatureKey = 'activityRail' | 'autoName' | 'shareRules' | 'editorContext' | 'reduceMotion' | 'updateChecks' | 'mirror' | 'reviewAgent' | 'fileSummaries';
+export type SidebarFeatureKey = 'activityRail' | 'autoName' | 'shareRules' | 'editorContext' | 'reduceMotion' | 'updateChecks' | 'mirror' | 'reviewAgent' | 'fileSummaries' | 'smartAuto';
 export type SidebarFeatures = Record<SidebarFeatureKey, boolean>;
 /** Model that writes chat titles; an empty model keeps the first-message title. */
 export interface SidebarNameModel { model?: string; effort?: string; speed?: string }
+/** One entry of the Smart Auto ranking; the list runs from smartest to least smart. */
+export interface SidebarSmartAutoRank { model: string; effort?: string; note?: string }
 /** A slash command offered in the composer menu. */
 export interface SidebarSlashCommand { name: string; description: string; usage: string }
 /** A /job run as shown in the job bar at the top of the chat. */
@@ -108,6 +110,8 @@ export type SidebarWebviewMessage =
   | { type: 'saveNameModel'; nameModel: SidebarNameModel }
   | { type: 'saveReviewModel'; reviewModel: SidebarNameModel }
   | { type: 'saveSummaryModel'; summaryModel: SidebarNameModel }
+  | { type: 'saveDeciderModel'; deciderModel: SidebarNameModel }
+  | { type: 'saveSmartAutoRanks'; ranks: SidebarSmartAutoRank[] }
   | { type: 'saveAccessibility'; accessibility: SidebarAccessibility }
   | { type: 'deleteAllSessions' }
   | { type: 'syncAction'; action: 'connect' | 'upload' | 'download' | 'disconnect' | 'openGist' }
@@ -254,7 +258,9 @@ export type SidebarTimelineItem =
   | { id: string; kind: 'diff'; diff: SidebarDiff }
   | { id: string; kind: 'approval'; title: string; detail: string; status: 'pending' | 'allowed' | 'rejected' }
   | { id: string; kind: 'question'; questions: SidebarQuestion[]; status: 'pending' | 'answered' | 'skipped'; answers?: string[] }
-  | { id: string; kind: 'media'; caption?: string; items: SidebarMedia[] };
+  | { id: string; kind: 'media'; caption?: string; items: SidebarMedia[] }
+  /** A short line from DSH itself, such as the model Smart Auto picked. */
+  | { id: string; kind: 'note'; icon?: string; text: string };
 
 export type SidebarHostMessage =
   | { type: 'timelineState'; sessionId: string; timeline: SidebarTimelineItem[]; subagents: Record<string, SidebarSubagent> }
@@ -276,7 +282,7 @@ export type SidebarHostMessage =
   | { type: 'modelRemoveFailed'; name: string }
   | { type: 'subagentProfilesState'; profiles: SidebarSubagentProfile[] }
   | { type: 'subagentSaved' }
-  | { type: 'customizeState'; features: SidebarFeatures; nameModel: SidebarNameModel; reviewModel: SidebarNameModel; summaryModel: SidebarNameModel; accessibility: SidebarAccessibility }
+  | { type: 'customizeState'; features: SidebarFeatures; nameModel: SidebarNameModel; reviewModel: SidebarNameModel; summaryModel: SidebarNameModel; deciderModel: SidebarNameModel; smartAutoRanks: SidebarSmartAutoRank[]; accessibility: SidebarAccessibility }
   | { type: 'jobState'; sessionId: string; job: SidebarJob | null }
   | { type: 'syncState'; sync: SidebarSync }
   | { type: 'instructionsState'; items: SidebarInstruction[] }
@@ -287,6 +293,7 @@ export type SidebarHostMessage =
   | { type: 'assistantMessage'; sessionId: string; text: string; timestamp?: number }
   | { type: 'userMessage'; sessionId: string; text: string; entryId?: string }
   | { type: 'mediaMessage'; sessionId: string; entryId: string; caption?: string; items: SidebarMedia[] }
+  | { type: 'noteMessage'; sessionId: string; entryId: string; icon?: string; text: string }
   | { type: 'runState'; sessionId: string; state: 'idle' | 'thinking' | 'tool' | 'cancelling'; label?: string }
   | { type: 'toolEvent'; event: SidebarToolEvent; sessionId?: string; entryId?: string }
   | { type: 'toolState'; tools: SidebarToolEvent[] }
@@ -325,6 +332,8 @@ export interface SidebarViewState {
   nameModel: SidebarNameModel;
   reviewModel: SidebarNameModel;
   summaryModel: SidebarNameModel;
+  deciderModel: SidebarNameModel;
+  smartAutoRanks: SidebarSmartAutoRank[];
   slashCommands: SidebarSlashCommand[];
   jobs: Record<string, SidebarJob>;
   accessibility: SidebarAccessibility;
@@ -334,10 +343,10 @@ export interface SidebarViewState {
   error?: string;
 }
 
-export const defaultFeatures = (): SidebarFeatures => ({ activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: false });
+export const defaultFeatures = (): SidebarFeatures => ({ activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: false, smartAuto: false });
 
 export const initialSidebarState = (): SidebarViewState => ({
-  page: 'chat', approvalMode: 'ask', subagentProfiles: [], instructions: [], toolpacks: [], features: defaultFeatures(), nameModel: {}, reviewModel: {}, summaryModel: {}, slashCommands: SLASH_COMMANDS.map(command => ({ ...command })), jobs: {}, accessibility: defaultAccessibility(), sync: { connected: false, auto: true }, sessions: [], models: [], providerLabel: 'No provider', accountLabel: 'No account connected',
+  page: 'chat', approvalMode: 'ask', subagentProfiles: [], instructions: [], toolpacks: [], features: defaultFeatures(), nameModel: {}, reviewModel: {}, summaryModel: {}, deciderModel: {}, smartAutoRanks: [], slashCommands: SLASH_COMMANDS.map(command => ({ ...command })), jobs: {}, accessibility: defaultAccessibility(), sync: { connected: false, auto: true }, sessions: [], models: [], providerLabel: 'No provider', accountLabel: 'No account connected',
   accountConnected: false, accounts: [], dependencies: [], cursor: { connected: false, label: 'Not connected' },
   messages: {}, timeline: {}, tools: [], subagents: {}, diffs: [], runStates: {}, queues: {},
 });
