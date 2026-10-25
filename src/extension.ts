@@ -15,7 +15,7 @@ import { shareInstructions } from './instructions/share';
 import { chatTitlePrompt, firstMessageTitle, parseChatName } from './runtime/naming';
 import { isUsageLimit } from './runtime/limits';
 import { MAX_MEDIA_BYTES, MAX_MEDIA_FILES, MEDIA_INSTRUCTIONS, mediaType, SEND_MEDIA, SEND_MEDIA_TOOL } from './runtime/media';
-import { GENERATE_IMAGE, GENERATE_IMAGE_TOOL, generateImage, IMAGE_INSTRUCTIONS, imageFileName, parseImageRequest, pngSize } from './runtime/imageGen';
+import { GENERATE_IMAGE, GENERATE_IMAGE_TOOL, generateImage, IMAGE_INSTRUCTIONS, imageFileName, inputImageProblem, MAX_INPUT_BYTES, parseImageRequest, pngSize } from './runtime/imageGen';
 import { ToolpackRegistry } from './toolpacks/registry';
 import { ConfigSync } from './sync/controller';
 import { SYNCED_SETTINGS, accountForModel } from './sync/configSync';
@@ -1265,6 +1265,7 @@ class ExtensionHost implements vscode.Disposable {
       for (const entry of saved.timeline) {
         if (entry.kind === 'tool' && entry.event.state === 'running') entry.event.state = 'cancelled';
         if (entry.kind === 'approval' && entry.status === 'pending') entry.status = 'rejected';
+        if (entry.kind === 'media' && entry.status === 'pending') entry.status = 'failed';
       }
       for (const agent of Object.values(saved.subagents)) if (agent.state === 'running') agent.state = 'cancelled';
       this.sidebar.postMessage({ type: 'timelineState', sessionId: id, ...saved });
@@ -2131,7 +2132,7 @@ class ExtensionHost implements vscode.Disposable {
       if (child.parent.cancelRequested && !child.background) return { text: 'Cancelled.', isError: true };
       if (tool === SUMMARY_TOOL.name) return this.readSummaries(child.parent, args);
       if (tool === SEND_MEDIA) return this.sendMedia(child.parent, args, child.label);
-      if (tool === GENERATE_IMAGE) return this.generateImage(child.parent, args);
+      if (tool === GENERATE_IMAGE) return this.generateImage(child.parent, args, child.label);
       return this.packCall(child.parent, tool, args) ?? { text: `Subagents may only use toolpack, file summary, media and image tools, not "${tool}".`, isError: true };
     }
     const chat = [...this.chats.values()].find(item => item.ownerId === owner);
@@ -2226,8 +2227,11 @@ class ExtensionHost implements vscode.Disposable {
       undefined, [], id, 'queue', { internal: true }));
   }
 
-  /** Copies files an agent sent into extension storage and shows them in the chat. */
-  private async sendMedia(chat: Chat, args: Record<string, unknown>, from?: string): Promise<DelegateResult> {
+  /**
+   * Copies files an agent sent into extension storage and shows them in the chat.
+   * into is the entry id of a generated image's box, already in the chat; the files fill it as an expandable thumbnail.
+   */
+  private async sendMedia(chat: Chat, args: Record<string, unknown>, from?: string, into?: string): Promise<DelegateResult> {
     const paths = (Array.isArray(args.paths) ? args.paths : typeof args.path === 'string' ? [args.path] : []).filter((item): item is string => typeof item === 'string' && !!item.trim());
     if (!paths.length) return { text: '"paths" must list at least one file.', isError: true };
     if (paths.length > MAX_MEDIA_FILES) return { text: `Send at most ${MAX_MEDIA_FILES} files at a time.`, isError: true };
@@ -2248,29 +2252,53 @@ class ExtensionHost implements vscode.Disposable {
     }
     if (!items.length) return { text: `No files were sent. ${problems.join('; ')}`, isError: true };
     const caption = typeof args.caption === 'string' && args.caption.trim() ? args.caption.trim().slice(0, 4000) : undefined;
-    // Media from the parent's own turn is placed between its text segments, like a tool call.
-    if (!from && chat.running) chat.segment++;
-    this.sidebar.postMessage({ type: 'mediaMessage', sessionId: chat.record.id, entryId: `media:${randomUUID()}`, caption: from ? `**${from}:** ${caption || ''}`.trim() : caption, items });
+    // Media from the parent's own turn is placed between its text segments, like a tool call. A generated image's box already was.
+    if (!from && !into && chat.running) chat.segment++;
+    this.sidebar.postMessage({ type: 'mediaMessage', sessionId: chat.record.id, entryId: into || `media:${randomUUID()}`, caption: from ? `**${from}:** ${caption || ''}`.trim() : caption, items, ...(into ? { generated: true } : {}) });
     return { text: `Shown to the user: ${items.map(item => item.name).join(', ')}.${problems.length ? ` Not sent: ${problems.join('; ')}` : ''}` };
   }
 
-  /** Generates an image with the chat's Codex account, or the default one, and saves it under .dsh/images in the real workspace. */
-  private async generateImage(chat: Chat, args: Record<string, unknown>): Promise<DelegateResult> {
+  /** Generates an image with the chat's Codex account, or the default one, saves it under .dsh/images in the real workspace and shows it in the chat. */
+  private async generateImage(chat: Chat, args: Record<string, unknown>, from?: string): Promise<DelegateResult> {
     const request = parseImageRequest(args);
     if (typeof request === 'string') return { text: request, isError: true };
     const own = this.oauthAccounts.get(chat.record.accountId);
     const account = own?.provider === 'codex-cli' ? own : this.oauthAccounts.getDefault('codex-cli');
     if (!account) return { text: 'Image generation needs a ChatGPT (Codex) account. Connect one in Accounts.', isError: true };
+    // Relative input paths resolve in the agent's working copy first, then in the real workspace, where .dsh/images is in mirror mode.
+    const inputs: Buffer[] = [];
+    const problems: string[] = [];
+    for (const raw of request.images) {
+      const candidates = isAbsolute(raw) ? [raw] : [resolvePath(chat.mirror.cwd, raw), resolvePath(this.root().uri.fsPath, raw)];
+      let found: string | undefined;
+      for (const candidate of candidates) if (!found && (await stat(candidate).catch(() => undefined))?.isFile()) found = candidate;
+      if (!found) { problems.push(`${raw}: file not found`); continue; }
+      if ((await stat(found)).size > MAX_INPUT_BYTES) { problems.push(`${raw}: larger than ${MAX_INPUT_BYTES / 1024 / 1024} MB`); continue; }
+      const bytes = await readFile(found);
+      const problem = inputImageProblem(bytes);
+      if (problem) problems.push(`${raw}: ${problem}`); else inputs.push(bytes);
+    }
+    if (problems.length) return { text: `No image was generated. ${problems.join('; ')}.`, isError: true };
+    // The image's box shows in the chat right away with a loading circle, and is filled or marked failed when generation ends.
+    const entryId = `media:${randomUUID()}`;
+    const box = (status: 'pending' | 'failed'): void => {
+      this.sidebar.postMessage({ type: 'mediaMessage', sessionId: chat.record.id, entryId, caption: from ? `**${from}:**` : undefined, items: [], generated: true, status });
+    };
+    if (!from && chat.running) chat.segment++;
+    box('pending');
     try {
-      const image = await generateImage({ command: cliCommand('codex-cli'), env: cliEnv(account), home: account.directory }, request);
+      const image = await generateImage({ command: cliCommand('codex-cli'), env: cliEnv(account), home: account.directory }, request, inputs);
       // The real workspace, not the chat's private copy: .dsh is outside the mirror's review scope.
       const dir = join(this.root().uri.fsPath, '.dsh', 'images');
       await mkdir(dir, { recursive: true });
       const path = join(dir, imageFileName(args.name, request.prompt, image.extension));
       await writeFile(path, image.bytes, { flag: 'wx' });
       const size = pngSize(image.bytes);
-      return { text: `Image saved to ${path}${size ? ` (${size})` : ''}. Call ${SEND_MEDIA} with that path to show it to the user.` };
+      const shown = await this.sendMedia(chat, { paths: [path] }, from, entryId);
+      if (shown.isError) box('failed');
+      return { text: `Image saved to ${path}${size ? ` (${size})` : ''}. ${shown.isError ? `It could not be shown in the chat: ${shown.text}` : 'It is already shown to the user in the chat.'}` };
     } catch (error) {
+      box('failed');
       return { text: error instanceof Error ? error.message : String(error), isError: true };
     }
   }
@@ -2304,7 +2332,7 @@ class ExtensionHost implements vscode.Disposable {
     const model: ModelEntry = { ...entry, backend };
     const owner = `sub:${randomUUID()}`;
     const agentId = `${chat.turnEntryId}:delegate:${randomUUID()}`;
-    const post = (event: { title?: string; prompt?: string; model?: string; state?: 'running' | 'complete' | 'error'; files?: string[]; text?: string; messageId?: string; role?: 'assistant' | 'tool' }): void => {
+    const post = (event: { title?: string; prompt?: string; model?: string; state?: 'running' | 'complete' | 'error' | 'cancelled'; delegated?: boolean; files?: string[]; text?: string; messageId?: string; role?: 'assistant' | 'tool' }): void => {
       this.sidebar.postMessage({ type: 'subagentEvent', sessionId: chat.record.id, agentId, ...event });
     };
     const run: ChildRun = { parent: chat, owner, label: profile.name, readOnly, changed: new Set(), outOfScope: new Set(), files: readOnly ? [] : files, background: !!onBackground, cancel: () => undefined };
@@ -2312,7 +2340,7 @@ class ExtensionHost implements vscode.Disposable {
     onBackground?.(run);
     if (!readOnly) for (const file of files) chat.locks.set(file, { owner, label: profile.name });
     const modelLabel = `${entry.name}${profile.effort ? ` · ${profile.effort}` : ''}${speed ? ` · ${speed}` : ''}`;
-    post({ title: profile.name, prompt: task, model: modelLabel, state: 'running', files: readOnly ? [] : files });
+    post({ title: profile.name, prompt: task, model: modelLabel, state: 'running', delegated: true, files: readOnly ? [] : files });
     let reply = '';
     let cancelled = false;
     run.cancel = () => { cancelled = true; };
@@ -2396,7 +2424,7 @@ class ExtensionHost implements vscode.Disposable {
       }
       return { text: result };
     } catch (error) {
-      post({ state: 'error' });
+      post({ state: cancelled ? 'cancelled' : 'error' });
       const message = error instanceof Error ? error.message : String(error);
       let result = cancelled ? 'The subagent was cancelled.' : `Subagent "${name}" failed: ${message}`;
       if (run.changed.size) result += `\n\n---\nFiles changed by this subagent: ${[...run.changed].join(', ')}`;

@@ -188,6 +188,7 @@ export interface SidebarSession {
 
 /** A file an agent sent into the chat; `file` is relative to the sidebar's media base. */
 export interface SidebarMedia { name: string; mimeType: string; file: string }
+export type SidebarMediaStatus = 'pending' | 'failed';
 
 export interface SidebarModel {
   id: string;
@@ -239,6 +240,8 @@ export interface SidebarSubagent {
   prompt?: string;
   files?: string[];
   state: 'running' | 'complete' | 'error' | 'cancelled';
+  /** Started with delegate_task: DSH reports its final state, and it can outlive its parent's turn, so cancelling that turn does not mark it cancelled. */
+  delegated?: boolean;
   messages: { id: string; role: 'assistant' | 'tool'; text: string }[];
 }
 
@@ -258,7 +261,11 @@ export type SidebarTimelineItem =
   | { id: string; kind: 'diff'; diff: SidebarDiff }
   | { id: string; kind: 'approval'; title: string; detail: string; status: 'pending' | 'allowed' | 'rejected' }
   | { id: string; kind: 'question'; questions: SidebarQuestion[]; status: 'pending' | 'answered' | 'skipped'; answers?: string[] }
-  | { id: string; kind: 'media'; caption?: string; items: SidebarMedia[] }
+  /**
+   * Generated media shows as a small thumbnail that expands into a full view, instead of inline at full width.
+   * Its box appears with status pending while the image is made, and the same entry is updated when it is ready or failed.
+   */
+  | { id: string; kind: 'media'; caption?: string; items: SidebarMedia[]; generated?: boolean; status?: SidebarMediaStatus }
   /** A short line from DSH itself, such as the model Smart Auto picked. */
   | { id: string; kind: 'note'; icon?: string; text: string };
 
@@ -292,12 +299,13 @@ export type SidebarHostMessage =
   | { type: 'assistantDelta'; sessionId: string; text: string; entryId?: string }
   | { type: 'assistantMessage'; sessionId: string; text: string; timestamp?: number }
   | { type: 'userMessage'; sessionId: string; text: string; entryId?: string }
-  | { type: 'mediaMessage'; sessionId: string; entryId: string; caption?: string; items: SidebarMedia[] }
+  /** Adds a media entry, or replaces the items and status of the entry with this id. */
+  | { type: 'mediaMessage'; sessionId: string; entryId: string; caption?: string; items: SidebarMedia[]; generated?: boolean; status?: SidebarMediaStatus }
   | { type: 'noteMessage'; sessionId: string; entryId: string; icon?: string; text: string }
   | { type: 'runState'; sessionId: string; state: 'idle' | 'thinking' | 'tool' | 'cancelling'; label?: string }
   | { type: 'toolEvent'; event: SidebarToolEvent; sessionId?: string; entryId?: string }
   | { type: 'toolState'; tools: SidebarToolEvent[] }
-  | { type: 'subagentEvent'; sessionId: string; agentId: string; title?: string; model?: string; prompt?: string; files?: string[]; state?: SidebarSubagent['state']; text?: string; messageId?: string; role?: 'assistant' | 'tool' }
+  | { type: 'subagentEvent'; sessionId: string; agentId: string; title?: string; model?: string; prompt?: string; files?: string[]; state?: SidebarSubagent['state']; delegated?: boolean; text?: string; messageId?: string; role?: 'assistant' | 'tool' }
   | { type: 'diff'; diff: SidebarDiff }
   | { type: 'diffState'; diffs: SidebarDiff[] }
   | { type: 'error'; message: string };

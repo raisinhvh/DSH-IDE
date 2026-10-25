@@ -700,6 +700,116 @@
     return figure;
   }
 
+  // Keyframes sampled from a damped spring, so motion can ring past its target, which a cubic-bezier cannot do.
+  // frame(p) builds the keyframe for progress p, which starts at 0 and settles at 1. damping is the ratio, below 1.
+  function springAnimation(frame, frequency, damping) {
+    const omega = 2 * Math.PI * frequency;
+    const decay = damping * omega;
+    const ringing = omega * Math.sqrt(1 - damping * damping);
+    const seconds = Math.min(1.6, Math.log(400) / decay);
+    const steps = Math.ceil(seconds * 60);
+    const frames = [];
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps * seconds;
+      const p = i === steps ? 1 : 1 - Math.exp(-decay * t) * (Math.cos(ringing * t) + decay / ringing * Math.sin(ringing * t));
+      frames.push({ ...frame(p), offset: i / steps });
+    }
+    return { frames, duration: seconds * 1000 };
+  }
+
+  // Generated images start small and pop in on a loosely damped spring.
+  const freshMedia = new Set();
+  function popIn(node) {
+    if (calm()) return;
+    const from = .3;
+    const { frames, duration } = springAnimation(p => ({ transform: `scale(${from + (1 - from) * p})` }), 2.6, .32);
+    node.popAnimation?.cancel();
+    node.popAnimation = play(node, frames, { duration });
+    play(node, [{ opacity: 0 }, { opacity: 1 }], { duration: 120, easing: 'ease-out' });
+  }
+
+  function imageThumb(item, reveal) {
+    if (!state.mediaBase || !item.file || !isImageMime(item.mimeType || '')) return mediaItem(item);
+    const thumb = button('', 'Expand ' + item.name, () => openLightbox(item, thumb), 'image-thumb');
+    const image = document.createElement('img'); image.alt = item.name; image.draggable = false;
+    image.onerror = () => thumb.replaceWith(mediaChip(item));
+    if (reveal && !calm()) image.onload = () => play(image, [{ opacity: 0, transform: 'scale(.9)' }, { opacity: 1, transform: 'none' }], { duration: 260, easing: railSpring });
+    image.src = mediaUrl(item.file);
+    thumb.appendChild(image);
+    return thumb;
+  }
+
+  // The box a generated image will fill: a loading circle while it is made, or an error mark if it failed.
+  function statusThumb(status) {
+    const box = document.createElement('div'); box.className = 'image-thumb image-thumb-' + status;
+    box.setAttribute('role', 'status');
+    const label = status === 'pending' ? 'Generating image' : 'Image generation failed';
+    box.setAttribute('aria-label', label); box.title = label;
+    const mark = icon(status === 'pending' ? 'progress_activity' : 'broken_image');
+    if (status === 'pending') mark.classList.add('spinning');
+    box.appendChild(mark);
+    return box;
+  }
+
+  // Full view of a generated image inside the sidebar. It grows out of its thumbnail and shrinks back into it.
+  let lightbox;
+  function openLightbox(item, source) {
+    closeLightbox(true);
+    const root = document.createElement('div'); root.className = 'lightbox';
+    root.setAttribute('role', 'dialog'); root.setAttribute('aria-modal', 'true'); root.setAttribute('aria-label', item.name);
+    const bar = document.createElement('div'); bar.className = 'lightbox-bar';
+    const name = document.createElement('span'); name.className = 'lightbox-name'; name.textContent = item.name; name.title = item.name;
+    const open = button('', 'Open in editor', () => send({ type: 'openMedia', file: item.file }), 'icon-button', 'open_in_new');
+    const close = button('', 'Close', () => closeLightbox(), 'icon-button', 'close');
+    bar.append(name, open, close);
+    const stage = document.createElement('div'); stage.className = 'lightbox-stage';
+    const image = document.createElement('img'); image.className = 'lightbox-image'; image.alt = item.name; image.draggable = false;
+    stage.appendChild(image); root.append(bar, stage);
+    root.onclick = event => { if (event.target === root || event.target === stage) closeLightbox(); };
+    root.onkeydown = event => {
+      if (event.key === 'Escape') { event.preventDefault(); closeLightbox(); }
+      else if (event.key === 'Tab') { event.preventDefault(); (document.activeElement === open ? close : open).focus(); }
+    };
+    lightbox = { root, image, source };
+    const motion = !calm();
+    // Hidden until it can grow from the thumbnail, so it never flashes at full size first.
+    if (motion) image.style.visibility = 'hidden';
+    image.src = mediaUrl(item.file);
+    document.body.appendChild(root);
+    close.focus({ preventScroll: true });
+    if (!motion) return;
+    play(root, [{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: 'ease-out' });
+    const grow = () => {
+      image.style.visibility = '';
+      if (lightbox?.root !== root) return;
+      const to = image.getBoundingClientRect(), from = source.isConnected ? source.getBoundingClientRect() : undefined;
+      if (!from?.width || !to.width) return;
+      const dx = from.left + from.width / 2 - (to.left + to.width / 2), dy = from.top + from.height / 2 - (to.top + to.height / 2);
+      const scale = Math.min(from.width / to.width, from.height / to.height);
+      const { frames, duration } = springAnimation(p => ({ transform: `translate(${dx * (1 - p)}px, ${dy * (1 - p)}px) scale(${scale + (1 - scale) * p})` }), 3.2, .55);
+      image.growAnimation = play(image, frames, { duration });
+    };
+    if (image.complete && image.naturalWidth) grow(); else if (image.decode) image.decode().then(grow, grow); else image.onload = image.onerror = grow;
+  }
+
+  function closeLightbox(now) {
+    if (!lightbox) return;
+    const { root, image, source } = lightbox;
+    lightbox = undefined;
+    root.classList.add('closing');
+    if (source.isConnected) source.focus({ preventScroll: true });
+    if (now || calm()) { root.remove(); return; }
+    // Shrink from wherever the image is now, even mid-grow.
+    const current = getComputedStyle(image).transform;
+    image.growAnimation?.cancel();
+    const box = image.getBoundingClientRect(), target = source.isConnected ? source.getBoundingClientRect() : undefined;
+    const end = target?.width && box.width
+      ? `translate(${target.left + target.width / 2 - (box.left + box.width / 2)}px, ${target.top + target.height / 2 - (box.top + box.height / 2)}px) scale(${Math.min(target.width / box.width, target.height / box.height)})`
+      : 'scale(.92)';
+    play(image, [{ transform: current }, { transform: end }], { duration: 200, easing: 'cubic-bezier(.4, 0, .8, .6)', fill: 'forwards' });
+    play(root, [{ opacity: 1 }, { opacity: 0 }], { duration: 200, easing: 'ease-in', fill: 'forwards' }, () => root.remove());
+  }
+
   function renderFeed() {
     const feed = el('feed');
     const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
@@ -942,13 +1052,19 @@
           node.dataset.text = signature;
         }
       } else if (entry.kind === 'media') {
-        const signature = JSON.stringify([entry.caption || '', entry.items || []]);
+        const signature = JSON.stringify([entry.caption || '', entry.items || [], !!entry.generated, entry.status || '']);
         if (node.dataset.text !== signature) {
-          node.className = 'feed-entry bubble assistant markdown media-entry'; node.textContent = '';
+          // An image that finishes while its box is on screen fades into that box instead of popping in again.
+          const reveal = node.dataset.status === 'pending' && !entry.status;
+          node.className = 'feed-entry bubble assistant markdown media-entry' + (entry.generated ? ' media-generated' : ''); node.textContent = '';
           if (entry.caption) { const content = document.createElement('div'); content.className = 'message-content'; renderMarkdown(content, entry.caption); node.appendChild(content); }
-          for (const item of entry.items || []) node.appendChild(mediaItem(item));
+          if (entry.status) node.appendChild(statusThumb(entry.status));
+          else for (const item of entry.items || []) node.appendChild(entry.generated ? imageThumb(item, reveal) : mediaItem(item));
           node.dataset.text = signature;
+          node.dataset.status = entry.status || '';
         }
+        // Only images that arrive while the chat is open pop in; replayed history just appears.
+        if (freshMedia.delete(entry.id)) { node.classList.add('media-pop'); node.querySelectorAll('.image-thumb').forEach(popIn); }
       } else if (entry.kind === 'note') {
         const signature = [entry.icon || '', entry.text].join('\0');
         if (node.dataset.text !== signature) {
@@ -1975,7 +2091,8 @@
         if (state.runStates[message.sessionId]?.state === 'cancelling' && message.state === 'idle') {
           if (message.sessionId === state.activeSessionId) state.tools = state.tools.map(tool => tool.state === 'running' ? { ...tool, state: 'cancelled' } : tool);
           for (const entry of state.timeline[message.sessionId] || []) if (entry.kind === 'tool' && entry.event.state === 'running') entry.event = { ...entry.event, state: 'cancelled' };
-          for (const agent of Object.values(state.subagents[message.sessionId] || {})) if (agent.state === 'running') agent.state = 'cancelled';
+          // Delegated subagents can outlive the turn; the host reports how they end.
+          for (const agent of Object.values(state.subagents[message.sessionId] || {})) if (agent.state === 'running' && !agent.delegated) agent.state = 'cancelled';
         }
         {
           // A turn that ends on its own while you are looking elsewhere stays unread; cancelling is your own doing.
@@ -2006,6 +2123,7 @@
         if (message.prompt) agent.prompt = message.prompt;
         if (message.files) agent.files = message.files;
         if (message.state) agent.state = message.state;
+        if (message.delegated) agent.delegated = true;
         if (message.text) {
           const id = message.messageId || `message:${agent.messages.length}`;
           const entry = agent.messages.find(item => item.id === id);
@@ -2029,7 +2147,12 @@
         break;
       case 'mediaMessage': {
         const timeline = state.timeline[message.sessionId] ||= [];
-        if (!timeline.some(item => item.id === message.entryId)) timeline.push({ id: message.entryId, kind: 'media', caption: message.caption, items: message.items || [] });
+        // A generated image's box arrives pending, then the same entry is updated when the image is ready or failed.
+        const entry = { id: message.entryId, kind: 'media', caption: message.caption, items: message.items || [],
+          ...(message.generated ? { generated: true } : {}), ...(message.status ? { status: message.status } : {}) };
+        const index = timeline.findIndex(item => item.id === message.entryId);
+        if (index >= 0) timeline[index] = entry;
+        else { timeline.push(entry); if (message.generated) freshMedia.add(message.entryId); }
         break;
       }
       case 'noteMessage': {

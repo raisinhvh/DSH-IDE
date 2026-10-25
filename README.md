@@ -247,7 +247,7 @@ Packs are compiled with esbuild and run in their own Node child process (60s per
 
 ## Image generation
 
-When a ChatGPT (Codex) account is connected, agents and subagents get a `generate_image` tool. It uses GPT Image through your ChatGPT subscription, with no API key. The image is saved as a PNG under `.dsh/images` in the real workspace, and the agent calls `send_media` to show it. The tool uses the chat's Codex account, or the default Codex account for chats on other providers. If the sign-in has expired, Codex is asked to refresh it. This uses the same internal ChatGPT endpoint as the Codex CLI's built-in image tool. That endpoint is not a documented public API, so OpenAI could change it.
+When a ChatGPT (Codex) account is connected, agents and subagents get a `generate_image` tool. It uses GPT Image through your ChatGPT subscription, with no API key. Agents can also pass up to five input images (PNG, JPEG or WebP, 10 MB each) to edit, combine or restyle. Input images are sent as they are, without resizing. The image is saved as a PNG under `.dsh/images` in the real workspace. It also appears in the chat below the agent's latest message as a small thumbnail. Click the thumbnail to expand the image inside the sidebar. Press Escape or click outside the image to close it, or open the image in an editor tab. The tool uses the chat's Codex account, or the default Codex account for chats on other providers. If the sign-in has expired, Codex is asked to refresh it. This uses the same internal ChatGPT endpoint as the Codex CLI's built-in image tool. That endpoint is not a documented public API, so OpenAI could change it.
 
 ## Questions
 

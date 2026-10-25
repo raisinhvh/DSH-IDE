@@ -408,6 +408,36 @@ test('saved timelines restore tools, approvals and subagent output in order', ()
   assert.equal(restored.timeline('chat')[3].status, 'allowed');
 });
 
+test('cancelling a turn leaves delegated subagents to the host, which reports how they end', () => {
+  const sidebar = new DshSidebarProvider({});
+  sidebar.postMessage({ type: 'subagentEvent', sessionId: 'chat', agentId: 'native', title: 'Explore', state: 'running' });
+  sidebar.postMessage({ type: 'subagentEvent', sessionId: 'chat', agentId: 'delegated', title: 'Composer', state: 'running', delegated: true });
+  sidebar.postMessage({ type: 'runState', sessionId: 'chat', state: 'cancelling' });
+  sidebar.postMessage({ type: 'runState', sessionId: 'chat', state: 'idle' });
+  assert.equal(sidebar.subagents('chat').native.state, 'cancelled');
+  assert.equal(sidebar.subagents('chat').delegated.state, 'running');
+  sidebar.postMessage({ type: 'subagentEvent', sessionId: 'chat', agentId: 'delegated', state: 'cancelled' });
+  assert.equal(sidebar.subagents('chat').delegated.state, 'cancelled');
+});
+
+test('generated media keeps its flag in the saved timeline', () => {
+  const sidebar = new DshSidebarProvider({});
+  sidebar.postMessage({ type: 'mediaMessage', sessionId: 'chat', entryId: 'media:1', items: [{ name: 'a.png', mimeType: 'image/png', file: 'chat/a.png' }], generated: true });
+  sidebar.postMessage({ type: 'mediaMessage', sessionId: 'chat', entryId: 'media:2', items: [{ name: 'b.png', mimeType: 'image/png', file: 'chat/b.png' }] });
+  assert.deepEqual(sidebar.timeline('chat').map(entry => entry.generated), [true, undefined]);
+});
+
+test('a generated image box appears pending, then the same entry is filled in place', () => {
+  const sidebar = new DshSidebarProvider({});
+  sidebar.postMessage({ type: 'mediaMessage', sessionId: 'chat', entryId: 'media:1', items: [], generated: true, status: 'pending' });
+  sidebar.postMessage({ type: 'assistantDelta', sessionId: 'chat', entryId: 'after', text: 'Working on it' });
+  sidebar.postMessage({ type: 'mediaMessage', sessionId: 'chat', entryId: 'media:1', items: [{ name: 'a.png', mimeType: 'image/png', file: 'chat/a.png' }], generated: true });
+  const timeline = sidebar.timeline('chat');
+  assert.deepEqual(timeline.map(entry => entry.id), ['media:1', 'after']);
+  assert.equal(timeline[0].status, undefined);
+  assert.equal(timeline[0].items[0].name, 'a.png');
+});
+
 test('editing replaces the backend session and retains only the earlier conversation', async () => {
   const host = Object.create(ExtensionHost.prototype);
   const record = { id: 'chat', provider: 'deepseek-official', runtimeId: 'old', cliSessionId: 'old-cli' };

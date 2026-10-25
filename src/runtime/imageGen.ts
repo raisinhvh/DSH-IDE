@@ -9,7 +9,7 @@ type Json = Record<string, unknown>;
 
 export const GENERATE_IMAGE = 'generate_image';
 // Not a documented public API: the same endpoint the Codex CLI's built-in image tool uses with a ChatGPT sign-in.
-const ENDPOINT = 'https://chatgpt.com/backend-api/codex/images/generations';
+const BASE_URL = 'https://chatgpt.com/backend-api/codex/images';
 // The request model Codex sends; the backend does not report which image model ran.
 const MODEL = 'gpt-image-2';
 const ORIGINATOR = 'codex_cli_rs';
@@ -18,21 +18,29 @@ const QUALITIES = ['auto', 'low', 'medium', 'high'];
 const BACKGROUNDS = ['auto', 'opaque', 'transparent'];
 const MAX_PROMPT = 32000;
 const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
+// The Codex image tool takes at most five input images. Inputs are sent as they are, without resizing, so their size is capped.
+export const MAX_INPUT_IMAGES = 5;
+export const MAX_INPUT_BYTES = 10 * 1024 * 1024;
+const MAX_INPUT_TOTAL = 25 * 1024 * 1024;
 const TIMEOUT_MS = 300000;
 
-export interface ImageRequest { prompt: string; size: string; quality: string; background: string }
+/** images are the agent's input image paths, unresolved. */
+export interface ImageRequest { prompt: string; size: string; quality: string; background: string; images: string[] }
 /** How to reach one Codex account: its CLI command, environment (CODEX_HOME set) and config directory. */
 export interface CodexAuth { command: string; env: NodeJS.ProcessEnv; home: string }
 export interface GeneratedImage { bytes: Buffer; extension: string }
 
 export const GENERATE_IMAGE_TOOL: DelegateToolInfo = {
   name: GENERATE_IMAGE,
-  description: 'Generate an image from a text prompt with GPT Image, using the user\'s ChatGPT (Codex) account. '
-    + `The PNG is saved under .dsh/images in the workspace and its path is returned. Call ${SEND_MEDIA} with that path to show it to the user. Generation can take a minute.`,
+  description: 'Generate an image with GPT Image, using the user\'s ChatGPT (Codex) account. Give only a prompt to create a new image, '
+    + 'or also pass input images to edit them, combine them or use them as references (for example "this sprite, but ice-themed, same pixel style"). '
+    + `The PNG is saved under .dsh/images in the workspace, its path is returned, and it is shown to the user in the chat automatically, so do not also call ${SEND_MEDIA} for it. Generation can take a minute.`,
   inputSchema: {
     type: 'object',
     properties: {
-      prompt: { type: 'string', description: 'What to draw: subject, style, composition, colors, any text to render.' },
+      prompt: { type: 'string', description: 'What to draw: subject, style, composition, colors, any text to render. With input images, describe the change and what to keep, and say which image is which when there are several.' },
+      images: { type: 'array', minItems: 1, maxItems: MAX_INPUT_IMAGES, items: { type: 'string' },
+        description: `Optional input images, relative to the working copy or absolute: PNG, JPEG or WebP, up to ${MAX_INPUT_BYTES / 1024 / 1024} MB each. Earlier generated images under .dsh/images work too.` },
       size: { type: 'string', enum: SIZES, description: 'Requested width x height in pixels; the result may differ, so check the reported size. Default auto.' },
       quality: { type: 'string', enum: QUALITIES, description: 'Default auto. Low is fastest.' },
       background: { type: 'string', enum: BACKGROUNDS, description: 'Use transparent for icons, sprites and cutouts. Default auto.' },
@@ -42,21 +50,43 @@ export const GENERATE_IMAGE_TOOL: DelegateToolInfo = {
   },
 };
 
-export const IMAGE_INSTRUCTIONS = `DSH images: to create an image (art, icons, textures, mockups), call ${GENERATE_IMAGE} on the dsh-delegate MCP server. It saves the file under .dsh/images in the workspace; call ${SEND_MEDIA} to show it to the user.`;
+export const IMAGE_INSTRUCTIONS = `DSH images: to create an image (art, icons, textures, mockups), or to edit or restyle existing images by passing them as input images, call ${GENERATE_IMAGE} on the dsh-delegate MCP server. It saves the file under .dsh/images in the workspace and shows it in the chat itself.`;
 
 /** Validated generation options, or an error message for the agent. */
 export function parseImageRequest(args: Record<string, unknown>): ImageRequest | string {
   const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : '';
   if (!prompt) return '"prompt" is required.';
   if (prompt.length > MAX_PROMPT) return `"prompt" must be at most ${MAX_PROMPT} characters.`;
-  const request: ImageRequest = { prompt, size: 'auto', quality: 'auto', background: 'auto' };
+  const request: ImageRequest = { prompt, size: 'auto', quality: 'auto', background: 'auto', images: [] };
   for (const [key, options] of [['size', SIZES], ['quality', QUALITIES], ['background', BACKGROUNDS]] as const) {
     const value = args[key];
     if (value === undefined || value === null || value === '') continue;
     if (typeof value !== 'string' || !options.includes(value)) return `"${key}" must be one of: ${options.join(', ')}.`;
     request[key] = value;
   }
+  const images = args.images ?? [];
+  if (!Array.isArray(images) || images.some(item => typeof item !== 'string' || !item.trim())) return '"images" must be a list of file paths.';
+  if (images.length > MAX_INPUT_IMAGES) return `Pass at most ${MAX_INPUT_IMAGES} input images.`;
+  request.images = images.map(item => (item as string).trim());
   return request;
+}
+
+/** Why bytes cannot be an input image, or undefined when they can. */
+export function inputImageProblem(bytes: Buffer): string | undefined {
+  if (!imageExtension(bytes)) return 'not a PNG, JPEG or WebP image';
+  if (bytes.length > MAX_INPUT_BYTES) return `larger than ${MAX_INPUT_BYTES / 1024 / 1024} MB`;
+  return undefined;
+}
+
+/** The endpoint and JSON body for a request: generations without input images, edits with them. */
+export function imageRequestBody(request: ImageRequest, inputs: Buffer[]): { url: string; body: Json } {
+  const problem = inputs.map(inputImageProblem).find(Boolean);
+  if (problem) throw new Error(`An input image is ${problem}.`);
+  if (inputs.reduce((total, bytes) => total + bytes.length, 0) > MAX_INPUT_TOTAL) throw new Error(`Input images add up to more than ${MAX_INPUT_TOTAL / 1024 / 1024} MB.`);
+  const body: Json = { model: MODEL, prompt: request.prompt, size: request.size, quality: request.quality, background: request.background };
+  if (!inputs.length) return { url: `${BASE_URL}/generations`, body };
+  const url = (bytes: Buffer): string => { const extension = imageExtension(bytes); return `data:image/${extension === 'jpg' ? 'jpeg' : extension};base64,${bytes.toString('base64')}`; };
+  return { url: `${BASE_URL}/edits`, body: { ...body, images: inputs.map(bytes => ({ image_url: url(bytes) })) } };
 }
 
 /** A file name from the agent's name or the prompt's first words, stamped so repeated prompts do not collide. */
@@ -81,12 +111,13 @@ export function pngSize(bytes: Buffer): string | undefined {
   return imageExtension(bytes) === 'png' && bytes.length >= 24 ? `${bytes.readUInt32BE(16)}x${bytes.readUInt32BE(20)}` : undefined;
 }
 
-/** Generates one image with a Codex account's ChatGPT sign-in. */
-export async function generateImage(auth: CodexAuth, request: ImageRequest): Promise<GeneratedImage> {
+/** Generates one image with a Codex account's ChatGPT sign-in, from the prompt alone or from input image bytes too. */
+export async function generateImage(auth: CodexAuth, request: ImageRequest, inputs: Buffer[] = []): Promise<GeneratedImage> {
+  const target = imageRequestBody(request, inputs);
   let tokens = await readTokens(auth.home);
   if (expiring(tokens.access)) { await refreshTokens(auth); tokens = await readTokens(auth.home); }
-  let response = await post(auth, tokens, request);
-  if (response.status === 401) { await refreshTokens(auth); response = await post(auth, await readTokens(auth.home), request); }
+  let response = await post(auth, tokens, target);
+  if (response.status === 401) { await refreshTokens(auth); response = await post(auth, await readTokens(auth.home), target); }
   const body = await response.text();
   if (!response.ok) throw new Error(`Image generation failed (HTTP ${response.status}): ${errorText(body)}`);
   let parsed: Json;
@@ -125,9 +156,9 @@ function expiring(access: string): boolean {
   return typeof exp === 'number' && exp * 1000 < Date.now() + 5 * 60 * 1000;
 }
 
-async function post(auth: CodexAuth, tokens: Tokens, request: ImageRequest): Promise<Response> {
+async function post(auth: CodexAuth, tokens: Tokens, target: { url: string; body: Json }): Promise<Response> {
   const version = await codexVersion(auth);
-  return fetch(ENDPOINT, {
+  return fetch(target.url, {
     method: 'POST',
     signal: AbortSignal.timeout(TIMEOUT_MS),
     headers: {
@@ -140,7 +171,7 @@ async function post(auth: CodexAuth, tokens: Tokens, request: ImageRequest): Pro
       ...(tokens.accountId ? { 'ChatGPT-Account-ID': tokens.accountId } : {}),
       ...(tokens.fedramp ? { 'X-OpenAI-Fedramp': 'true' } : {}),
     },
-    body: JSON.stringify({ model: MODEL, ...request }),
+    body: JSON.stringify(target.body),
   });
 }
 

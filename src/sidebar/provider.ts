@@ -103,7 +103,10 @@ export class DshSidebarProvider implements vscode.WebviewViewProvider {
       }
       case 'mediaMessage': {
         const timeline = this.state.timeline[message.sessionId] ||= [];
-        if (!timeline.some(item => item.id === message.entryId)) timeline.push({ id: message.entryId, kind: 'media', caption: message.caption, items: message.items });
+        const entry = { id: message.entryId, kind: 'media' as const, caption: message.caption, items: message.items,
+          ...(message.generated ? { generated: true } : {}), ...(message.status ? { status: message.status } : {}) };
+        const index = timeline.findIndex(item => item.id === message.entryId);
+        if (index < 0) timeline.push(entry); else timeline[index] = entry;
         break;
       }
       case 'noteMessage': {
@@ -120,7 +123,7 @@ export class DshSidebarProvider implements vscode.WebviewViewProvider {
         if (this.state.runStates[message.sessionId]?.state === 'cancelling' && message.state === 'idle') {
           if (message.sessionId === this.state.activeSessionId) this.state.tools = this.state.tools.map(tool => tool.state === 'running' ? { ...tool, state: 'cancelled' } : tool);
           for (const entry of this.state.timeline[message.sessionId] || []) if (entry.kind === 'tool' && entry.event.state === 'running') entry.event = { ...entry.event, state: 'cancelled' };
-          for (const agent of Object.values(this.state.subagents[message.sessionId] || {})) if (agent.state === 'running') agent.state = 'cancelled';
+          for (const agent of Object.values(this.state.subagents[message.sessionId] || {})) if (agent.state === 'running' && !agent.delegated) agent.state = 'cancelled';
         }
         this.state.runStates[message.sessionId] = { state: message.state, label: message.label };
         if (message.state === 'thinking') this.state.error = undefined;
@@ -150,6 +153,7 @@ export class DshSidebarProvider implements vscode.WebviewViewProvider {
         if (message.prompt) agent.prompt = message.prompt;
         if (message.files) agent.files = message.files;
         if (message.state) agent.state = message.state;
+        if (message.delegated) agent.delegated = true;
         if (message.text) {
           const id = message.messageId || `message:${agent.messages.length}`;
           const entry = agent.messages.find(item => item.id === id);
