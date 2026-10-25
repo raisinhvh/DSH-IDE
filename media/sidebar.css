@@ -350,6 +350,20 @@ select, input { min-height: calc(30px * var(--text-scale, 1)); padding: 5px 8px;
 .composer-options .model-picker-wrap .composer-choice { width: 100%; }
 .composer-options .model-picker-wrap .composer-choice .symbol { margin-left: auto; }
 .option-wrap { position: relative; flex: 0 1 auto; min-width: 0; }
+.agents-wrap { flex: 0 0 auto; margin-right: auto; }
+.agents-wrap:not([hidden]) { transform-origin: bottom left; animation: menu-bubble 240ms cubic-bezier(.18, 1.45, .3, 1) both; }
+.agents-choice { color: var(--muted); }
+.agents-choice::before { content: ''; flex: 0 0 auto; width: 6px; height: 6px; margin: 0 4px 0 2px; border-radius: 50%; background: var(--vscode-progressBar-background, #0e70c0); animation: agents-pulse 1.6s ease-in-out infinite; }
+@keyframes agents-pulse { 50% { opacity: .35; transform: scale(.75); } }
+@media (prefers-reduced-motion: reduce) { .agents-choice::before { animation: none; } }
+.agents-menu { width: min(260px, calc(100vw - 20px)); }
+.agent-row { display: flex; flex-direction: column; gap: 1px; width: 100%; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; color: inherit; text-align: left; }
+.agent-row:hover, .agent-row:focus-visible { background: var(--hover); }
+.agent-row[aria-current="true"] { background: var(--vscode-list-inactiveSelectionBackground, var(--hover)); }
+.agent-row-head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.agent-row-name { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; }
+.agent-row-model { flex: 0 1 auto; min-width: 0; margin-left: auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); }
+.agent-row-activity { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); }
 .option-menu, .composer-options .model-menu { position: absolute; z-index: 30; left: 0; right: auto; bottom: calc(100% + 5px); top: auto; min-width: 110px; max-height: min(340px, 50vh); overflow: auto; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--vscode-dropdown-background, #252525); color: var(--vscode-dropdown-foreground, var(--vscode-foreground)); box-shadow: 0 9px 22px #0006; }
 .composer-options .model-menu { width: min(320px, calc(100vw - 20px)); left: auto; right: 0; }
 .menu-choice { display: block; width: 100%; padding: 7px 9px; border: 0; border-radius: 6px; background: transparent; color: inherit; text-align: left; text-transform: capitalize; }

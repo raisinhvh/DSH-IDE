@@ -821,6 +821,7 @@
     el('send-chevron').hidden = !running;
     if (!running) closeSendMenu();
     renderQueue();
+    renderAgents();
     el('cancel').hidden = !running;
     el('cancel').disabled = run.state === 'cancelling';
     fitComposerActions();
@@ -1403,9 +1404,45 @@
   window.addEventListener('resize', placeModelMenu);
 
   function closeMenus() {
-    for (const [menuId, buttonId] of [['model-menu', 'model-picker'], ['speed-options', 'speed-picker'], ['effort-options', 'effort-picker']]) {
+    for (const [menuId, buttonId] of [['model-menu', 'model-picker'], ['speed-options', 'speed-picker'], ['effort-options', 'effort-picker'], ['agents-menu', 'agents-picker']]) {
       el(menuId).hidden = true; el(buttonId).setAttribute('aria-expanded', 'false');
     }
+  }
+
+  // The chat's running subagents, under the composer. Rows update in place so hover and focus survive streaming text.
+  function renderAgents() {
+    const running = Object.values(state.subagents?.[state.activeSessionId || ''] || {}).filter(agent => agent.state === 'running');
+    const control = el('agents-control'), menu = el('agents-menu');
+    if (!running.length) { if (!control.hidden) { control.hidden = true; menu.hidden = true; el('agents-picker').setAttribute('aria-expanded', 'false'); } return; }
+    control.hidden = false;
+    const count = running.length + ' agent' + (running.length === 1 ? '' : 's');
+    // Just the number on the chip, so the model, speed and effort pickers keep their room.
+    el('agents-label').textContent = String(running.length);
+    el('agents-picker').title = count + ' running. Show them';
+    el('agents-picker').setAttribute('aria-label', el('agents-picker').title);
+    const rows = new Map([...menu.children].map(row => [row.dataset.agentId, row]));
+    running.forEach((agent, index) => {
+      let row = rows.get(agent.id);
+      if (!row) {
+        row = document.createElement('button'); row.type = 'button'; row.className = 'agent-row'; row.dataset.agentId = agent.id; row.setAttribute('role', 'menuitem');
+        row.onclick = () => { closeMenus(); openedSubagent = agent.id; renderFeed(); };
+        const head = document.createElement('span'); head.className = 'agent-row-head';
+        const name = document.createElement('span'); name.className = 'agent-row-name';
+        const model = document.createElement('span'); model.className = 'agent-row-model';
+        head.append(name, model);
+        const activity = document.createElement('span'); activity.className = 'agent-row-activity';
+        row.append(head, activity);
+      }
+      rows.delete(agent.id);
+      const last = agent.messages[agent.messages.length - 1]?.text.trim().split('\n').filter(Boolean).pop() || 'Starting…';
+      row.querySelector('.agent-row-name').textContent = agent.title;
+      row.querySelector('.agent-row-model').textContent = agent.model || '';
+      row.querySelector('.agent-row-activity').textContent = last;
+      row.title = 'Open ' + agent.title + "'s conversation";
+      row.setAttribute('aria-current', String(openedSubagent === agent.id));
+      if (menu.children[index] !== row) menu.insertBefore(row, menu.children[index] || null);
+    });
+    for (const row of rows.values()) row.remove();
   }
 
   function renderApproval() {
@@ -1816,7 +1853,7 @@
   }
 
   el('recent-toggle').onclick = () => { const menu = el('recent-menu'); menu.hidden = !menu.hidden; el('recent-toggle').setAttribute('aria-expanded', String(!menu.hidden)); };
-  for (const [buttonId, menuId] of [['model-picker', 'model-menu'], ['speed-picker', 'speed-options'], ['effort-picker', 'effort-options']]) {
+  for (const [buttonId, menuId] of [['model-picker', 'model-menu'], ['speed-picker', 'speed-options'], ['effort-picker', 'effort-options'], ['agents-picker', 'agents-menu']]) {
     el(buttonId).onclick = () => { const wasHidden = el(menuId).hidden; closeMenus(); el(menuId).hidden = !wasHidden; el(buttonId).setAttribute('aria-expanded', String(wasHidden)); if (menuId === 'model-menu') placeModelMenu(); };
   }
   el('settings-toggle').onclick = () => { const menu = el('settings-menu'); menu.hidden = !menu.hidden; el('settings-toggle').setAttribute('aria-expanded', String(!menu.hidden)); };

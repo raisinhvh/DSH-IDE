@@ -67,7 +67,7 @@ test('chat refresh preserves Markdown spacing on unchanged assistant messages', 
   let markdownRenders = 0;
   const context = {
     el(id) { if (!elements.has(id)) elements.set(id, node()); return elements.get(id); },
-    document: { createElement: node }, renderChanges() {}, closeSendMenu() {}, renderQueue() {}, fitComposerActions() {}, openedSubagent: '', editingEntryId: '', attachmentsReading: 0,
+    document: { createElement: node }, renderChanges() {}, closeSendMenu() {}, renderQueue() {}, renderAgents() {}, fitComposerActions() {}, openedSubagent: '', editingEntryId: '', attachmentsReading: 0,
     button: () => node(), send() {}, icon: () => node(), expandedBatches: new Set(), batchCounts: new Map(),
     renderMarkdown(target, text) { markdownRenders++; target.textContent = text; },
     state: { activeSessionId: 'chat', runStates: {}, subagents: {}, timeline: { chat: [
