@@ -245,6 +245,10 @@ export default {
 
 Packs are compiled with esbuild and run in their own Node child process (60s per call, output capped). They are arbitrary code, so only upload scripts you trust. New or changed packs appear in chats started afterwards.
 
+## Image generation
+
+When a ChatGPT (Codex) account is connected, agents and subagents get a `generate_image` tool. It uses GPT Image through your ChatGPT subscription, with no API key. The image is saved as a PNG under `.dsh/images` in the real workspace, and the agent calls `send_media` to show it. The tool uses the chat's Codex account, or the default Codex account for chats on other providers. If the sign-in has expired, Codex is asked to refresh it. This uses the same internal ChatGPT endpoint as the Codex CLI's built-in image tool. That endpoint is not a documented public API, so OpenAI could change it.
+
 ## Questions
 
 Agents can call `ask_questions` to show single-choice questions in the chat. Every question also offers an "Other…" text answer, and the user can skip.

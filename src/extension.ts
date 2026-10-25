@@ -6,7 +6,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve as reso
 import { homedir } from 'node:os';
 import * as vscode from 'vscode';
 import { AccountRegistry, ModelEntry, ModelRegistry, ResolvedModel } from './accounts';
-import { OAuthCliAccount, OAuthCliAccounts, OAuthCliProvider, setDetectedCliCommand } from './accounts/oauthCli';
+import { cliCommand, cliEnv, OAuthCliAccount, OAuthCliAccounts, OAuthCliProvider, setDetectedCliCommand } from './accounts/oauthCli';
 import { WindowsDependencies } from './runtime/dependencies';
 import { ReviewController, ReviewProposal } from './review/controller';
 import { DelegateAgentInfo, DelegateHost, DelegateResult, DelegateToolInfo } from './delegate/host';
@@ -15,6 +15,7 @@ import { shareInstructions } from './instructions/share';
 import { chatTitlePrompt, firstMessageTitle, parseChatName } from './runtime/naming';
 import { isUsageLimit } from './runtime/limits';
 import { MAX_MEDIA_BYTES, MAX_MEDIA_FILES, MEDIA_INSTRUCTIONS, mediaType, SEND_MEDIA, SEND_MEDIA_TOOL } from './runtime/media';
+import { GENERATE_IMAGE, GENERATE_IMAGE_TOOL, generateImage, IMAGE_INSTRUCTIONS, imageFileName, parseImageRequest, pngSize } from './runtime/imageGen';
 import { ToolpackRegistry } from './toolpacks/registry';
 import { ConfigSync } from './sync/controller';
 import { SYNCED_SETTINGS, accountForModel } from './sync/configSync';
@@ -946,11 +947,12 @@ class ExtensionHost implements vscode.Disposable {
   }
 
   /**
-   * Tools every agent's bridge offers, subagents included: file summaries, and toolpacks listed one line per pack.
-   * Tools of packs turned on in the owner's chat are offered directly.
+   * Tools every agent's bridge offers, subagents included: file summaries, media, image generation when a Codex account
+   * is connected, and toolpacks listed one line per pack. Tools of packs turned on in the owner's chat are offered directly.
    */
   private bridgeTools(owner?: string): DelegateToolInfo[] {
     const tools: DelegateToolInfo[] = this.summariesOn() ? [SUMMARY_TOOL, SEND_MEDIA_TOOL] : [SEND_MEDIA_TOOL];
+    if (this.oauthAccounts.list('codex-cli').length) tools.push(GENERATE_IMAGE_TOOL);
     const packs = this.toolpacks.running();
     if (packs.length) {
       const chat = owner ? this.chatForOwner(owner) : undefined;
@@ -1841,6 +1843,7 @@ class ExtensionHost implements vscode.Disposable {
       `DSH IDE. Workspace: ${this.root().name}. ${scope}`,
       delegationInstructions(bridged),
       bridged ? MEDIA_INSTRUCTIONS : '',
+      bridged && this.oauthAccounts.list('codex-cli').length ? IMAGE_INSTRUCTIONS : '',
       bridged && this.summariesOn() ? SUMMARY_INSTRUCTIONS : '',
     ].filter(Boolean).join('\n\n');
   }
@@ -2128,7 +2131,8 @@ class ExtensionHost implements vscode.Disposable {
       if (child.parent.cancelRequested && !child.background) return { text: 'Cancelled.', isError: true };
       if (tool === SUMMARY_TOOL.name) return this.readSummaries(child.parent, args);
       if (tool === SEND_MEDIA) return this.sendMedia(child.parent, args, child.label);
-      return this.packCall(child.parent, tool, args) ?? { text: `Subagents may only use toolpack and file summary tools, not "${tool}".`, isError: true };
+      if (tool === GENERATE_IMAGE) return this.generateImage(child.parent, args);
+      return this.packCall(child.parent, tool, args) ?? { text: `Subagents may only use toolpack, file summary, media and image tools, not "${tool}".`, isError: true };
     }
     const chat = [...this.chats.values()].find(item => item.ownerId === owner);
     if (!chat) return { text: 'This chat is no longer active.', isError: true };
@@ -2152,6 +2156,7 @@ class ExtensionHost implements vscode.Disposable {
     if (tool === 'ask_questions') return this.askQuestions(chat, args);
     if (tool === SUMMARY_TOOL.name) return this.readSummaries(chat, args);
     if (tool === SEND_MEDIA) return this.sendMedia(chat, args);
+    if (tool === GENERATE_IMAGE) return this.generateImage(chat, args);
     return this.packCall(chat, tool, args) ?? { text: `Unknown tool "${tool}".`, isError: true };
   }
 
@@ -2247,6 +2252,27 @@ class ExtensionHost implements vscode.Disposable {
     if (!from && chat.running) chat.segment++;
     this.sidebar.postMessage({ type: 'mediaMessage', sessionId: chat.record.id, entryId: `media:${randomUUID()}`, caption: from ? `**${from}:** ${caption || ''}`.trim() : caption, items });
     return { text: `Shown to the user: ${items.map(item => item.name).join(', ')}.${problems.length ? ` Not sent: ${problems.join('; ')}` : ''}` };
+  }
+
+  /** Generates an image with the chat's Codex account, or the default one, and saves it under .dsh/images in the real workspace. */
+  private async generateImage(chat: Chat, args: Record<string, unknown>): Promise<DelegateResult> {
+    const request = parseImageRequest(args);
+    if (typeof request === 'string') return { text: request, isError: true };
+    const own = this.oauthAccounts.get(chat.record.accountId);
+    const account = own?.provider === 'codex-cli' ? own : this.oauthAccounts.getDefault('codex-cli');
+    if (!account) return { text: 'Image generation needs a ChatGPT (Codex) account. Connect one in Accounts.', isError: true };
+    try {
+      const image = await generateImage({ command: cliCommand('codex-cli'), env: cliEnv(account), home: account.directory }, request);
+      // The real workspace, not the chat's private copy: .dsh is outside the mirror's review scope.
+      const dir = join(this.root().uri.fsPath, '.dsh', 'images');
+      await mkdir(dir, { recursive: true });
+      const path = join(dir, imageFileName(args.name, request.prompt, image.extension));
+      await writeFile(path, image.bytes, { flag: 'wx' });
+      const size = pngSize(image.bytes);
+      return { text: `Image saved to ${path}${size ? ` (${size})` : ''}. Call ${SEND_MEDIA} with that path to show it to the user.` };
+    } catch (error) {
+      return { text: error instanceof Error ? error.message : String(error), isError: true };
+    }
   }
 
   private async openMedia(file: string): Promise<void> {

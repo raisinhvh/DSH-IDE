@@ -23,3 +23,4 @@ await import('./summaries.test.mjs');
 await import('./toolpack-access.test.mjs');
 await import('./handoff.test.mjs');
 await import('./limits.test.mjs');
+await import('./image-gen.test.mjs');
