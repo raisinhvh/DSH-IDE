@@ -6,14 +6,18 @@ import * as vscode from 'vscode';
 import { SidebarSync } from '../sidebar/view';
 import {
   AccountRef, ConfigBundle, SYNCED_SETTINGS, SyncRoots, applyFiles, applyToolpackSettings, collectFiles, collectToolpacks, findConfigGist, hashBundle,
-  localModels, portableModels, readConfigGist, restoreMcpSecrets, stableJson, stripMcpSecrets, writeConfigGist,
+  localModels, mergeBundles, parseBundle, portableModels, readConfigGist, restoreMcpSecrets, serializeBundle, stableJson, stripMcpSecrets, writeConfigGist,
 } from './configSync';
 
 const STATE_KEY = 'dsh.ide.configSync.v1';
 /** Local edits are batched so a burst of saves makes one upload. */
 const UPLOAD_DELAY = 5000;
 /** Regaining focus looks for edits from other PCs at most this often. */
-const FOCUS_CHECK_INTERVAL = 5 * 60_000;
+const FOCUS_CHECK_INTERVAL = 60_000;
+/** While auto sync is on, GitHub is also checked this often, so a window that stays focused still picks up edits. */
+const POLL_INTERVAL = 2 * 60_000;
+/** The GitHub copy as of the last sync, kept so edits made on both PCs can be merged. */
+const BASE_FILE = 'config-sync-base.json';
 
 interface SyncState {
   gistId?: string;
@@ -50,13 +54,20 @@ export class ConfigSync implements vscode.Disposable {
   private busy?: SidebarSync['busy'];
   private error?: string;
   private timer?: NodeJS.Timeout;
+  private poll?: NodeJS.Timeout;
+  /** Items both PCs changed differently, waiting for a choice on the Sync page. Empty means the whole config (no base to merge from). */
+  private conflict?: string[];
+  private notified = '';
   private applying = false;
   private ready = false;
   private lastCheck = 0;
 
   public constructor(private readonly context: vscode.ExtensionContext, private readonly host: ConfigSyncHost) {}
 
-  public dispose(): void { if (this.timer) clearTimeout(this.timer); }
+  public dispose(): void {
+    if (this.timer) clearTimeout(this.timer);
+    if (this.poll) clearInterval(this.poll);
+  }
 
   private get saved(): SyncState { return { auto: true, ...this.context.globalState.get<Partial<SyncState>>(STATE_KEY, {}) }; }
   private async save(patch: Partial<SyncState>): Promise<void> { await this.context.globalState.update(STATE_KEY, { ...this.saved, ...patch }); }
@@ -65,7 +76,7 @@ export class ConfigSync implements vscode.Disposable {
 
   public post(): void {
     const state = this.saved;
-    this.host.post({ connected: !!state.gistId, account: state.account, gistUrl: state.gistUrl, auto: state.auto, lastSync: state.lastSync, busy: this.busy, error: this.error });
+    this.host.post({ connected: !!state.gistId, account: state.account, gistUrl: state.gistUrl, auto: state.auto, lastSync: state.lastSync, busy: this.busy, error: this.error, conflict: this.conflict });
   }
 
   /** Runs sync work one at a time and reports its progress and errors on the Sync page. */
@@ -110,15 +121,44 @@ export class ConfigSync implements vscode.Disposable {
     return { bundle, hash: hashBundle(bundle) };
   }
 
-  private async upload(token: string, bundle: ConfigBundle, hash: string): Promise<void> {
-    const state = this.saved;
-    const gist = await writeConfigGist(token, state.gistId, bundle) ?? await writeConfigGist(token, undefined, bundle);
-    await this.save({ gistId: gist!.id, gistUrl: gist!.url, remoteHash: hash, localHash: hash, lastSync: Date.now() });
+  private get baseFile(): string { return join(this.context.globalStorageUri.fsPath, BASE_FILE); }
+
+  private async readBase(): Promise<ConfigBundle | undefined> {
+    try { return parseBundle(await fs.readFile(this.baseFile, 'utf8')); } catch { return undefined; }
   }
 
-  private async download(bundle: ConfigBundle, remoteHash: string, gist: { id: string; url: string }): Promise<void> {
+  /** Remembers what GitHub and this PC hold after a sync. */
+  private async record(gist: { id: string; url: string }, remote: ConfigBundle, localHash: string): Promise<void> {
+    await fs.mkdir(this.context.globalStorageUri.fsPath, { recursive: true });
+    await fs.writeFile(this.baseFile, serializeBundle(remote));
+    await this.save({ gistId: gist.id, gistUrl: gist.url, remoteHash: hashBundle(remote), localHash, lastSync: Date.now() });
+    this.conflict = undefined;
+    this.notified = '';
+  }
+
+  private async upload(token: string, bundle: ConfigBundle, localHash: string): Promise<void> {
+    const state = this.saved;
+    const gist = await writeConfigGist(token, state.gistId, bundle) ?? await writeConfigGist(token, undefined, bundle);
+    await this.record(gist!, bundle, localHash);
+  }
+
+  private async download(bundle: ConfigBundle, gist: { id: string; url: string }): Promise<void> {
+    const failures = await this.apply(bundle);
+    await this.record(gist, bundle, (await this.snapshot()).hash);
+    if (failures.length) throw new Error(`Downloaded, but some toolpacks could not be installed: ${failures.join(' ')}`);
+  }
+
+  /** Applies a merge of both PCs' edits here, then uploads it. */
+  private async merge(token: string, bundle: ConfigBundle): Promise<void> {
+    const failures = await this.apply(bundle);
+    await this.upload(token, bundle, (await this.snapshot()).hash);
+    this.host.log('Config sync: merged edits from this PC and GitHub.');
+    if (failures.length) throw new Error(`Merged, but some toolpacks could not be installed: ${failures.join(' ')}`);
+  }
+
+  /** Makes this PC's settings, rules, skills and toolpacks match `bundle`. Returns toolpacks that failed to install. */
+  private async apply(bundle: ConfigBundle): Promise<string[]> {
     this.applying = true;
-    const failures: string[] = [];
     try {
       const config = vscode.workspace.getConfiguration('dsh');
       const accounts = this.host.accounts();
@@ -131,12 +171,10 @@ export class ConfigSync implements vscode.Disposable {
       }
       const roots = this.host.roots();
       await applyFiles(roots, bundle.files);
-      failures.push(...await this.applyToolpacks(roots.toolpacks, bundle.toolpacks));
+      const failures = await this.applyToolpacks(roots.toolpacks, bundle.toolpacks);
       await this.host.applied();
+      return failures;
     } finally { this.applying = false; }
-    const local = await this.snapshot();
-    await this.save({ gistId: gist.id, gistUrl: gist.url, remoteHash, localHash: local.hash, lastSync: Date.now() });
-    if (failures.length) throw new Error(`Downloaded, but some toolpacks could not be installed: ${failures.join(' ')}`);
   }
 
   private async applyToolpacks(dir: string, remote: ConfigBundle['toolpacks']): Promise<string[]> {
@@ -173,12 +211,11 @@ export class ConfigSync implements vscode.Disposable {
       if (!found) { await this.upload(accessToken, local.bundle, local.hash); return; }
       const remote = await readConfigGist(accessToken, found.id);
       if (!remote) { await this.upload(accessToken, local.bundle, local.hash); return; }
-      const remoteHash = hashBundle(remote.bundle);
-      if (remoteHash === local.hash) { await this.save({ gistId: found.id, gistUrl: found.url, remoteHash, localHash: local.hash, lastSync: Date.now() }); return; }
+      if (hashBundle(remote.bundle) === local.hash) { await this.record(remote.gist, remote.bundle, local.hash); return; }
       const choice = await vscode.window.showWarningMessage('Your GitHub account already has a DSH config.', {
         modal: true, detail: `It was last updated ${new Date(remote.gist.updatedAt).toLocaleString()}. Download replaces this PC's global rules, skills, toolpacks and DSH settings. Upload replaces the GitHub copy with this PC's config.`,
       }, 'Download', 'Upload this PC');
-      if (choice === 'Download') await this.download(remote.bundle, remoteHash, remote.gist);
+      if (choice === 'Download') await this.download(remote.bundle, remote.gist);
       else if (choice === 'Upload this PC') await this.upload(accessToken, local.bundle, local.hash);
     });
   }
@@ -200,7 +237,23 @@ export class ConfigSync implements vscode.Disposable {
       const choice = confirmed ? 'Download' : await vscode.window.showWarningMessage('Replace this PC\'s DSH config with the GitHub copy?', {
         modal: true, detail: 'Global rules, skills, toolpacks and DSH settings are replaced. API keys and MCP secrets on this PC are kept.',
       }, 'Download');
-      if (choice === 'Download') await this.download(remote.bundle, hashBundle(remote.bundle), remote.gist);
+      if (choice === 'Download') await this.download(remote.bundle, remote.gist);
+    });
+  }
+
+  /** Settles a conflict: both PCs' other edits are kept, and items both changed come from the side chosen. */
+  public resolve(prefer: 'local' | 'remote'): Promise<unknown> {
+    return this.run(prefer === 'local' ? 'uploading' : 'downloading', async () => {
+      const { accessToken } = await this.session(true);
+      const gistId = this.saved.gistId;
+      const [remote, local, base] = await Promise.all([gistId ? readConfigGist(accessToken, gistId) : undefined, this.snapshot(), this.readBase()]);
+      if (!remote) { await this.upload(accessToken, local.bundle, local.hash); return; }
+      if (!base) {
+        if (prefer === 'local') await this.upload(accessToken, local.bundle, local.hash);
+        else await this.download(remote.bundle, remote.gist);
+        return;
+      }
+      await this.merge(accessToken, mergeBundles(base, local.bundle, remote.bundle, prefer).bundle);
     });
   }
 
@@ -209,6 +262,8 @@ export class ConfigSync implements vscode.Disposable {
     await this.queue;
     if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
     this.error = undefined;
+    this.conflict = undefined;
+    await fs.rm(this.baseFile, { force: true });
     await this.context.globalState.update(STATE_KEY, { auto: this.saved.auto });
     this.post();
   }
@@ -223,6 +278,7 @@ export class ConfigSync implements vscode.Disposable {
   public start(): void {
     this.ready = true;
     this.check();
+    this.poll ??= setInterval(() => this.check(true), POLL_INTERVAL);
   }
 
   /** Called when synced config changes on this PC. Uploads after a short pause if auto sync is on. */
@@ -255,22 +311,37 @@ export class ConfigSync implements vscode.Disposable {
     if (!remote) { await this.upload(accessToken, local.bundle, local.hash); this.error = undefined; return; }
     const remoteHash = hashBundle(remote.bundle);
     if (remoteHash === local.hash) {
-      await this.save({ remoteHash, localHash: local.hash, gistUrl: remote.gist.url });
+      // Also writes the merge base for PCs that synced before merging existed.
+      const settled = state.remoteHash === remoteHash && state.localHash === local.hash && !this.conflict && await fs.access(this.baseFile).then(() => true, () => false);
+      if (!settled) await this.record(remote.gist, remote.bundle, local.hash);
       this.error = undefined;
       return;
     }
     const remoteChanged = remoteHash !== state.remoteHash;
     const localChanged = local.hash !== state.localHash;
-    if (remoteChanged && !localChanged) await this.download(remote.bundle, remoteHash, remote.gist);
+    if (remoteChanged && !localChanged) await this.download(remote.bundle, remote.gist);
     else if (localChanged && !remoteChanged) await this.upload(accessToken, local.bundle, local.hash);
     else if (remoteChanged && localChanged) {
-      // Both sides changed; never overwrite either one without asking.
-      void vscode.window.showWarningMessage('DSH config changed both on this PC and on GitHub.', 'Download', 'Upload this PC').then(choice => {
-        if (choice === 'Download') void this.downloadNow(true);
-        else if (choice === 'Upload this PC') void this.uploadNow();
-      });
+      // Both sides changed: edits to different items merge; the same item changed on both waits for a choice.
+      const base = await this.readBase();
+      const merged = base && mergeBundles(base, local.bundle, remote.bundle);
+      if (merged && !merged.conflicts.length) await this.merge(accessToken, merged.bundle);
+      else this.raiseConflict(merged ? merged.conflicts : []);
       return;
     }
     this.error = undefined;
+  }
+
+  /** Shows the conflict on the Sync page, and once as a notification. */
+  private raiseConflict(items: string[]): void {
+    this.conflict = items;
+    const key = items.join('\n') || '*';
+    if (key === this.notified) return;
+    this.notified = key;
+    const detail = items.length ? `Changed on both: ${items.slice(0, 5).join(', ')}${items.length > 5 ? ` and ${items.length - 5} more` : ''}.` : 'DSH config changed both on this PC and on GitHub.';
+    void vscode.window.showWarningMessage(`DSH sync is paused. ${detail}`, 'Keep GitHub copy', 'Keep this PC').then(choice => {
+      if (choice === 'Keep GitHub copy') void this.resolve('remote');
+      else if (choice === 'Keep this PC') void this.resolve('local');
+    });
   }
 }

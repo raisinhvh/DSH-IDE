@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   accountForModel, applyFiles, applyToolpackSettings, collectFiles, collectToolpacks, findConfigGist, hashBundle, localModels, parseBundle, portableModels,
-  readConfigGist, restoreMcpSecrets, serializeBundle, stripMcpSecrets, syncPath, writeConfigGist, GIST_FILE,
+  readConfigGist, restoreMcpSecrets, serializeBundle, stripMcpSecrets, syncPath, writeConfigGist, GIST_FILE, LOCAL_SETTINGS, mergeBundles, SYNCED_SETTINGS,
 } from '../dist/sync/configSync.mjs';
+import { readFileSync } from 'node:fs';
 
 const exists = path => access(path).then(() => true, () => false);
 
@@ -62,6 +63,37 @@ test('applying files writes, updates and deletes only synced paths', async t => 
   assert.equal(await exists(join(target.dshHome, 'skills', '.system', 'builtin', 'SKILL.md')), true);
   assert.equal(await exists(join(target.dshHome, 'config.json')), true);
   assert.equal(hashBundle(bundle(await collectFiles(target))), hashBundle(bundle(remote)));
+});
+
+test('every dsh setting either syncs or is listed as staying on this PC', () => {
+  const declared = Object.keys(JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).contributes.configuration.properties)
+    .map(key => key.replace(/^dsh\./, ''));
+  assert.deepEqual([...SYNCED_SETTINGS, ...LOCAL_SETTINGS].sort(), declared.sort());
+});
+
+test('edits made on both PCs merge item by item', () => {
+  const base = bundle({ 'dsh/AGENTS.md': { data: 'rules' }, 'agents/skills/a/SKILL.md': { data: 'a' } }, { models: [1] }, { p: { enabled: true, source: 's' } });
+  const local = bundle({ 'dsh/AGENTS.md': { data: 'rules' }, 'agents/skills/a/SKILL.md': { data: 'a' }, 'agents/skills/b/SKILL.md': { data: 'b' } }, { models: [1], subagents: [2] }, {});
+  const remote = bundle({ 'dsh/AGENTS.md': { data: 'new rules' } }, { models: [1, 3] }, { p: { enabled: true, source: 's' } });
+  const { bundle: merged, conflicts } = mergeBundles(base, local, remote);
+  assert.deepEqual(conflicts, []);
+  // Remote deleted skill a and edited the rules; this PC added skill b, a subagent and removed toolpack p.
+  assert.deepEqual(merged.files, { 'dsh/AGENTS.md': { data: 'new rules' }, 'agents/skills/b/SKILL.md': { data: 'b' } });
+  assert.deepEqual(merged.settings, { models: [1, 3], subagents: [2] });
+  assert.deepEqual(merged.toolpacks, {});
+});
+
+test('an item changed differently on both PCs is a conflict settled by the chosen side', () => {
+  const base = bundle({ 'dsh/AGENTS.md': { data: 'old' } }, { models: [1] });
+  const local = bundle({ 'dsh/AGENTS.md': { data: 'mine' } }, { models: [1], nameModel: 'x' });
+  const remote = bundle({ 'dsh/AGENTS.md': { data: 'theirs' } }, { models: [2] });
+  const remoteWins = mergeBundles(base, local, remote);
+  assert.deepEqual(remoteWins.conflicts, ['~/.dsh/AGENTS.md']);
+  assert.deepEqual(remoteWins.bundle.files, remote.files);
+  assert.deepEqual(remoteWins.bundle.settings, { models: [2], nameModel: 'x' });
+  assert.deepEqual(mergeBundles(base, local, remote, 'local').bundle.files, local.files);
+  // The same edit on both sides is not a conflict.
+  assert.deepEqual(mergeBundles(base, remote, remote).conflicts, []);
 });
 
 test('rejects paths outside the synced folders', () => {

@@ -21,17 +21,40 @@ export const CHAT_ICONS = [
 ];
 const ICONS = new Set(CHAT_ICONS);
 
+/** Icons the activity rail falls back on when two chats would show the same one: chat-like icons first, then the topical ones. */
+export const RAIL_FALLBACK_ICONS = [
+  ...['chat_bubble', 'chat', 'forum', 'sms', 'comment', 'question_answer', 'textsms', 'mode_comment', 'add_comment', 'mark_chat_unread'],
+  ...CHAT_ICONS.filter(icon => !['chat', 'forum'].includes(icon)),
+];
+
+/**
+ * `icon` when no other chat uses it, else a free icon chosen by `seed` so a chat keeps getting the same one.
+ * Once every icon is taken, `icon` is returned as is.
+ */
+export function uniqueChatIcon(icon: string | undefined, taken: Iterable<string>, seed: string): string | undefined {
+  const used = new Set(taken);
+  if (icon && !used.has(icon)) return icon;
+  const free = CHAT_ICONS.filter(item => !used.has(item));
+  if (!free.length) return icon;
+  let hash = 0;
+  for (const char of seed) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return free[hash % free.length];
+}
+
 /** Provisional title shown until (or instead of) a name model reply. */
 export function firstMessageTitle(prompt: string): string {
   return (prompt.trim().replace(/\s+/g, ' ') || 'Image').slice(0, 48);
 }
 
-export function chatTitlePrompt(request: string): string {
+/** `taken` lists icons other chats already use; they are left out of the choices while any others remain. */
+export function chatTitlePrompt(request: string, taken: Iterable<string> = []): string {
+  const used = new Set(taken);
+  const free = CHAT_ICONS.filter(icon => !used.has(icon));
   return 'Name a coding chat that starts with the request below. Reply with ONLY one line in the form "icon | Title".\n'
     + 'Title: as short as possible. ONE word is best, two words are fine, three words is the hard maximum. Never write four or more words. '
     + 'Sentence case, no quotes, no trailing punctuation. Name the concrete subject, for example "Tabs", "Rail icons", "Login bug" or "Diff viewer". '
     + 'When the request covers several things, name the main one or what they share.\n'
-    + `Icon: the one name from this list that best fits the subject: ${CHAT_ICONS.join(', ')}.\n`
+    + `Icon: the one name from this list that best fits the subject: ${(free.length ? free : CHAT_ICONS).join(', ')}.\n`
     + 'Example reply: bug_report | Login bug\n'
     + `Do not use any tools.\n\nRequest:\n${request.trim().slice(0, 4000)}`;
 }

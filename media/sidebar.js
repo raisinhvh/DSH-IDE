@@ -21,6 +21,7 @@
   state.slashCommands ||= [];
   state.accessibility ||= {};
   state.sync ||= { connected: false, auto: true };
+  state.railIcons ||= [];
   boot.remove();
   const local = vscode.getState() || {};
   const pages = ['chat', 'accounts', 'models', 'subagents', 'instructions', 'toolcalls', 'customize', 'accessibility', 'sync'];
@@ -260,6 +261,24 @@
   }
 
   const railIcon = session => typeof session.icon === 'string' && session.icon.trim() ? session.icon.trim() : 'chat_bubble';
+  // The icon each tab showed last render, so tabs keep their icons as other chats come and go.
+  const railShown = new Map();
+  /** Gives every chat on the rail its own icon: its chosen icon when free, else the one it already shows, else a free fallback. */
+  function assignRailIcons(sessions) {
+    const icons = new Map(), used = new Set();
+    const claim = (id, name) => { icons.set(id, name); used.add(name); };
+    const pass = pick => { for (const session of sessions) { const name = !icons.has(session.id) && pick(session); if (name && !used.has(name)) claim(session.id, name); } };
+    pass(session => railShown.get(session.id) === railIcon(session) && railIcon(session));
+    pass(railIcon);
+    pass(session => railShown.get(session.id));
+    for (const session of sessions) {
+      if (icons.has(session.id)) continue;
+      claim(session.id, state.railIcons.find(name => !used.has(name)) || railIcon(session));
+    }
+    railShown.clear();
+    for (const [id, name] of icons) railShown.set(id, name);
+    return icons;
+  }
   // Hovering or focusing a tab grows it to the right with the chat name. The rail clips its children,
   // so the grown tab is one fixed overlay laid exactly over the tab instead of the tab itself.
   let railFlyout = null;
@@ -335,6 +354,7 @@
       items.push({ session, status, at: railSince.get(session.id).at });
     }
     items.sort((a, b) => railRank[a.status] - railRank[b.status] || b.at - a.at);
+    const icons = assignRailIcons(items.map(item => item.session));
     const motion = !calm();
     // Measure on-screen positions first, including any move still in flight, so new motion starts where the eye is.
     const before = new Map([...railTabs].map(([id, node]) => [id, node.getBoundingClientRect()]));
@@ -352,7 +372,7 @@
       tab.className = ['rail-tab', status, session.id === state.activeSessionId ? 'active' : ''].filter(Boolean).join(' ');
       tab.title = session.name + ': ' + detail;
       tab.setAttribute('aria-label', session.name + '. ' + detail);
-      tab.dataset.icon = tab.firstChild.textContent = railIcon(session);
+      tab.dataset.icon = tab.firstChild.textContent = icons.get(session.id);
     };
     rail.onscroll = () => hideRailFlyout(true);
     // Put tabs in order, moving only the ones out of place: a moved node loses its running CSS transitions.
@@ -383,7 +403,7 @@
     for (const change of changes) {
       if (change.fresh) continue;
       change.changed = change.tab.dataset.status !== change.status;
-      change.reiconed = change.tab.dataset.icon !== railIcon(change.session);
+      change.reiconed = change.tab.dataset.icon !== icons.get(change.id);
       applyTab(change.tab, change.session, change.status);
     }
     // An open flyout follows its tab's look; if the tab was moved out from under the pointer, the flyout goes.
@@ -1826,6 +1846,13 @@
       if (sync.busy) status.appendChild(note(syncBusy[sync.busy] || 'Working…'));
       if (sync.error) status.appendChild(note(sync.error, 'sync-note sync-error'));
       root.appendChild(status);
+      if (sync.connected && sync.conflict) {
+        const items = sync.conflict;
+        const conflict = settingRow('sync:conflict', { icon: 'sync_problem', title: 'Sync is paused',
+          desc: items.length ? 'Changed on both this PC and GitHub: ' + items.join(', ') + '. Everything else is merged once you choose.' : 'Config changed on both this PC and GitHub. Choose which copy to keep.' });
+        conflict.appendChild(actions([['Keep GitHub copy', 'Use the GitHub version of the items changed on both', 'keepRemote'], ['Keep this PC', 'Use this PC\'s version of the items changed on both', 'keepLocal']]));
+        root.appendChild(conflict);
+      }
       if (sync.connected) {
         root.appendChild(settingRow('sync:auto', { icon: 'sync', title: 'Sync automatically', desc: 'Uploads a few seconds after you change synced config, and picks up changes from your other PCs at startup. If both sides changed, DSH asks first.' }, !!sync.auto, () => {
           state.sync = { ...sync, auto: !sync.auto };

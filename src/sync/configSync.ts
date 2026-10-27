@@ -7,8 +7,11 @@ export const SYNCED_SETTINGS = [
   'models', 'subagents', 'nameModel', 'reviewModel', 'summaryModel', 'deciderModel', 'smartAutoRanks', 'mcpServers', 'accessibility',
   'features.activityRail', 'features.autoName', 'features.shareRules', 'features.editorContext', 'features.reduceMotion', 'features.reviewAgent', 'features.fileSummaries',
   'features.smartAuto',
-  'updates.check', 'runtime.mirror',
+  'updates.check', 'updates.repository', 'runtime.mirror', 'runtime.maxWorkspaceFiles', 'runtime.maxWorkspaceBytes',
 ] as const;
+
+/** `dsh.*` settings that stay on each PC because they hold paths to programs installed on it. */
+export const LOCAL_SETTINGS = ['runtime.nodePath', 'runtime.cursorAgentPath', 'runtime.codexPath', 'runtime.claudePath'] as const;
 
 export const GIST_FILE = 'dsh-config.json';
 export const GIST_DESCRIPTION = 'DSH-IDE config (synced by DSH-IDE; API keys and MCP secrets are not included)';
@@ -77,6 +80,34 @@ export function parseBundle(text: string): ConfigBundle {
     }
   }
   return bundle as ConfigBundle;
+}
+
+/**
+ * Three-way merge of two configs that both changed since `base`, the GitHub copy as of the last sync. Each setting,
+ * file and toolpack is taken from whichever side changed it. Items both sides changed differently are conflicts and
+ * come from `prefer`.
+ */
+export function mergeBundles(base: ConfigBundle, local: ConfigBundle, remote: ConfigBundle, prefer: 'local' | 'remote' = 'remote'): { bundle: ConfigBundle; conflicts: string[] } {
+  const conflicts: string[] = [];
+  const merge = <T>(label: (key: string) => string, b: Record<string, T>, l: Record<string, T>, r: Record<string, T>): Record<string, T> => {
+    const merged: Record<string, T> = {};
+    for (const key of [...new Set([...Object.keys(b), ...Object.keys(l), ...Object.keys(r)])].sort()) {
+      const [was, mine, theirs] = [b, l, r].map(side => Object.hasOwn(side, key) ? stableJson(side[key]) : undefined);
+      let pick = was === theirs && mine !== theirs ? l : r;
+      if (was !== mine && was !== theirs && mine !== theirs) { conflicts.push(label(key)); pick = prefer === 'local' ? l : r; }
+      if (Object.hasOwn(pick, key)) merged[key] = pick[key];
+    }
+    return merged;
+  };
+  return {
+    bundle: {
+      format: 'dsh-config', version: 1,
+      settings: merge(key => `setting dsh.${key}`, base.settings, local.settings, remote.settings),
+      files: merge(key => key.replace(/^dsh\//, '~/.dsh/').replace(/^agents\//, '~/.agents/'), base.files, local.files, remote.files),
+      toolpacks: merge(key => `toolpack ${key}`, base.toolpacks, local.toolpacks, remote.toolpacks),
+    },
+    conflicts,
+  };
 }
 
 /** Maps a bundle path to an absolute path, rejecting anything outside the synced locations. */

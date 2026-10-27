@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { CHAT_ICONS, chatTitlePrompt, cleanChatTitle, firstMessageTitle, MAX_TITLE_LENGTH, parseChatName } from '../dist/runtime/naming.mjs';
+import { CHAT_ICONS, chatTitlePrompt, cleanChatTitle, firstMessageTitle, MAX_TITLE_LENGTH, parseChatName, RAIL_FALLBACK_ICONS, uniqueChatIcon } from '../dist/runtime/naming.mjs';
 
 test('first-message titles collapse whitespace and fall back for image-only prompts', () => {
   assert.equal(firstMessageTitle('  fix   the\nsidebar  '), 'fix the sidebar');
@@ -15,6 +15,20 @@ test('the title prompt carries the request and asks for an icon and a one to thr
   assert.match(prompt, /three words is the hard maximum/);
   assert.match(prompt, /Request:\nmake the tabs vertical$/);
   assert.ok(chatTitlePrompt('y'.repeat(9000)).length < chatTitlePrompt('').length + 4100);
+});
+
+test('icons other chats use are left out of the title prompt and replaced when picked anyway', () => {
+  const icons = prompt => prompt.match(/fits the subject: (.*)\./)[1].split(', ');
+  const offered = icons(chatTitlePrompt('fix login', ['bug_report', 'lock']));
+  assert.ok(!offered.includes('bug_report') && !offered.includes('lock') && offered.includes('key'));
+  // With every icon taken, the full list is offered again.
+  assert.deepEqual(icons(chatTitlePrompt('x', CHAT_ICONS)), CHAT_ICONS);
+  assert.equal(uniqueChatIcon('lock', ['bug_report'], 'a'), 'lock');
+  const swapped = uniqueChatIcon('lock', ['lock'], 'chat-1');
+  assert.ok(CHAT_ICONS.includes(swapped) && swapped !== 'lock');
+  assert.equal(uniqueChatIcon('lock', ['lock'], 'chat-1'), swapped, 'the same chat gets the same replacement');
+  assert.equal(uniqueChatIcon('lock', CHAT_ICONS, 'chat-1'), 'lock');
+  assert.equal(new Set(RAIL_FALLBACK_ICONS).size, RAIL_FALLBACK_ICONS.length);
 });
 
 test('cleans model replies into a title of at most three words', () => {

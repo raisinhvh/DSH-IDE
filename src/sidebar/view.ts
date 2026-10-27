@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type { CriterionStatus, JobPhase } from '../goal/types';
 import { SLASH_COMMANDS } from '../slash/registry';
+import { RAIL_FALLBACK_ICONS } from '../runtime/naming';
 
 export interface SidebarImage { name: string; mimeType: string; data: string }
 export type ApprovalMode = 'ask' | 'auto' | 'full';
@@ -15,6 +16,8 @@ export interface SidebarSync {
   lastSync?: number;
   busy?: 'connecting' | 'uploading' | 'downloading' | 'checking';
   error?: string;
+  /** Items changed on both this PC and GitHub, waiting for a choice. Empty means the whole config. */
+  conflict?: string[];
 }
 
 /** Display preferences from the Accessibility page. Reduce motion stays a feature switch (`dsh.features.reduceMotion`). */
@@ -114,7 +117,7 @@ export type SidebarWebviewMessage =
   | { type: 'saveSmartAutoRanks'; ranks: SidebarSmartAutoRank[] }
   | { type: 'saveAccessibility'; accessibility: SidebarAccessibility }
   | { type: 'deleteAllSessions' }
-  | { type: 'syncAction'; action: 'connect' | 'upload' | 'download' | 'disconnect' | 'openGist' }
+  | { type: 'syncAction'; action: 'connect' | 'upload' | 'download' | 'disconnect' | 'openGist' | 'keepRemote' | 'keepLocal' }
   | { type: 'setSyncAuto'; enabled: boolean }
   | { type: 'manageAccounts' }
   | { type: 'refreshAccounts' }
@@ -346,6 +349,8 @@ export interface SidebarViewState {
   jobs: Record<string, SidebarJob>;
   accessibility: SidebarAccessibility;
   sync: SidebarSync;
+  /** Icons the activity rail can switch a chat to when another chat on the rail already shows its icon. */
+  railIcons: string[];
   /** Webview URL of the folder agent-sent media is copied to, without a trailing slash. */
   mediaBase?: string;
   error?: string;
@@ -354,7 +359,7 @@ export interface SidebarViewState {
 export const defaultFeatures = (): SidebarFeatures => ({ activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: false, smartAuto: false });
 
 export const initialSidebarState = (): SidebarViewState => ({
-  page: 'chat', approvalMode: 'ask', subagentProfiles: [], instructions: [], toolpacks: [], features: defaultFeatures(), nameModel: {}, reviewModel: {}, summaryModel: {}, deciderModel: {}, smartAutoRanks: [], slashCommands: SLASH_COMMANDS.map(command => ({ ...command })), jobs: {}, accessibility: defaultAccessibility(), sync: { connected: false, auto: true }, sessions: [], models: [], providerLabel: 'No provider', accountLabel: 'No account connected',
+  page: 'chat', approvalMode: 'ask', subagentProfiles: [], instructions: [], toolpacks: [], features: defaultFeatures(), nameModel: {}, reviewModel: {}, summaryModel: {}, deciderModel: {}, smartAutoRanks: [], slashCommands: SLASH_COMMANDS.map(command => ({ ...command })), jobs: {}, accessibility: defaultAccessibility(), sync: { connected: false, auto: true }, railIcons: [...RAIL_FALLBACK_ICONS], sessions: [], models: [], providerLabel: 'No provider', accountLabel: 'No account connected',
   accountConnected: false, accounts: [], dependencies: [], cursor: { connected: false, label: 'Not connected' },
   messages: {}, timeline: {}, tools: [], subagents: {}, diffs: [], runStates: {}, queues: {},
 });

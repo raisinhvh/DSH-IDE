@@ -12,7 +12,7 @@ import { ReviewController, ReviewProposal } from './review/controller';
 import { DelegateAgentInfo, DelegateHost, DelegateResult, DelegateToolInfo } from './delegate/host';
 import { InstructionItem, InstructionRoots, listInstructions, locateInstruction, readInstruction, removeInstruction, saveInstruction } from './instructions/store';
 import { shareInstructions } from './instructions/share';
-import { chatTitlePrompt, firstMessageTitle, parseChatName } from './runtime/naming';
+import { chatTitlePrompt, firstMessageTitle, parseChatName, uniqueChatIcon } from './runtime/naming';
 import { isUsageLimit } from './runtime/limits';
 import { MAX_MEDIA_BYTES, MAX_MEDIA_FILES, MEDIA_INSTRUCTIONS, mediaType, SEND_MEDIA, SEND_MEDIA_TOOL } from './runtime/media';
 import { GENERATE_IMAGE, GENERATE_IMAGE_TOOL, generateImage, IMAGE_INSTRUCTIONS, imageFileName, inputImageProblem, MAX_INPUT_BYTES, parseImageRequest, pngSize } from './runtime/imageGen';
@@ -281,6 +281,8 @@ class ExtensionHost implements vscode.Disposable {
     const updateTimer = setTimeout(() => { void this.checkUpdates(); }, 5000);
     this.disposables.push({ dispose: () => clearTimeout(updateTimer) });
     // Toolpacks must be loaded before a startup sync can install or remove them.
+    // Models saved before they moved to settings must be in settings to sync.
+    void this.models.migrate().catch(error => this.output.appendLine(`Could not move saved models to settings: ${String(error)}`));
     this.ensureNode().then(async () => { await this.refreshDependencies(); await this.toolpacks.start(); this.sync.start(); }).catch(error => {
       this.output.appendLine(`Dependency setup failed: ${String(error)}`);
       void vscode.window.showErrorMessage(`DSH setup failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -1338,6 +1340,7 @@ class ExtensionHost implements vscode.Disposable {
     else if (action === 'upload') await this.sync.uploadNow();
     else if (action === 'download') await this.sync.downloadNow();
     else if (action === 'disconnect') await this.sync.disconnect();
+    else if (action === 'keepRemote' || action === 'keepLocal') await this.sync.resolve(action === 'keepLocal' ? 'local' : 'remote');
     else if (action === 'openGist' && this.sync.gistUrl?.startsWith('https://gist.github.com/')) await vscode.env.openExternal(vscode.Uri.parse(this.sync.gistUrl));
   }
 
@@ -2052,12 +2055,16 @@ class ExtensionHost implements vscode.Disposable {
     try {
       choice = this.modelSetting('nameModel');
       if (!this.feature('autoName') || !choice.model) return;
-      const named = parseChatName(await this.runOneShot({ ...choice, model: choice.model }, cwd, chatTitlePrompt(prompt)));
+      // No two chats share a rail icon.
+      const taken = (): string[] => this.sessions().flatMap(item => item.id !== sessionId && item.icon ? [item.icon] : []);
+      const named = parseChatName(await this.runOneShot({ ...choice, model: choice.model }, cwd, chatTitlePrompt(prompt, taken())));
       const record = this.chats.get(sessionId)?.record ?? this.sessions().find(item => item.id === sessionId);
       if (!named || !record || this.deletedSessions.has(sessionId)) return;
       // A user rename keeps its name, but the chat still gets an icon.
       if (!record.renamed) record.name = named.title;
-      if (named.icon) record.icon = named.icon;
+      // Checked again after the reply, since chats named at the same time may have picked the same icon.
+      const icon = named.icon && uniqueChatIcon(named.icon, taken(), sessionId);
+      if (icon) record.icon = icon;
       await this.saveSession(record, false);
     } catch (error) {
       this.output.appendLine(`Naming a chat with "${choice.model}" failed: ${error instanceof Error ? error.message : String(error)}`);

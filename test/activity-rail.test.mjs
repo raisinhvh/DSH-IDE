@@ -44,7 +44,7 @@ function harness() {
     rail, sent, saves: 0, page: 'chat',
     unread: new Map([['done', 1]]),
     state: {
-      features: { activityRail: true }, activeSessionId: 'run',
+      features: { activityRail: true }, activeSessionId: 'run', railIcons: ['chat_bubble', 'chat', 'forum', 'science'],
       sessions: [{ id: 'run', name: 'Run tests' }, { id: 'ask', name: 'Fix login' }, { id: 'done', name: 'Add rail' }, { id: 'idle', name: 'Old chat' }],
       runStates: { run: { state: 'thinking', label: 'Thinking…' }, ask: { state: 'tool' } },
       timeline: { ask: [{ id: 'approval:1', kind: 'approval', status: 'pending' }] },
@@ -124,6 +124,26 @@ test('tabs show the chat icon, fall back to a chat bubble, and fade in a new ico
   const glyph = tabOf(rail, 'ask').firstChild;
   assert.equal(glyph.textContent, 'bug_report');
   assert.ok(glyph.calls.some(call => call.frames[0].filter === 'blur(3px)'), 'the new icon fades in from a blur');
+});
+
+test('no two tabs show the same icon, and a tab keeps its fallback while it stays free', () => {
+  const { context, rail } = harness();
+  const icons = () => ['ask', 'done', 'run'].map(id => tabOf(rail, id).firstChild.textContent);
+  context.renderRail();
+  // None of the chats are named yet, so all want the chat bubble.
+  assert.deepEqual(icons(), ['chat_bubble', 'chat', 'forum']);
+  context.state.sessions[0].icon = 'science';
+  context.state.sessions[1].icon = 'science';
+  context.renderRail();
+  const shown = icons();
+  assert.equal(new Set(shown).size, 3);
+  assert.equal(shown.filter(icon => icon === 'science').length, 1);
+  // Reordering the rail does not move the shared icon to the other chat.
+  context.state.timeline.ask = [];
+  context.renderRail();
+  assert.equal(rail.children.filter(child => child.classes.has('rail-tab'))[0].dataset.key, 'done');
+  assert.deepEqual(icons(), shown);
+  assert.equal(tabOf(rail, 'run').dataset.icon, shown[2]);
 });
 
 test('tabs present on load spring in from the left one after another', () => {

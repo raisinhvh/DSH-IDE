@@ -56,6 +56,13 @@ export class ModelRegistry {
     return { model, account, secret };
   }
 
+  /** Copies models saved by older versions (in extension storage) into the `dsh.models` setting, which Config Sync carries. */
+  public async migrate(): Promise<void> {
+    if (vscode.workspace.getConfiguration('dsh').inspect('models')?.globalValue !== undefined) return;
+    const legacy = this.context.globalState.get<unknown>(MODELS_KEY, []);
+    if (Array.isArray(legacy) && legacy.length) await vscode.workspace.getConfiguration('dsh').update('models', legacy, vscode.ConfigurationTarget.Global);
+  }
+
   public async pick(): Promise<ModelEntry | undefined> {
     const models = this.list(true);
     const selected = await vscode.window.showQuickPick(models.map((model) => ({
