@@ -498,6 +498,8 @@ select, input { min-height: calc(30px * var(--text-scale, 1)); padding: 5px 8px;
 .settings-toolbar { padding: 10px 10px 0; }
 .toolbar-pair { display: flex; gap: 6px; }
 .instruction-group { padding: 10px 10px 3px; color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.instruction-upload { margin-top: 9px; }
+.instruction-upload[hidden] { display: none; }
 .instruction-content { display: block; margin-top: 4px; min-height: 150px; max-height: 360px; padding: 8px; resize: vertical; font-family: var(--vscode-editor-font-family, monospace); font-size: calc(12px * var(--text-scale, 1)); line-height: 1.45; font-weight: 400; }
 .inline-form { flex: 0 0 auto; margin: 0 10px 12px; padding: 10px; border: 1px solid var(--vscode-focusBorder); border-radius: 9px; background: var(--vscode-editor-background); }
 .inline-form h2 { margin: 0 0 5px; font-size: calc(13px * var(--text-scale, 1)); }

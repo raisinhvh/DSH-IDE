@@ -474,6 +474,7 @@ export function getSidebarHtml(
   <div id="instruction-list" class="scroll-content"></div>
   <form id="instruction-form" class="inline-form" hidden>
     <h2 id="instruction-form-title">Add rule</h2>
+    <div id="instruction-upload-field" class="instruction-upload"><button id="instruction-upload" class="secondary-button" type="button" title="Fill this form from a Markdown file"><span class="symbol small">upload_file</span> Upload .md</button><input id="instruction-upload-input" type="file" accept=".md,.markdown,text/markdown" hidden></div>
     <label id="instruction-scope-field">Where<select id="instruction-scope"><option value="workspace">This workspace</option><option value="global">All workspaces</option></select></label>
     <label id="instruction-file-field">File<select id="instruction-file"></select></label>
     <label id="instruction-name-field">Name<input id="instruction-name" maxlength="64" autocomplete="off" placeholder="my-skill"></label>

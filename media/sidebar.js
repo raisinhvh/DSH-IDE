@@ -1278,6 +1278,7 @@
   function updateInstructionForm() {
     const form = el('instruction-form'); const editing = !!form.dataset.id; const skill = form.dataset.kind === 'skill';
     el('instruction-scope-field').hidden = editing;
+    el('instruction-upload-field').hidden = editing || !skill;
     el('instruction-file-field').hidden = editing || skill;
     el('instruction-name-field').hidden = editing || !skill;
     el('instruction-description-field').hidden = editing || !skill;
@@ -1298,6 +1299,25 @@
     if (item) send({ type: 'readInstruction', id: item.id });
     form.scrollIntoView({ block: 'nearest' });
     (item ? el('instruction-content') : kind === 'skill' ? el('instruction-name') : el('instruction-content')).focus();
+  }
+
+  // Reads an uploaded Markdown file into skill form fields. Frontmatter name and description win; otherwise the
+  // name comes from the file name. Must accept what SKILL_NAME in src/instructions/store.ts accepts.
+  function skillFromMarkdown(fileName, text) {
+    text = text.replace(/^﻿/, '');
+    const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(text);
+    const field = key => {
+      const raw = frontmatter ? (new RegExp('^' + key + ':[ \\t]*(.+)$', 'm').exec(frontmatter[1]) || [])[1] || '' : '';
+      const value = raw.trim(); const quoted = /^(["'])(.*)\1$/.exec(value);
+      return /^[>|]/.test(value) ? '' : (quoted ? quoted[2] : value).replace(/\s+/g, ' ').trim();
+    };
+    const slug = value => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+/, '').slice(0, 64).replace(/-+$/, '');
+    const base = fileName.replace(/\.(md|markdown)$/i, '');
+    return {
+      name: slug(field('name')) || (base.toLowerCase() === 'skill' ? '' : slug(base)),
+      description: field('description').slice(0, 200),
+      body: frontmatter ? text.slice(frontmatter[0].length).replace(/^\s+/, '') : text
+    };
   }
 
   function renderToolpacks() {
@@ -2030,6 +2050,25 @@
   el('add-skill').onclick = () => openInstructionForm('skill');
   el('instruction-scope').onchange = updateInstructionForm;
   el('instruction-cancel').onclick = () => { el('instruction-form').hidden = true; };
+  el('instruction-upload').onclick = () => el('instruction-upload-input').click();
+  el('instruction-upload-input').onchange = async event => {
+    const file = event.target.files[0]; event.target.value = '';
+    if (!file) return;
+    state.error = undefined;
+    if (file.size > 256 * 1024) state.error = `${file.name} must be under 256 KB.`;
+    else {
+      try {
+        const skill = skillFromMarkdown(file.name, await file.text());
+        if (skill.name) el('instruction-name').value = skill.name;
+        if (skill.description) el('instruction-description').value = skill.description;
+        el('instruction-content').value = skill.body;
+      } catch {
+        state.error = `Could not read ${file.name}.`;
+      }
+    }
+    renderNotice();
+    (el('instruction-name').value ? el('instruction-content') : el('instruction-name')).focus();
+  };
   el('instruction-form').onsubmit = event => {
     event.preventDefault();
     const form = el('instruction-form'); const content = el('instruction-content');
