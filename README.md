@@ -5,7 +5,7 @@ DeepSeek Harness (DSH) for VS Code and Cursor. The extension runs inside the edi
 ## What works
 
 - The extension activates through `src/extension.ts` and registers the sidebar and contributed commands.
-- DSH runs as a child Node process over line-delimited JSON-RPC ACP on stdio. The provider and backend model are passed through a generated DSH patch; the API key is supplied through the child environment. The key is not put in process arguments or the patch file, and runtime output redacts it.
+- DSH runs as a child Node process over line-delimited JSON-RPC ACP on stdio. The provider and backend model are passed through a generated DSH patch. For OpenRouter the patch also declares the `llm-pi-ai` provider route, which DSH mounts with no routes; a model missing from the pi-ai OpenRouter catalog that DSH loads is declared there by hand on OpenRouter's OpenAI-compatible endpoint, with the model's effort choices as its reasoning levels. The API key is supplied through the child environment. The key is not put in process arguments or the patch file, and runtime output redacts it.
 - The default model route is `DeepSeek V4 Flash` / `deepseek-official` / `deepseek-v4-flash`.
 - `Cursor Auto` starts the official Cursor Agent CLI. After a Cursor session starts, the sidebar lists models advertised by the CLI and switches them through ACP. Cursor sign-in stays with the CLI; the extension does not copy Cursor tokens into SecretStorage.
 - `Codex Default` and `Claude Default` use the respective CLIs with browser sign-in. Each connected account has its own CLI configuration directory so work and personal logins can coexist. No API key is requested for these routes.

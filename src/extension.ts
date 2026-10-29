@@ -879,7 +879,7 @@ class ExtensionHost implements vscode.Disposable {
     const nodePath = await this.ensureNode();
     const webSearchKey = deepSeekAccount ? await this.accounts.getSecret(deepSeekAccount.id) : undefined;
     await runtime.start({ kind: 'dsh', provider: route.model.provider, model: route.model.backend, apiKey: route.secret,
-      webSearchKey, envName: this.envName(route.model.provider), home, nodePath, dshRoot: await updatedRoot(this.context.globalStorageUri.fsPath) });
+      webSearchKey, envName: this.envName(route.model.provider), efforts: route.model.effortOptions, home, nodePath, dshRoot: await updatedRoot(this.context.globalStorageUri.fsPath) });
     return { runtime, key };
   }
 
