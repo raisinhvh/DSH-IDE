@@ -100,15 +100,7 @@ export class OAuthCliAccounts {
     };
     await mkdir(account.directory, { recursive: true });
     try {
-      await execute(account, provider === 'codex-cli' ? ['login'] : ['auth', 'login', '--claudeai', ...(account.email ? ['--email', account.email] : [])], 300000);
-      const status = await execute(account, provider === 'codex-cli' ? ['login', 'status'] : ['auth', 'status', '--json'], 15000);
-      if (provider === 'codex-cli') {
-        if (!/logged in.*chatgpt|chatgpt.*logged in/i.test(status)) throw new Error('Codex did not report a ChatGPT sign-in.');
-      } else {
-        const info = JSON.parse(status) as { loggedIn?: boolean; email?: string; authMethod?: string };
-        if (!info.loggedIn || info.authMethod !== 'claude.ai') throw new Error('Claude Code did not report a subscription sign-in.');
-        account.email = info.email || account.email;
-      }
+      await this.login(account);
     } catch (error) {
       await rm(account.directory, { recursive: true, force: true });
       throw error;
@@ -116,6 +108,28 @@ export class OAuthCliAccounts {
     await this.context.globalState.update(KEY, [...this.list(), account]);
     if (!this.getDefault(provider)) await this.setDefault(provider, account.id);
     return account;
+  }
+
+  async reauth(id: string): Promise<OAuthCliAccount> {
+    const existing = this.get(id);
+    if (!existing) throw new Error('Account not found.');
+    const account = { ...existing };
+    await this.login(account);
+    await this.context.globalState.update(KEY, this.list().map(item => item.id === id ? account : item));
+    return account;
+  }
+
+  private async login(account: OAuthCliAccount): Promise<void> {
+    const provider = account.provider;
+    await execute(account, provider === 'codex-cli' ? ['login'] : ['auth', 'login', '--claudeai', ...(account.email ? ['--email', account.email] : [])], 300000);
+    const status = await execute(account, provider === 'codex-cli' ? ['login', 'status'] : ['auth', 'status', '--json'], 15000);
+    if (provider === 'codex-cli') {
+      if (!/logged in.*chatgpt|chatgpt.*logged in/i.test(status)) throw new Error('Codex did not report a ChatGPT sign-in.');
+    } else {
+      const info = JSON.parse(status) as { loggedIn?: boolean; email?: string; authMethod?: string };
+      if (!info.loggedIn || info.authMethod !== 'claude.ai') throw new Error('Claude Code did not report a subscription sign-in.');
+      account.email = info.email || account.email;
+    }
   }
 
   async setDefault(provider: OAuthCliProvider, id: string): Promise<void> {

@@ -5,6 +5,7 @@ import { PassThrough } from 'node:stream';
 import { build } from 'esbuild';
 
 let launch;
+let rpcError;
 globalThis.__dshCodexUsageSpawn = (command, args, options) => {
   const child = new EventEmitter();
   child.stdout = new PassThrough();
@@ -27,6 +28,10 @@ globalThis.__dshCodexUsageSpawn = (command, args, options) => {
       buffer = buffer.slice(end + 1);
       launch.requests.push(request);
       if (request.id === undefined) continue;
+      if (request.method === 'account/rateLimits/read' && rpcError) {
+        queueMicrotask(() => child.stdout.write(JSON.stringify({ id: request.id, error: { message: rpcError } }) + '\n'));
+        continue;
+      }
       const result = request.method === 'account/rateLimits/read' ? {
         rateLimitsByLimitId: {
           codex: { limitId: 'codex', primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: 1730947200 }, secondary: { usedPercent: 70, windowDurationMins: 10080 } },
@@ -44,7 +49,7 @@ const bundled = await build({
   entryPoints: ['src/accounts/codexUsage.ts'], bundle: true, write: false, format: 'esm', platform: 'node',
   plugins: [{ name: 'fake-app-server', setup(builder) {
     builder.onResolve({ filter: /^node:child_process$/ }, () => ({ path: 'process', namespace: 'fake' }));
-    builder.onResolve({ filter: /accounts\/oauthCli$/ }, () => ({ path: 'oauth', namespace: 'fake' }));
+    builder.onResolve({ filter: /oauthCli$/ }, () => ({ path: 'oauth', namespace: 'fake' }));
     builder.onLoad({ filter: /.*/, namespace: 'fake' }, ({ path }) => ({ contents: path === 'process'
       ? 'export const spawn = (...args) => globalThis.__dshCodexUsageSpawn(...args);'
       : 'export const cliCommand = () => "codex"; export const cliEnv = account => ({ CODEX_HOME: account.directory });' }));
@@ -60,7 +65,7 @@ test('Codex usage calls documented app-server RPC and maps returned quota window
   assert.deepEqual(launch.requests.map(request => request.method), ['initialize', 'initialized', 'account/rateLimits/read']);
   assert.equal(usage.status, 'ready');
   assert.equal(usage.metrics.length, 3);
-  assert.deepEqual(usage.metrics.map(metric => metric.label), ['Codex (5h)', 'Codex (Weekly)', 'Extra (1h)']);
+  assert.deepEqual(usage.metrics.map(metric => metric.label), ['5-hour', 'Weekly', 'Extra \u00b7 1h']);
   assert.equal(usage.metrics[0].usedPercent, 25);
   assert.equal(usage.metrics[0].resetsAt, 1730947200000);
   assert.equal(usage.metrics[1].resetsAt, undefined);
@@ -72,4 +77,18 @@ test('Codex usage rejects non-Codex profiles without launching a process', async
   const usage = await readCodexUsage({ id: 'other', provider: 'claude-cli', label: 'Other', directory: 'profile' });
   assert.equal(usage.status, 'unavailable');
   assert.equal(launch, before);
+});
+
+test('Codex RPC errors distinguish sign-in from transient failures', async () => {
+  const account = { id: 'codex:test', provider: 'codex-cli', label: 'Test', directory: 'profile' };
+  try {
+    rpcError = '401 token expired';
+    const auth = await readCodexUsage(account);
+    assert.equal(auth.fix, 'signin');
+    assert.equal(auth.detail, 'Codex sign-in has expired. Sign in again to see usage.');
+    rpcError = 'backend is busy';
+    const generic = await readCodexUsage(account);
+    assert.equal(generic.fix, 'retry');
+    assert.equal(generic.detail, 'Could not read Codex usage. Try again.');
+  } finally { rpcError = undefined; }
 });

@@ -1,18 +1,19 @@
 import type { AccountUsage } from './usageTypes';
 
-const result = (status: AccountUsage['status'], metrics: AccountUsage['metrics'] = [], detail?: string): AccountUsage =>
-  ({ status, metrics, ...(detail ? { detail } : {}), fetchedAt: Date.now() });
+const result = (status: AccountUsage['status'], metrics: AccountUsage['metrics'] = [], detail?: string, fix?: AccountUsage['fix']): AccountUsage =>
+  ({ status, metrics, ...(detail ? { detail } : {}), ...(fix ? { fix } : {}), fetchedAt: Date.now() });
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 
 /** Read OpenRouter key spending. */
 export async function readOpenRouterUsage(apiKey: string): Promise<AccountUsage> {
-  if (typeof apiKey !== 'string' || !apiKey.trim()) return result('error', [], 'Add an OpenRouter API key in account settings to read usage.');
+  if (typeof apiKey !== 'string' || !apiKey.trim()) return result('error', [], 'Add an OpenRouter API key in account settings to read usage.', 'key');
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8_000);
   try {
     const response = await fetch('https://openrouter.ai/api/v1/key', {
       method: 'GET', headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' }, redirect: 'error', signal: controller.signal,
     });
+    if (response.status === 401 || response.status === 403) return result('error', [], 'OpenRouter rejected this API key. Replace it to see usage.', 'key');
     if (!response.ok) throw new Error('request failed');
     const reader = response.body?.getReader(); if (!reader) throw new Error('empty response');
     const chunks: Uint8Array[] = []; let length = 0;
@@ -34,6 +35,6 @@ export async function readOpenRouterUsage(apiKey: string): Promise<AccountUsage>
       : [{ label: 'Spent', value: `$${usage.toFixed(2)}` }];
     if (finite(data.usage_monthly)) metrics.push({ label: 'This month', value: `$${data.usage_monthly.toFixed(2)}` });
     return result('ready', metrics);
-  } catch { return result('error', [], 'Could not read OpenRouter usage. Check your connection and try again.'); }
+  } catch { return result('error', [], 'Could not read OpenRouter usage. Check your connection and try again.', 'retry'); }
   finally { clearTimeout(timeout); }
 }

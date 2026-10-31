@@ -383,8 +383,8 @@ select, input { min-height: calc(30px * var(--text-scale, 1)); padding: 5px 8px;
 .compose-actions, .form-actions { display: flex; justify-content: flex-end; align-items: center; gap: 6px; padding-top: 7px; }
 .composer .compose-actions { justify-content: space-between; align-items: center; }
 .compose-tools { display: flex; flex-direction: row; align-items: center; flex: 1 1 auto; gap: 1px; min-width: 0; }
-.compose-tools .icon-button { min-width: calc(26px * var(--text-scale, 1)); height: calc(26px * var(--text-scale, 1)); color: var(--muted); }
-body.a11y-targets .compose-tools .icon-button { min-width: calc(34px * var(--text-scale, 1)); height: calc(34px * var(--text-scale, 1)); }
+.compose-tools .icon-button, .composer-side .icon-button { min-width: calc(26px * var(--text-scale, 1)); height: calc(26px * var(--text-scale, 1)); color: var(--muted); }
+body.a11y-targets .compose-tools .icon-button, body.a11y-targets .composer-side .icon-button { min-width: calc(34px * var(--text-scale, 1)); height: calc(34px * var(--text-scale, 1)); }
 .compose-divider { flex: 0 0 auto; width: 1px; height: calc(14px * var(--text-scale, 1)); margin: 0 5px; background: var(--quiet-line); }
 .topbar { min-height: calc(34px * var(--text-scale, 1)); padding: 2px 10px; }
 .compose-send { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
@@ -471,8 +471,16 @@ body.a11y-targets .compose-tools .icon-button { min-width: calc(34px * var(--tex
 .tool-button.cancel-run:hover { background: color-mix(in srgb, var(--vscode-errorForeground, #f85149) 22%, transparent); }
 .cancel-run .symbol { font-size: calc(15px * var(--text-scale, 1)); }
 body.a11y-targets .tool-button.cancel-run { width: calc(34px * var(--text-scale, 1)); min-height: calc(34px * var(--text-scale, 1)); }
-.compose-actions.compact #approval-label, .compose-actions.compact .approval-chevron { display: none; }
-.compose-actions.compact .tool-button { padding: 2px 5px; }
+.composer-side { display: flex; flex: 0 0 auto; flex-direction: column; align-items: flex-start; gap: calc(2px * var(--space-scale, 1)); }
+.composer-side #approval-label, .composer-side .approval-chevron { display: none; }
+.composer-side #approval { justify-content: center; width: calc(26px * var(--text-scale, 1)); height: calc(26px * var(--text-scale, 1)); padding: 0; }
+body.a11y-targets .composer-side #approval { width: calc(34px * var(--text-scale, 1)); height: calc(34px * var(--text-scale, 1)); }
+.composer-side .approval-menu { left: 0; right: auto; top: auto; bottom: 100%; }
+.compose-actions.compact .compose-divider { display: none; }
+.compose-actions.compact #speed-control, .compose-actions.compact #effort-control { flex: 0 0 auto; }
+.compose-actions.compact #speed-picker, .compose-actions.compact #effort-picker { max-width: none; }
+.compose-actions.compact #speed-label, .compose-actions.compact #effort-label { overflow: visible; text-overflow: clip; }
+.compose-actions.compact .model-picker-wrap { min-width: 0; }
 .settings-page { display: flex; flex-direction: column; overflow-y: auto; }
 .page-heading { display: flex; align-items: flex-start; gap: 5px; padding: 12px 10px 9px; border-bottom: 1px solid var(--line); }
 .page-heading h1 { margin: 1px 0 2px; font-size: calc(15px * var(--text-scale, 1)); font-weight: 650; }
@@ -608,6 +616,10 @@ body.a11y-targets .tool-button.cancel-run { width: calc(34px * var(--text-scale,
 .usage-block { margin-top: 9px; }
 .usage-row { display: flex; justify-content: space-between; gap: 8px; margin: 6px 0 4px; font-size: calc(11px * var(--text-scale, 1)); }
 .usage-row span:last-child { color: var(--muted); text-align: right; }
+.usage-row .usage-reset { display: inline-block; min-width: 7ch; margin-left: 8px; font-variant-numeric: tabular-nums; }
+.usage-fix { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 2px 0; font-size: calc(11px * var(--text-scale, 1)); }
+.usage-fix .symbol { font-size: calc(14px * var(--text-scale, 1)); }
+.usage-fix:disabled { opacity: .6; text-decoration: none; cursor: default; }
 .usage-track { overflow: hidden; height: 6px; border-radius: 6px; background: var(--vscode-progressBar-background, var(--line)); }
 .usage-track { background: var(--line); }
 .usage-fill { height: 100%; border-radius: inherit; }
@@ -615,15 +627,13 @@ body.a11y-targets .tool-button.cancel-run { width: calc(34px * var(--text-scale,
 .usage-loading { opacity: .55; }
 .usage-note { margin-top: 5px; color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); }
 .usage-note.usage-error { color: var(--vscode-errorForeground); }
-/* The card anchors to the whole tab row so it stays inside a narrow sidebar. */
-.chat-tabs { position: relative; }
-.usage-wrap { flex: none; }
+.usage-wrap { position: relative; flex: none; }
 .usage-toggle[hidden], .usage-menu[hidden] { display: none; }
 .usage-toggle[aria-expanded="true"] { background: var(--hover); }
 .usage-stack { display: flex; flex: none; overflow: hidden; width: 64px; height: 6px; border-radius: 999px; background: var(--quiet-line); }
 .usage-stack-segment { display: block; flex: none; height: 100%; }
 .usage-stack-segment + .usage-stack-segment { box-shadow: inset 1px 0 var(--vscode-sideBar-background); }
-.usage-menu { position: absolute; z-index: 11; top: calc(100% - 4px); right: 8px; width: min(320px, calc(100vw - 16px)); max-height: calc(100vh - 60px); overflow: auto; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background)); box-shadow: 0 6px 16px #0004; }
+.usage-menu { position: absolute; z-index: 20; top: 32px; right: 0; width: min(320px, calc(100vw - 20px)); max-height: calc(100vh - 60px); overflow: auto; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background)); box-shadow: 0 6px 16px #0004; }
 .usage-menu-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 600; }
 .usage-menu-head .icon-button { min-width: 24px; height: 24px; }
 .usage-big { display: flex; align-items: baseline; gap: 8px; margin: 8px 0; }

@@ -17,8 +17,8 @@ interface BalanceResponse {
   balance_infos: BalanceInfo[];
 }
 
-function result(status: AccountUsage['status'], metrics: AccountUsage['metrics'] = [], detail?: string): AccountUsage {
-  return { status, metrics, ...(detail ? { detail } : {}), fetchedAt: Date.now() };
+function result(status: AccountUsage['status'], metrics: AccountUsage['metrics'] = [], detail?: string, fix?: AccountUsage['fix']): AccountUsage {
+  return { status, metrics, ...(detail ? { detail } : {}), ...(fix ? { fix } : {}), fetchedAt: Date.now() };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -80,7 +80,7 @@ async function readBoundedBody(response: Response): Promise<string> {
 
 export async function readDeepSeekUsage(apiKey: string): Promise<AccountUsage> {
   if (typeof apiKey !== 'string' || apiKey.trim().length === 0) {
-    return result('error', [], 'Add a DeepSeek API key in account settings to read its balance.');
+    return result('error', [], 'Add a DeepSeek API key in account settings to read its balance.', 'key');
   }
 
   const controller = new AbortController();
@@ -92,16 +92,17 @@ export async function readDeepSeekUsage(apiKey: string): Promise<AccountUsage> {
       redirect: 'error',
       signal: controller.signal,
     });
-    if (!response.ok) return result('error', [], 'Could not read DeepSeek balance. Check the API key and try again.');
+    if (response.status === 401 || response.status === 403) return result('error', [], 'DeepSeek rejected this API key. Replace it to see its balance.', 'key');
+    if (!response.ok) return result('error', [], 'Could not read DeepSeek balance. Check the API key and try again.', 'retry');
 
     let payload: unknown;
     try {
       payload = JSON.parse(await readBoundedBody(response));
     } catch {
-      return result('error', [], 'DeepSeek returned an invalid balance response. Try again later.');
+      return result('error', [], 'DeepSeek returned an invalid balance response. Try again later.', 'retry');
     }
     const data = parseResponse(payload);
-    if (!data) return result('error', [], 'DeepSeek returned an invalid balance response. Try again later.');
+    if (!data) return result('error', [], 'DeepSeek returned an invalid balance response. Try again later.', 'retry');
 
     const metrics: AccountUsage['metrics'] = [];
     for (const info of data.balance_infos) {
@@ -110,13 +111,13 @@ export async function readDeepSeekUsage(apiKey: string): Promise<AccountUsage> {
       metrics.push({ label: `Topped-up balance (${info.currency})`, value: `${info.topped_up_balance} ${info.currency}` });
     }
     if (metrics.length === 0) {
-      return result('unavailable', [], 'DeepSeek did not report a balance for this account. ' + DETAIL);
+      return result('unavailable', [], 'DeepSeek did not report a balance for this account. ' + DETAIL, 'browser');
     }
-    return result(data.is_available ? 'ready' : 'unavailable', metrics, DETAIL);
+    return result(data.is_available ? 'ready' : 'unavailable', metrics, DETAIL, data.is_available ? undefined : 'browser');
   } catch {
     return result('error', [], controller.signal.aborted
       ? 'DeepSeek balance request timed out. Check your connection and try again.'
-      : 'Could not reach DeepSeek balance service. Check your connection and try again.');
+      : 'Could not reach DeepSeek balance service. Check your connection and try again.', 'retry');
   } finally {
     clearTimeout(timeout);
   }

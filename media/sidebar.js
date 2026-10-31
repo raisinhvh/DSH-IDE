@@ -166,6 +166,7 @@
       const choice = button(effort.label, 'Use ' + effort.label + ' effort', () => { state.selectedEffort = effort.value; closeMenus(); renderPicker(); send({ type: 'selectEffort', value: effort.value }); }, 'menu-choice');
       choice.setAttribute('aria-selected', String((state.selectedEffort || '') === effort.value)); effortRoot.appendChild(choice);
     }
+    fitComposerActions(true);
   }
 
   const isRunning = id => (state.runStates[id]?.state || 'idle') !== 'idle';
@@ -1161,10 +1162,12 @@
       (usage.metrics || []).forEach((metric, index) => {
         const line = document.createElement('div'); line.className = 'usage-row'; const label = document.createElement('span'); label.textContent = metric.label; const value = document.createElement('span');
         const numeric = typeof metric.usedPercent === 'number' && Number.isFinite(metric.usedPercent); const reset = numeric ? resetIn(metric.resetsAt) : '';
-        value.textContent = numeric ? Math.round(metric.usedPercent) + '%' + (reset ? ' · resets in ' + reset : '') : metric.value; line.append(label, value); metrics.appendChild(line);
+        value.textContent = numeric ? Math.round(metric.usedPercent) + '%' : metric.value;
+        if (reset) { const time = document.createElement('span'); time.className = 'usage-reset'; time.textContent = reset; time.style.color = resetColor(metric.resetsAt); time.title = metric.label + ' resets in ' + reset; value.appendChild(time); }
+        line.append(label, value); metrics.appendChild(line);
         if (numeric) { const track = document.createElement('div'); track.className = 'usage-track'; const key = account.id + ':' + index + ':' + metric.label; const fill = usageFill(metric.usedPercent, account.provider, previous.get(key)); fill.dataset.usageKey = key; track.appendChild(fill); metrics.appendChild(track); }
       }); block.appendChild(metrics);
-      if (!(usage.metrics || []).length && (usage.status === 'unavailable' || usage.status === 'error')) { const note = document.createElement('div'); note.className = 'usage-note' + (usage.status === 'error' ? ' usage-error' : ''); note.textContent = usage.detail || (usage.status === 'error' ? 'Usage unavailable' : 'Usage not available'); block.appendChild(note); }
+      if (!(usage.metrics || []).length && (usage.status === 'unavailable' || usage.status === 'error')) { const note = document.createElement('div'); note.className = 'usage-note' + (usage.status === 'error' ? ' usage-error' : ''); note.textContent = usage.detail || (usage.status === 'error' ? 'Usage unavailable' : 'Usage not available'); block.appendChild(note); const fix = usageFix(account, usage.fix); if (fix) block.appendChild(fix); }
       if (usage.fetchedAt) { const note = document.createElement('div'); note.className = 'usage-note'; const mins = Math.max(0, Math.floor((Date.now() - usage.fetchedAt) / 60000)); note.textContent = 'Updated ' + (mins < 1 ? 'just now' : mins + 'm ago'); block.appendChild(note); }
     }
     row.appendChild(block); return row;
@@ -1247,9 +1250,31 @@
   el('usage-toggle').onclick = () => { const menu = el('usage-menu'); const wasHidden = menu.hidden; closeMenus(); closeSettings(); el('recent-menu').hidden = true; el('recent-toggle').setAttribute('aria-expanded', 'false'); closeSendMenu(); menu.hidden = !wasHidden; el('usage-toggle').setAttribute('aria-expanded', String(wasHidden)); if (wasHidden) { renderUsageButton(); if (!calm()) play(menu, [{ opacity: 0, transform: 'translateY(-4px)' }, { opacity: 1, transform: 'translateY(0)' }], { duration: 220, easing: popEasing }); } };
   setInterval(() => { if (page === 'accounts') renderAccounts(); }, 60000);
 
+  // The button that gets an account's usage working again, matching the fix the extension reported.
+  const reauthing = new Set();
+  function usageFix(account, fix) {
+    const signingIn = reauthing.has(account.id);
+    const fixes = {
+      retry: ['Try again', 'Read usage again', 'refresh', () => send({ type: 'refreshUsage', accountId: account.id })],
+      signin: [signingIn ? 'Waiting for browser…' : 'Sign in again', 'Sign in to this account again in your browser', 'login', () => { reauthing.add(account.id); renderAccounts(); send({ type: 'reauthAccount', accountId: account.id }); }],
+      key: ['Replace API key', 'Enter a new API key for this account', 'key', () => openKeyForm(account)],
+      cli: ['Open CLI path setting', 'Set where the ' + (providerNames[account.provider] || 'provider') + ' CLI is installed', 'settings', () => send({ type: 'openCliSetting', provider: account.provider })],
+      browser: ['View usage in browser', 'Open ' + (providerNames[account.provider] || 'provider') + ' usage in your browser', 'open_in_new', () => send({ type: 'viewProviderUsage', provider: account.provider })],
+    };
+    if (!Object.hasOwn(fixes, fix)) return undefined;
+    const [text, title, icon, action] = fixes[fix]; const fixButton = button(text, title, action, 'text-button usage-fix', icon); fixButton.append(text); fixButton.disabled = fix === 'signin' && signingIn; return fixButton;
+  }
+  function openKeyForm(account) {
+    openAccountForm({ provider: account.provider, title: providerNames[account.provider] || account.provider, oauth: false });
+    const form = el('account-form'); form.dataset.replace = account.id;
+    el('account-form-title').textContent = 'Replace API key'; el('account-form-help').textContent = 'New key for ' + account.label + '. It is stored in VS Code SecretStorage.';
+    el('account-name').closest('label').hidden = true; el('account-email').closest('label').hidden = true; el('account-name').required = false;
+    el('account-submit').textContent = 'Save key'; el('account-key').focus();
+  }
   function openAccountForm(group) {
     showPage('accounts');
-    const form = el('account-form'); form.hidden = false; form.dataset.provider = group.provider; form.dataset.oauth = group.oauth ? 'true' : 'false';
+    const form = el('account-form'); form.hidden = false; form.dataset.provider = group.provider; form.dataset.oauth = group.oauth ? 'true' : 'false'; delete form.dataset.replace;
+    el('account-name').closest('label').hidden = false; el('account-email').closest('label').hidden = false; el('account-name').required = true;
     el('account-form-title').textContent = (group.oauth ? 'Connect ' : 'Add ') + group.title.replace(' Accounts', '') + ' account';
     el('account-form-help').textContent = group.oauth ? 'Continue in your browser with your subscription.' : 'Your key is stored in VS Code SecretStorage.';
     el('account-key-field').hidden = !!group.oauth; el('account-key').required = !group.oauth;
@@ -1572,18 +1597,28 @@
       if (value === mode) { const check = document.createElement('span'); check.className = 'symbol approval-check'; check.textContent = 'check'; option.append(check); }
       option.onclick = () => { state.approvalMode = value; closeMenus(); renderApproval(); send({ type: 'setApproval', mode: value }); }; menu.append(option);
     }
-    fitComposerActions();
+    fitComposerActions(true);
   }
 
   const popEasing = 'cubic-bezier(.34, 1.56, .64, 1)';
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
-  function fitComposerActions() {
+  let composerRequiredWidth = 0;
+  function fitComposerActions(contentChanged = false) {
     const actions = el('compose-actions'); if (!actions.clientWidth) return;
-    const wasCompact = actions.classList.contains('compact'); actions.classList.remove('compact');
-    const tools = el('compose-tools'), label = el('model-picker-label');
-    const compact = tools.scrollWidth + el('compose-send').offsetWidth + 6 > actions.clientWidth || label.scrollWidth > label.clientWidth + 1;
-    actions.classList.toggle('compact', compact);
+    const tools = el('compose-tools'), side = el('composer-side'), attach = el('attach'), approval = el('approval').closest('.approval-wrap'), label = el('model-picker-label');
+    const wasCompact = actions.classList.contains('compact'), focused = document.activeElement;
+    const setCompact = compact => { actions.classList.toggle('compact', compact); if (compact) { side.appendChild(attach); side.appendChild(approval); side.hidden = false; } else { tools.insertBefore(approval, tools.firstChild); tools.insertBefore(attach, approval); side.hidden = true; } };
+    let compact = wasCompact;
+    if (!wasCompact || contentChanged === true) {
+      if (wasCompact) setCompact(false);
+      composerRequiredWidth = tools.scrollWidth + el('compose-send').offsetWidth + 6;
+      compact = composerRequiredWidth > actions.clientWidth || label.scrollWidth > label.clientWidth + 1;
+      if (wasCompact && compact) setCompact(true);
+    } else compact = actions.clientWidth < composerRequiredWidth + 4;
+    if (compact !== wasCompact) setCompact(compact);
+    if (focused instanceof HTMLElement && document.activeElement !== focused && focused.isConnected) focused.focus({ preventScroll: true });
     if (compact !== wasCompact && !reduceMotion.matches) el('approval').animate([{ transform: 'scale(.82)' }, { transform: 'none' }], { duration: 440, easing: popEasing });
+    if (compact && compact !== wasCompact && !calm()) play(side, [{ opacity: 0, transform: 'translateX(-4px)' }, { opacity: 1, transform: 'translateX(0)' }], { duration: 220, easing: popEasing });
   }
   new ResizeObserver(fitComposerActions).observe(el('compose-actions'));
 
@@ -2164,7 +2199,9 @@
   el('account-form').onsubmit = event => {
     event.preventDefault(); const provider = el('account-form').dataset.provider;
     const label = el('account-name').value.trim(); const email = el('account-email').value.trim(); const secret = el('account-key').value.trim();
-    if (el('account-form').dataset.oauth === 'true') { if (provider && label) { el('account-submit').disabled = true; el('account-submit').textContent = 'Waiting for browser...'; send({ type: 'addOAuthAccount', provider, label, email }); } }
+    const replace = el('account-form').dataset.replace;
+    if (replace) { if (secret) send({ type: 'replaceAccountKey', accountId: replace, secret }); }
+    else if (el('account-form').dataset.oauth === 'true') { if (provider && label) { el('account-submit').disabled = true; el('account-submit').textContent = 'Waiting for browser...'; send({ type: 'addOAuthAccount', provider, label, email }); } }
     else if (provider && label && secret) send({ type: 'addAccount', provider, label, email, secret });
   };
   el('subagents').onclick = () => showPage('subagents');
@@ -2229,7 +2266,7 @@
       case 'accountState': state.providerLabel = message.provider; state.accountLabel = message.label; state.accountConnected = message.connected; break;
       case 'accountsState': state.accounts = message.accounts || []; state.cursor = message.cursor || state.cursor; break;
       case 'usageState': state.usage = message.usage || {}; break;
-      case 'accountSaved': el('account-form').hidden = true; el('account-key').value = ''; el('account-submit').disabled = false; state.error = undefined; break;
+      case 'accountSaved': reauthing.clear(); el('account-form').hidden = true; el('account-key').value = ''; el('account-submit').disabled = false; state.error = undefined; break;
       case 'modelSaved': el('model-form').hidden = true; state.error = undefined; break;
       case 'modelRemoveFailed': removingModels.delete(message.name); break;
       case 'subagentProfilesState': state.subagentProfiles = message.profiles || []; if (page === 'subagents') renderSubagents(); break;
@@ -2351,7 +2388,7 @@
         if (message.sessionId === state.activeSessionId) { const feed = el('feed'); feed.textContent = ''; feed.dataset.view = ''; }
         break;
       }
-      case 'error': state.error = message.message; el('account-submit').disabled = false; if (el('account-form').dataset.oauth === 'true') el('account-submit').textContent = 'Continue in browser'; break;
+      case 'error': state.error = message.message; reauthing.clear(); el('account-submit').disabled = false; if (el('account-form').dataset.oauth === 'true') el('account-submit').textContent = 'Continue in browser'; break;
     }
     if (['userMessage', 'assistantDelta', 'assistantMessage', 'toolEvent', 'subagentEvent', 'toolState', 'diff', 'diffState', 'runState', 'approvalRequest', 'approvalResolved', 'questionRequest', 'questionResolved', 'timelineState', 'jobState', 'mediaMessage'].includes(message.type)) {
       renderFeed();

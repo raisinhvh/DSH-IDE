@@ -9,6 +9,7 @@ import type { AccountUsage } from './usageTypes';
 export async function readCursorUsage(): Promise<AccountUsage> {
   return {
     status: 'unavailable',
+    fix: 'browser',
     metrics: [],
     detail: 'Cursor subscription usage is unavailable through the documented personal CLI or ACP interface. Check usage in your Cursor account dashboard.',
     fetchedAt: Date.now(),

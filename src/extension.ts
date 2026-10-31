@@ -2892,6 +2892,29 @@ class ExtensionHost implements vscode.Disposable {
         case 'manageAccounts': await this.manageAccounts(); break;
         case 'refreshAccounts': await this.refreshAccounts(); break;
         case 'refreshUsage': this.refreshUsage(true, message.accountId); break;
+        case 'reauthAccount': {
+          if (!this.oauthAccounts.get(message.accountId)) throw new Error('Account not found.');
+          await this.ensureNode();
+          await this.refreshDependencies();
+          await this.oauthAccounts.reauth(message.accountId);
+          await this.refreshAccounts(false);
+          this.sidebar.postMessage({ type: 'accountSaved' });
+          this.refreshUsage(true, message.accountId);
+          break;
+        }
+        case 'replaceAccountKey': {
+          const account = this.accounts.get(message.accountId);
+          if (!account) throw new Error('Account not found.');
+          if (!['deepseek-official', 'openrouter', 'opencode-go'].includes(account.provider)) throw new Error('Choose a supported API provider.');
+          await this.accounts.replaceSecret(message.accountId, message.secret);
+          await this.refreshAccounts(false);
+          this.sidebar.postMessage({ type: 'accountSaved' });
+          this.refreshUsage(true, message.accountId);
+          break;
+        }
+        case 'openCliSetting':
+          await vscode.commands.executeCommand('workbench.action.openSettings', message.provider === 'codex-cli' ? 'dsh.runtime.codexPath' : 'dsh.runtime.claudePath');
+          break;
         case 'viewProviderUsage': {
           const url = PROVIDER_USAGE_URLS.get(message.provider);
           if (url) await vscode.env.openExternal(vscode.Uri.parse(url));

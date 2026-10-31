@@ -4,12 +4,12 @@ import type { OAuthCliAccount } from './oauthCli';
 import type { AccountUsage, AccountUsageMetric } from './usageTypes';
 
 type Json = Record<string, unknown>;
-const RENEWING = "Sign-in is renewing. Usage updates after this account's next Claude turn.";
+const RENEWING = "Claude's sign-in has expired. Sign in again to see usage.";
 const record = (value: unknown): Json | undefined => value && typeof value === 'object' && !Array.isArray(value) ? value as Json : undefined;
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 const title = (value: string): string => value.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-const result = (status: AccountUsage['status'], metrics: AccountUsageMetric[] = [], detail?: string): AccountUsage =>
-  ({ status, metrics, ...(detail ? { detail } : {}), fetchedAt: Date.now() });
+const result = (status: AccountUsage['status'], metrics: AccountUsageMetric[] = [], detail?: string, fix?: AccountUsage['fix']): AccountUsage =>
+  ({ status, metrics, ...(detail ? { detail } : {}), ...(fix ? { fix } : {}), fetchedAt: Date.now() });
 const labels: Record<string, string> = { five_hour: '5-hour', seven_day: 'Weekly', seven_day_opus: 'Weekly · Opus', seven_day_sonnet: 'Weekly · Sonnet' };
 
 function metric(label: string, percent: unknown, reset: unknown): AccountUsageMetric | undefined {
@@ -35,8 +35,8 @@ export async function readClaudeUsage(account: OAuthCliAccount): Promise<Account
   let credentials: Json | undefined;
   try { credentials = record(record(JSON.parse(await readFile(join(account.directory, '.credentials.json'), 'utf8')))?.claudeAiOauth); } catch { /* Missing credentials. */ }
   if (!credentials || typeof credentials.accessToken !== 'string' || !credentials.accessToken || !finite(credentials.expiresAt))
-    return result('unavailable', [], 'Sign in again to see usage.');
-  if (credentials.expiresAt <= Date.now()) return result('unavailable', [], RENEWING);
+    return result('unavailable', [], 'Sign in again to see usage.', 'signin');
+  if (credentials.expiresAt <= Date.now()) return result('unavailable', [], RENEWING, 'signin');
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8_000);
   try {
@@ -44,8 +44,8 @@ export async function readClaudeUsage(account: OAuthCliAccount): Promise<Account
       method: 'GET', headers: { Authorization: `Bearer ${credentials.accessToken}`, 'anthropic-beta': 'oauth-2025-04-20', Accept: 'application/json' },
       redirect: 'error', signal: controller.signal,
     });
-    if (response.status === 401 || response.status === 403) return result('unavailable', [], RENEWING);
-    if (!response.ok) return result('error', [], 'Could not read Claude usage. Try again later.');
+    if (response.status === 401 || response.status === 403) return result('unavailable', [], RENEWING, 'signin');
+    if (!response.ok) return result('error', [], 'Could not read Claude usage. Try again later.', 'retry');
     const reader = response.body?.getReader();
     if (!reader) throw new Error('empty response');
     const chunks: Uint8Array[] = []; let length = 0;
@@ -84,7 +84,7 @@ export async function readClaudeUsage(account: OAuthCliAccount): Promise<Account
       metrics.push({ label: 'Extra usage', value: `${used} of ${limit}${typeof extra.currency === 'string' && extra.currency ? ` ${extra.currency}` : ''}`,
         ...(Number.isFinite(percent) ? { usedPercent: percent } : {}) });
     }
-    return metrics.length ? result('ready', metrics) : result('unavailable', [], 'Claude did not report any usage windows for this account.');
-  } catch { return result('error', [], 'Could not read Claude usage. Try again later.'); }
+    return metrics.length ? result('ready', metrics) : result('unavailable', [], 'Claude did not report any usage windows for this account.', 'browser');
+  } catch { return result('error', [], 'Could not read Claude usage. Try again later.', 'retry'); }
   finally { clearTimeout(timeout); }
 }

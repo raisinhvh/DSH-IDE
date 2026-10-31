@@ -41,6 +41,13 @@ export class AccountRegistry {
     return this.context.secrets.get(accountSecretKey(id));
   }
 
+  public async replaceSecret(id: string, secret: string): Promise<void> {
+    if (!this.get(id)) throw new Error('Account not found.');
+    const trimmed = secret.trim();
+    if (!trimmed) throw new Error('Account secret is required');
+    await this.context.secrets.store(accountSecretKey(id), trimmed);
+  }
+
   public async add(input: AddAccountInput): Promise<AccountRecord> {
     const provider = clean(input.provider, "Provider");
     const label = clean(input.label, "Account label");

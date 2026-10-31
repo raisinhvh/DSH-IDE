@@ -11,8 +11,8 @@ const MAX_LINE = 64 * 1024;
 
 /** Read subscription quota data through Codex's documented app-server RPC. */
 export async function readCodexUsage(account: OAuthCliAccount): Promise<AccountUsage> {
-  const result = (status: AccountUsage['status'], metrics: AccountUsageMetric[] = [], detail?: string): AccountUsage => ({
-    status, metrics, ...(detail ? { detail } : {}), fetchedAt: Date.now(),
+  const result = (status: AccountUsage['status'], metrics: AccountUsageMetric[] = [], detail?: string, fix?: AccountUsage['fix']): AccountUsage => ({
+    status, metrics, ...(detail ? { detail } : {}), ...(fix ? { fix } : {}), fetchedAt: Date.now(),
   });
   if (account.provider !== 'codex-cli') return result('unavailable', [], 'Usage is available only for Codex accounts.');
 
@@ -22,6 +22,7 @@ export async function readCodexUsage(account: OAuthCliAccount): Promise<AccountU
   let totalOutput = 0;
   let buffer = '';
   let nextId = 1;
+  let invalidAuth = false;
   const pending = new Map<number, { resolve(value: Json): void; reject(error: Error): void }>();
   let waitForClose: (() => Promise<void>) | undefined;
 
@@ -84,11 +85,19 @@ export async function readCodexUsage(account: OAuthCliAccount): Promise<AccountU
         try { parsed = JSON.parse(line); } catch { continue; }
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
         const message = parsed as Json;
+        if (message.method === 'account/updated' && message.params && typeof message.params === 'object') {
+          const params = message.params as Json;
+          if ('authMode' in params && params.authMode !== 'chatgpt') invalidAuth = true;
+        }
         if (typeof message.id !== 'number') continue;
         const call = pending.get(message.id);
         if (!call) continue;
         pending.delete(message.id);
-        if (message.error) call.reject(new Error('Codex app-server rejected the request.'));
+        if (message.error) {
+          const rpcError = message.error as Json;
+          const text = typeof rpcError.message === 'string' ? rpcError.message.slice(0, 300) : '';
+          call.reject(new Error(`Codex app-server rejected the request${text ? `: ${text}` : '.'}`));
+        }
         else call.resolve(message.result && typeof message.result === 'object' ? message.result as Json : {});
       }
     });
@@ -105,6 +114,7 @@ export async function readCodexUsage(account: OAuthCliAccount): Promise<AccountU
     });
     process.stdin.write(JSON.stringify({ method: 'initialized' }) + '\n');
     const response = await rpc('account/rateLimits/read');
+    if (invalidAuth) return result('error', [], "This Codex account isn't signed in with ChatGPT. Sign in again to see usage.", 'signin');
     const root = response.rateLimits && typeof response.rateLimits === 'object' ? response.rateLimits as Json : undefined;
     const byId = response.rateLimitsByLimitId && typeof response.rateLimitsByLimitId === 'object'
       ? Object.entries(response.rateLimitsByLimitId as Json) : [];
@@ -133,15 +143,16 @@ export async function readCodexUsage(account: OAuthCliAccount): Promise<AccountU
           ...(typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0 ? { resetsAt: Math.round(seconds * 1000) } : {}) });
       }
     }
-    if (!metrics.length) return result('unavailable', [], 'Codex did not report any usage windows for this account.');
+    if (!metrics.length) return result('unavailable', [], 'Codex did not report any usage windows for this account.', 'browser');
     return result('ready', metrics);
   } catch (error) {
-    const detail = error instanceof Error && error.message.includes('timed out')
-      ? 'Codex usage request timed out. Try again shortly.'
-      : error instanceof Error && error.message.includes('could not start')
-        ? 'Codex CLI could not start. Check its path in Settings.'
-        : 'Codex usage is unavailable. Check that this account is signed in with ChatGPT.';
-    return result('error', [], detail);
+    if (invalidAuth) return result('error', [], "This Codex account isn't signed in with ChatGPT. Sign in again to see usage.", 'signin');
+    const message = error instanceof Error ? error.message : '';
+    if (message.includes('timed out')) return result('error', [], 'Codex usage request timed out.', 'retry');
+    if (message.includes('could not start')) return result('error', [], 'Codex CLI could not start. Check its path in Settings.', 'cli');
+    if (/401|unauthori[sz]ed|token|expired|log ?in|sign ?in|auth/i.test(message))
+      return result('error', [], 'Codex sign-in has expired. Sign in again to see usage.', 'signin');
+    return result('error', [], 'Could not read Codex usage. Try again.', 'retry');
   } finally {
     done = true;
     if (timer) clearTimeout(timer);

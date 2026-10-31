@@ -39,16 +39,25 @@ export class AccountUsageService {
     this.usage[target.id] = { ...(previous || { status: 'unavailable', metrics: [], fetchedAt: 0 }), loading: true };
     this.emit();
     const task = (async () => {
-      let result: AccountUsage;
-      try {
-        const missing = (): AccountUsage => ({ status: 'error', metrics: [], detail: 'Account details are missing.', fetchedAt: Date.now() });
-        if (target.provider === 'claude-cli' || target.provider === 'codex-cli') {
-          result = !target.oauth ? missing() : target.provider === 'claude-cli' ? await readClaudeUsage(target.oauth) : await readCodexUsage(target.oauth);
-        } else if (target.provider === 'deepseek-official' || target.provider === 'openrouter') {
-          const secret = await target.secret?.();
-          result = !secret ? missing() : target.provider === 'deepseek-official' ? await readDeepSeekUsage(secret) : await readOpenRouterUsage(secret);
-        } else result = { status: 'unavailable', metrics: [], detail: 'This provider does not report usage to DSH yet.', fetchedAt: Date.now() };
-      } catch { result = { status: 'error', metrics: [], detail: 'Could not read account usage. Try again later.', fetchedAt: Date.now() }; }
+      const read = async (): Promise<AccountUsage> => {
+        try {
+          const missing = (fix: AccountUsage['fix']): AccountUsage => ({ status: 'error', metrics: [], detail: 'Account details are missing.', fix, fetchedAt: Date.now() });
+          if (target.provider === 'claude-cli' || target.provider === 'codex-cli') {
+            return !target.oauth ? missing('signin') : target.provider === 'claude-cli' ? await readClaudeUsage(target.oauth) : await readCodexUsage(target.oauth);
+          }
+          if (target.provider === 'deepseek-official' || target.provider === 'openrouter') {
+            const secret = await target.secret?.();
+            return !secret ? missing('key') : target.provider === 'deepseek-official' ? await readDeepSeekUsage(secret) : await readOpenRouterUsage(secret);
+          }
+          return { status: 'unavailable', metrics: [], detail: 'This provider does not report usage to DSH yet.', fetchedAt: Date.now() };
+        } catch { return { status: 'error', metrics: [], detail: 'Could not read account usage. Try again later.', fix: 'retry', fetchedAt: Date.now() }; }
+      };
+      let result = await read();
+      if (result.status === 'error' && result.fix === 'retry') {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        if (!this.usage[target.id]) return;
+        result = await read();
+      }
       if (this.usage[target.id]) { this.usage[target.id] = result; this.emit(); }
     })();
     this.inFlight.set(target.id, task);

@@ -25,3 +25,7 @@ await import('./handoff.test.mjs');
 await import('./limits.test.mjs');
 await import('./image-gen.test.mjs');
 await import('./pi-ai.test.mjs');
+
+await import('./codex-usage.test.mjs');
+await import('./deepseek-usage.test.mjs');
+await import('./usage-fixes.test.mjs');
