@@ -21,6 +21,8 @@ export interface CliTurn {
   system?: string;
   images?: { path: string; mimeType: string }[];
   sessionId?: string;
+  /** Reports Claude rate limit updates. */
+  onRateLimit?: (info: unknown) => void;
   onText(text: string): void;
   /** The model started a new message; text after this must not be joined to earlier text. */
   onMessageBreak?(): void;
@@ -114,6 +116,10 @@ export class OAuthCliRuntime {
             }
             if (event.type === 'turn.failed') { child.kill(); finish(new Error('Codex turn failed. Open the CLI for details.')); return; }
           } else {
+            if (event.type === 'rate_limit_event') {
+              try { turn.onRateLimit?.(event.rate_limit_info); } catch { /* Callback errors must not interrupt the turn. */ }
+              continue;
+            }
             if (typeof event.session_id === 'string') sessionId = event.session_id;
             if (event.type === 'control_request') {
               const request = (event.request || {}) as Record<string, unknown>;

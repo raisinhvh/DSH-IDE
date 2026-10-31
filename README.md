@@ -1,11 +1,11 @@
 # DeepSeek Harness for IDE
 
-DeepSeek Harness (DSH) for VS Code and Cursor. The extension runs inside the editor, presents chat in a sidebar, and keeps proposed edits in an isolated workspace mirror until review. DeepSeek and OpenRouter API routes start the pinned `@deepseek-ai/dsh` `0.2.0-rc.2` package. ChatGPT and Claude subscription routes run the official Codex and Claude Code CLIs using their browser sign-ins. Cursor models use the official Cursor Agent CLI over ACP.
+DeepSeek Harness (DSH) for VS Code and Cursor. The extension runs inside the editor, presents chat in a sidebar, and keeps proposed edits in an isolated workspace mirror until review. DeepSeek, OpenRouter, and OpenCode Go API routes start the pinned `@deepseek-ai/dsh` `0.2.0-rc.2` package. ChatGPT and Claude subscription routes run the official Codex and Claude Code CLIs using their browser sign-ins. Cursor models use the official Cursor Agent CLI over ACP.
 
 ## What works
 
 - The extension activates through `src/extension.ts` and registers the sidebar and contributed commands.
-- DSH runs as a child Node process over line-delimited JSON-RPC ACP on stdio. The provider and backend model are passed through a generated DSH patch. For OpenRouter the patch also declares the `llm-pi-ai` provider route, which DSH mounts with no routes; a model missing from the pi-ai OpenRouter catalog that DSH loads is declared there by hand on OpenRouter's OpenAI-compatible endpoint, with the model's effort choices as its reasoning levels. The API key is supplied through the child environment. The key is not put in process arguments or the patch file, and runtime output redacts it.
+- DSH runs as a child Node process over line-delimited JSON-RPC ACP on stdio. The provider and backend model are passed through a generated DSH patch. For OpenRouter and OpenCode Go the patch also declares the `llm-pi-ai` provider route, which DSH mounts with no routes; a model missing from the provider's pi-ai catalog that DSH loads is declared there by hand on the provider's OpenAI-compatible endpoint, with the model's effort choices as its reasoning levels. The API key is supplied through the child environment. The key is not put in process arguments or the patch file, and runtime output redacts it.
 - The default model route is `DeepSeek V4 Flash` / `deepseek-official` / `deepseek-v4-flash`.
 - `Cursor Auto` starts the official Cursor Agent CLI. After a Cursor session starts, the sidebar lists models advertised by the CLI and switches them through ACP. Cursor sign-in stays with the CLI; the extension does not copy Cursor tokens into SecretStorage.
 - `Codex Default` and `Claude Default` use the respective CLIs with browser sign-in. Each connected account has its own CLI configuration directory so work and personal logins can coexist. No API key is requested for these routes.
@@ -51,7 +51,9 @@ Open this project in VS Code or Cursor after building the extension. For develop
 4. Enter an account name, optional email, and DeepSeek API key in the inline form.
 5. Start a new chat.
 
-Account labels and provider metadata are stored in VS Code global state. DeepSeek and OpenRouter API keys are stored in VS Code `SecretStorage`. The Accounts page groups ChatGPT, Claude, Cursor, DeepSeek, and OpenRouter accounts. If a selected model needs an account, the sidebar opens Accounts.
+Account labels and provider metadata are stored in VS Code global state. DeepSeek, OpenRouter, and OpenCode Go API keys are stored in VS Code `SecretStorage`. The Accounts page groups ChatGPT, Claude, Cursor, DeepSeek, OpenRouter, and OpenCode Go accounts. If a selected model needs an account, the sidebar opens Accounts.
+
+Each provider has its own tab on the Accounts page, and each account shows its usage windows with reset times. The usage button in the chat header opens a summary of every account. Codex usage comes from the Codex app server. Claude usage comes from Anthropic's undocumented OAuth usage endpoint, read with the account's saved Claude Code login, and from the rate-limit updates Claude Code reports during turns; DSH never refreshes that login itself. OpenRouter shows credit used against the key's limit, and DeepSeek shows its balance. Cursor and OpenCode Go do not report usage yet. Usage refreshes when the sidebar loads, when Accounts opens, from the refresh button, and after each turn.
 
 ## Connect ChatGPT or Claude subscriptions
 

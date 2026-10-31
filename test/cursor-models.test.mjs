@@ -27,7 +27,7 @@ test('Claude speed sets fastMode separately, including explicitly turning it off
 });
 
 test('API routes refuse unsupported tier settings but preserve real alternate models', () => {
-  for (const provider of ['openai', 'anthropic', 'openrouter']) {
+  for (const provider of ['openai', 'anthropic', 'openrouter', 'opencode-go']) {
     for (const backend of ['base', 'base-fast']) {
       assert.throws(() => speedBackend({ provider, backend: 'base', speedOptions: [{ label: 'Fast', backend }] }, 'Fast'), /does not expose speed tiers/);
     }

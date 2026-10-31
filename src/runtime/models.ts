@@ -9,7 +9,7 @@ export function speedBackend(model: { provider: string; backend: string; speedOp
   if (hasNativeSpeed(model.provider)) return model.backend;
   const backend = model.speedOptions?.find(option => option.label === speed)?.backend || model.backend;
   const tier = codexServiceTier(speed);
-  if (['openai', 'anthropic', 'openrouter'].includes(model.provider) && tier && tier !== 'default' &&
+  if (['openai', 'anthropic', 'openrouter', 'opencode-go'].includes(model.provider) && tier && tier !== 'default' &&
       (backend === model.backend || backend === `${model.backend}-${tier}`)) {
     throw new Error(`${model.provider} ${speed} is a request setting, not a model ID. The bundled DSH API adapter does not expose speed tiers. Choose None or configure a route to a separate available model.`);
   }

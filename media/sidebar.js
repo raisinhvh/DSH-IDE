@@ -3,6 +3,7 @@
   const vscode = acquireVsCodeApi();
   const boot = document.getElementById('boot-state');
   const state = JSON.parse(boot.textContent);
+  state.usage ||= {};
   state.timeline ||= {};
   state.subagents ||= {};
   state.toolpacks ||= [];
@@ -31,7 +32,8 @@
   const closedTabs = new Set(Array.isArray(local.closedTabs) ? local.closedTabs : []);
   // Chats that finished while you were looking elsewhere, by finish time. They stay blue on the rail until opened.
   const unread = new Map(Object.entries(local.unread && typeof local.unread === 'object' ? local.unread : {}));
-  const saveLocal = () => vscode.setState({ page, closedTabs: [...closedTabs], unread: Object.fromEntries(unread) });
+  let selectedAccountProvider = typeof local.accountProvider === 'string' ? local.accountProvider : '';
+  const saveLocal = () => vscode.setState({ page, accountProvider: selectedAccountProvider, closedTabs: [...closedTabs], unread: Object.fromEntries(unread) });
   let pendingAccountRemoval = '';
   let pendingModelRemoval = '';
   let pendingInstructionRemoval = '';
@@ -92,13 +94,16 @@
   const keyed = (node, key) => { node.dataset.key = key; return node; };
   // Must match SMART_AUTO in src/runtime/smartAuto.ts.
   const smartAutoId = 'Smart Auto';
-  const providerNames = { 'codex-cli': 'Codex', 'claude-cli': 'Claude Code', 'cursor-acp': 'Cursor', 'deepseek-official': 'DeepSeek', openrouter: 'OpenRouter' };
+  const providerNames = { 'codex-cli': 'Codex', 'claude-cli': 'Claude Code', 'cursor-acp': 'Cursor', 'deepseek-official': 'DeepSeek', openrouter: 'OpenRouter', 'opencode-go': 'OpenCode Go' };
+  const providerLogos = {"claude-cli":{"color":"#D97757","path":"m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z"},"codex-cli":{"color":"#10A37F","path":"M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"},"cursor-acp":{"color":"#8B8B8B","path":"M11.503.131 1.891 5.678a.84.84 0 0 0-.42.726v11.188c0 .3.162.575.42.724l9.609 5.55a1 1 0 0 0 .998 0l9.61-5.55a.84.84 0 0 0 .42-.724V6.404a.84.84 0 0 0-.42-.726L12.497.131a1.01 1.01 0 0 0-.996 0M2.657 6.338h18.55c.263 0 .43.287.297.515L12.23 22.918c-.062.107-.229.064-.229-.06V12.335a.59.59 0 0 0-.295-.51l-9.11-5.257c-.109-.063-.064-.23.061-.23"},"deepseek-official":{"color":"#4D6BFE","path":"M23.748 4.651c-.254-.124-.364.113-.512.233-.051.04-.094.09-.137.137-.372.397-.806.657-1.373.626-.829-.046-1.537.214-2.163.848-.133-.782-.575-1.248-1.247-1.548-.352-.155-.708-.311-.955-.65-.172-.24-.219-.509-.305-.774-.055-.16-.11-.323-.293-.35-.2-.031-.278.136-.356.276-.313.572-.434 1.202-.422 1.84.027 1.436.633 2.58 1.838 3.393.137.094.172.187.129.323-.082.28-.18.553-.266.833-.055.179-.137.218-.328.14a5.5 5.5 0 0 1-1.737-1.179c-.857-.828-1.631-1.743-2.597-2.46a12 12 0 0 0-.689-.47c-.985-.957.13-1.743.387-1.836.27-.098.094-.433-.778-.428-.872.003-1.67.295-2.687.685a3 3 0 0 1-.465.136 9.6 9.6 0 0 0-2.883-.101c-1.885.21-3.39 1.1-4.497 2.622C.082 8.776-.231 10.854.152 13.02c.403 2.284 1.568 4.175 3.36 5.653 1.857 1.533 3.997 2.284 6.438 2.14 1.482-.085 3.132-.284 4.994-1.86.47.234.962.328 1.78.398.629.058 1.235-.031 1.705-.129.735-.155.684-.836.418-.961-2.155-1.004-1.682-.595-2.112-.926 1.095-1.295 2.768-3.598 3.284-6.733.05-.346.115-.834.108-1.114-.004-.171.035-.238.23-.257a4.2 4.2 0 0 0 1.545-.475c1.397-.763 1.96-2.016 2.093-3.517.02-.23-.004-.467-.247-.588M11.58 18.168c-2.088-1.642-3.101-2.183-3.52-2.16-.39.024-.32.472-.234.763.09.288.207.487.371.74.114.167.192.416-.113.603-.673.416-1.842-.14-1.897-.168-1.361-.801-2.5-1.86-3.301-3.306-.775-1.393-1.225-2.888-1.299-4.482-.02-.385.094-.522.477-.592a4.7 4.7 0 0 1 1.53-.038c2.131.311 3.946 1.264 5.467 2.774.868.86 1.525 1.887 2.202 2.89.72 1.066 1.494 2.082 2.48 2.915.348.291.626.513.892.677-.802.09-2.14.109-3.055-.615zm1.001-6.44a.306.306 0 0 1 .415-.287.3.3 0 0 1 .113.074.3.3 0 0 1 .086.214c0 .17-.136.307-.308.307a.303.303 0 0 1-.306-.307m3.11 1.596c-.2.081-.4.151-.591.16a1.25 1.25 0 0 1-.798-.254c-.274-.23-.47-.358-.551-.758a1.7 1.7 0 0 1 .015-.588c.07-.327-.007-.537-.238-.727-.188-.156-.426-.199-.689-.199a.6.6 0 0 1-.254-.078.253.253 0 0 1-.114-.358 1 1 0 0 1 .192-.21c.356-.202.767-.136 1.146.016.352.144.618.408 1.001.782.392.451.462.576.685.915.176.264.336.536.446.848.066.194-.02.353-.25.45"},"openrouter":{"color":"#6467F2","path":"M16.778 1.844v1.919q-.569-.026-1.138-.032-.708-.008-1.415.037c-1.93.126-4.023.728-6.149 2.237-2.911 2.066-2.731 1.95-4.14 2.75-.396.223-1.342.574-2.185.798-.841.225-1.753.333-1.751.333v4.229s.768.108 1.61.333c.842.224 1.789.575 2.185.799 1.41.798 1.228.683 4.14 2.75 2.126 1.509 4.22 2.11 6.148 2.236.88.058 1.716.041 2.555.005v1.918l7.222-4.168-7.222-4.17v2.176c-.86.038-1.611.065-2.278.021-1.364-.09-2.417-.357-3.979-1.465-2.244-1.593-2.866-2.027-3.68-2.508.889-.518 1.449-.906 3.822-2.59 1.56-1.109 2.614-1.377 3.978-1.466.667-.044 1.418-.017 2.278.02v2.176L24 6.014Z"},"opencode-go":{"color":"#E8E8E8","path":"M22 24H2V0h20zM17 4.8H7v14.4h10z"}};
+  const providerColors = Object.fromEntries(Object.entries(providerLogos).map(([id, logo]) => [id, logo.color]));
   const accountGroups = [
     { provider: 'codex-cli', title: 'ChatGPT Accounts', icon: 'smart_toy', oauth: true },
     { provider: 'claude-cli', title: 'Claude Accounts', icon: 'neurology', oauth: true },
     { provider: 'cursor-acp', title: 'Cursor Accounts', icon: 'account_circle' },
     { provider: 'deepseek-official', title: 'DeepSeek Accounts', icon: 'water_drop' },
     { provider: 'openrouter', title: 'OpenRouter Accounts', icon: 'hub' },
+    { provider: 'opencode-go', title: 'OpenCode Go Accounts', icon: 'terminal' },
   ];
 
   function closeSettings() { el('settings-menu').hidden = true; el('settings-toggle').setAttribute('aria-expanded', 'false'); }
@@ -1116,65 +1121,131 @@
     if (nearBottom) feed.scrollTop = feed.scrollHeight;
   }
 
-  function accountRow(account) {
-    const row = keyed(document.createElement('div'), 'account:' + account.id); row.className = 'account-row';
+  function providerLogo(provider) {
+    const logo = providerLogos[provider];
+    if (!logo) return icon(accountGroups.find(group => group.provider === provider)?.icon || 'account_circle');
+    const wrap = document.createElement('span'); wrap.className = 'provider-logo'; wrap.style.color = logo.color;
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('aria-hidden', 'true');
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path'); path.setAttribute('d', logo.path); path.setAttribute('fill', 'currentColor'); svg.appendChild(path); wrap.appendChild(svg); return wrap;
+  }
+  const providerColor = provider => providerColors[provider] || 'var(--vscode-charts-purple)';
+  const percent = value => Math.max(0, Math.min(100, value));
+  function resetIn(at) {
+    const mins = Math.ceil((at - Date.now()) / 60000); if (!at || mins <= 0) return '';
+    return mins < 60 ? mins + 'm' : mins < 1440 ? Math.floor(mins / 60) + 'h ' + mins % 60 + 'm' : Math.floor(mins / 1440) + 'd ' + Math.floor(mins % 1440 / 60) + 'h';
+  }
+  function usageFill(value, provider, previous) {
+    const fill = document.createElement('div'); fill.className = 'usage-fill' + (value >= 90 ? ' usage-high' : ''); fill.style.backgroundColor = providerColor(provider); fill.style.width = percent(value) + '%'; fill.dataset.percent = String(percent(value));
+    if (previous !== undefined && Number(previous) !== percent(value) && !calm()) play(fill, [{ width: previous + '%' }, { width: percent(value) + '%' }], { duration: 460, easing: railSpring });
+    return fill;
+  }
+  function accountRow(account, previous) {
+    const row = keyed(document.createElement('div'), 'account:' + account.id); row.className = 'account-card';
+    const head = document.createElement('div'); head.className = 'account-card-head';
     const main = document.createElement('div'); main.className = 'row-main';
-    const title = document.createElement('div'); title.className = 'row-title'; title.append(document.createTextNode(account.label + (account.email ? ' (' + account.email + ')' : '')));
+    const title = document.createElement('div'); title.className = 'row-title'; title.append(document.createTextNode(account.label));
     if (account.isDefault) { const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = 'Default'; title.appendChild(badge); }
-    const subtitle = document.createElement('div'); subtitle.className = 'row-subtitle'; subtitle.textContent = account.authType === 'oauth' ? 'Browser sign-in' : 'API key';
-    main.append(title, subtitle); row.appendChild(main);
+    main.appendChild(title);
+    if (account.email) { const email = document.createElement('div'); email.className = 'row-subtitle'; email.textContent = account.email; main.appendChild(email); }
+    const subtitle = document.createElement('div'); subtitle.className = 'row-subtitle'; subtitle.textContent = account.authType === 'oauth' ? 'Browser sign-in' : 'API key'; main.appendChild(subtitle); head.appendChild(main);
     const actions = document.createElement('div'); actions.className = 'row-actions';
     if (!account.isDefault) actions.appendChild(button('', 'Make default', () => send({ type: 'setDefaultAccount', provider: account.provider, accountId: account.id }), 'icon-button', 'star'));
-    const remove = button('', pendingAccountRemoval === account.id ? 'Confirm removal' : 'Remove account', () => {
+    actions.appendChild(button('', pendingAccountRemoval === account.id ? 'Confirm removal' : 'Remove account', () => {
       if (pendingAccountRemoval === account.id) { pendingAccountRemoval = ''; send({ type: 'removeAccount', accountId: account.id }); }
       else { pendingAccountRemoval = account.id; renderAccounts(); }
-    }, 'icon-button', pendingAccountRemoval === account.id ? 'delete_forever' : 'delete');
-    actions.appendChild(remove); row.appendChild(actions); return row;
+    }, 'icon-button', pendingAccountRemoval === account.id ? 'delete_forever' : 'delete')); head.appendChild(actions); row.appendChild(head);
+    const usage = state.usage[account.id]; const block = document.createElement('div'); block.className = 'usage-block';
+    if (!usage) { const note = document.createElement('div'); note.className = 'usage-note'; note.textContent = 'Loading usage…'; block.appendChild(note); }
+    else {
+      const metrics = document.createElement('div'); if (usage.loading) metrics.className = 'usage-loading';
+      (usage.metrics || []).forEach((metric, index) => {
+        const line = document.createElement('div'); line.className = 'usage-row'; const label = document.createElement('span'); label.textContent = metric.label; const value = document.createElement('span');
+        const numeric = typeof metric.usedPercent === 'number' && Number.isFinite(metric.usedPercent); const reset = numeric ? resetIn(metric.resetsAt) : '';
+        value.textContent = numeric ? Math.round(metric.usedPercent) + '%' + (reset ? ' · resets in ' + reset : '') : metric.value; line.append(label, value); metrics.appendChild(line);
+        if (numeric) { const track = document.createElement('div'); track.className = 'usage-track'; const key = account.id + ':' + index + ':' + metric.label; const fill = usageFill(metric.usedPercent, account.provider, previous.get(key)); fill.dataset.usageKey = key; track.appendChild(fill); metrics.appendChild(track); }
+      }); block.appendChild(metrics);
+      if (!(usage.metrics || []).length && (usage.status === 'unavailable' || usage.status === 'error')) { const note = document.createElement('div'); note.className = 'usage-note' + (usage.status === 'error' ? ' usage-error' : ''); note.textContent = usage.detail || (usage.status === 'error' ? 'Usage unavailable' : 'Usage not available'); block.appendChild(note); }
+      if (usage.fetchedAt) { const note = document.createElement('div'); note.className = 'usage-note'; const mins = Math.max(0, Math.floor((Date.now() - usage.fetchedAt) / 60000)); note.textContent = 'Updated ' + (mins < 1 ? 'just now' : mins + 'm ago'); block.appendChild(note); }
+    }
+    row.appendChild(block); return row;
   }
-
   function renderAccounts() {
-    const root = el('account-groups');
-    rebuild(root, () => {
-    for (const group of accountGroups) {
-      const section = keyed(document.createElement('section'), 'group:' + group.provider); section.className = 'provider-group';
-      const heading = document.createElement('div'); heading.className = 'group-heading'; heading.appendChild(icon(group.icon));
-      const title = document.createElement('h2'); title.textContent = group.title; heading.appendChild(title);
-      heading.appendChild(button('', 'View ' + providerNames[group.provider] + ' usage in your browser', () => send({ type: 'viewProviderUsage', provider: group.provider }), 'icon-button', 'open_in_new'));
-      section.appendChild(heading);
-      if (group.provider === 'cursor-acp') {
-        if (state.cursor.connected) {
-          const row = keyed(document.createElement('div'), 'account:cursor'); row.className = 'account-row';
-          const main = document.createElement('div'); main.className = 'row-main';
-          const line = document.createElement('div'); line.className = 'row-title'; line.append(document.createTextNode(state.cursor.label || 'Cursor account'));
-          const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = 'Active'; line.appendChild(badge);
-          const sub = document.createElement('div'); sub.className = 'row-subtitle'; sub.textContent = 'Browser sign-in'; main.append(line, sub); row.appendChild(main); section.appendChild(row);
-        } else { const empty = document.createElement('div'); empty.className = 'empty-row'; empty.textContent = state.cursor.busy ? 'Complete sign-in in your browser…' : 'No Cursor account connected'; section.appendChild(empty); }
-        const footer = document.createElement('div'); footer.className = 'group-footer';
-        const action = button(state.cursor.connected ? 'Disconnect' : state.cursor.busy ? 'Connecting…' : 'Connect Cursor', state.cursor.connected ? 'Disconnect Cursor' : 'Sign in with Cursor', () => send({ type: state.cursor.connected ? 'cursorLogout' : 'cursorLogin' }), 'secondary-button');
-        action.disabled = !!state.cursor.busy; footer.appendChild(action);
-        footer.appendChild(button('Refresh', 'Refresh Cursor account status', () => send({ type: 'refreshAccounts' }), 'text-button'));
-        if (state.cursor.authUrl) footer.appendChild(button('Open sign-in page', 'Open Cursor sign-in page', () => send({ type: 'openAuthUrl', url: state.cursor.authUrl }), 'text-button'));
-        section.appendChild(footer);
-      } else {
-        const accounts = state.accounts.filter(account => account.provider === group.provider);
-        if (accounts.length) for (const account of accounts) section.appendChild(accountRow(account));
-        else { const empty = document.createElement('div'); empty.className = 'empty-row'; empty.textContent = 'No accounts added'; section.appendChild(empty); }
-        const footer = document.createElement('div'); footer.className = 'group-footer';
-        footer.appendChild(button(group.oauth ? 'Connect account' : 'Add API key', 'Add an account for ' + group.title, () => openAccountForm(group), 'text-button'));
-        section.appendChild(footer);
-      }
-      root.appendChild(section);
-    }
+    const root = el('account-groups'); const previous = new Map([...root.querySelectorAll('[data-usage-key]')].map(node => [node.dataset.usageKey, node.dataset.percent]));
     const legacy = state.accounts.filter(account => account.provider === 'openai' || account.provider === 'anthropic');
-    if (legacy.length) {
-      const section = keyed(document.createElement('section'), 'group:legacy'); section.className = 'provider-group';
-      const heading = document.createElement('div'); heading.className = 'group-heading';
-      const title = document.createElement('h2'); title.textContent = 'Previous API accounts'; heading.appendChild(title); section.appendChild(heading);
-      for (const account of legacy) section.appendChild(accountRow(account));
-      root.appendChild(section);
-    }
+    const groups = legacy.length ? [...accountGroups, { provider: 'legacy', title: 'Previous API accounts', icon: 'history' }] : accountGroups;
+    const accountsFor = group => group.provider === 'legacy' ? legacy : state.accounts.filter(account => account.provider === group.provider);
+    if (!groups.some(group => group.provider === selectedAccountProvider)) selectedAccountProvider = groups.find(group => accountsFor(group).length || (group.provider === 'cursor-acp' && state.cursor.connected))?.provider || groups[0].provider;
+    rebuild(root, () => {
+      const tabs = document.createElement('div'); tabs.className = 'account-tabs'; tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', 'Account providers');
+      groups.forEach((group, index) => {
+        const count = accountsFor(group).length || (group.provider === 'cursor-acp' && state.cursor.connected ? 1 : 0); const selected = group.provider === selectedAccountProvider;
+        const tab = button('', providerNames[group.provider] || 'Previous', () => { selectedAccountProvider = group.provider; saveLocal(); renderAccounts(); }, 'account-tab' + (selected ? ' selected' : ''));
+        tab.setAttribute('role', 'tab'); tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1; tab.style.setProperty('--provider-color', providerColor(group.provider)); tab.append(providerLogo(group.provider), document.createTextNode(providerNames[group.provider] || 'Previous'));
+        if (count) { const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = String(count); tab.appendChild(badge); }
+        tab.onkeydown = event => { if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return; event.preventDefault(); selectedAccountProvider = groups[(index + (event.key === 'ArrowRight' ? 1 : groups.length - 1)) % groups.length].provider; saveLocal(); renderAccounts(); root.querySelector('[role="tab"][aria-selected="true"]').focus(); }; tabs.appendChild(tab);
+      }); root.appendChild(tabs);
+      const group = groups.find(item => item.provider === selectedAccountProvider); const accounts = accountsFor(group);
+      const section = keyed(document.createElement('section'), 'group:' + group.provider); section.className = 'provider-group'; section.setAttribute('role', 'tabpanel');
+      const heading = document.createElement('div'); heading.className = 'group-heading'; heading.appendChild(providerLogo(group.provider)); const title = document.createElement('h2'); title.textContent = group.title; heading.appendChild(title);
+      const refresh = button('', 'Refresh usage', () => send({ type: 'refreshUsage' }), 'icon-button', 'refresh'); if (accounts.some(account => state.usage[account.id]?.loading)) refresh.firstChild.classList.add('spinning'); heading.appendChild(refresh);
+      if (group.provider !== 'legacy') heading.appendChild(button('', 'View ' + providerNames[group.provider] + ' usage in your browser', () => send({ type: 'viewProviderUsage', provider: group.provider }), 'icon-button', 'open_in_new')); section.appendChild(heading);
+      if (group.provider === 'cursor-acp') {
+        const card = document.createElement('div'); card.className = 'account-card'; const line = document.createElement('div'); line.className = 'row-title'; line.textContent = state.cursor.connected ? state.cursor.label || 'Cursor account' : state.cursor.busy ? 'Complete sign-in in your browser…' : 'No Cursor account connected'; card.appendChild(line);
+        if (state.cursor.connected) { const sub = document.createElement('div'); sub.className = 'row-subtitle'; sub.textContent = 'Browser sign-in'; card.appendChild(sub); } section.appendChild(card);
+        for (const account of accounts) section.appendChild(accountRow(account, previous));
+        const footer = document.createElement('div'); footer.className = 'group-footer'; const action = button(state.cursor.connected ? 'Disconnect' : state.cursor.busy ? 'Connecting…' : 'Connect Cursor', state.cursor.connected ? 'Disconnect Cursor' : 'Sign in with Cursor', () => send({ type: state.cursor.connected ? 'cursorLogout' : 'cursorLogin' }), 'secondary-button'); action.disabled = !!state.cursor.busy; footer.appendChild(action); footer.appendChild(button('Refresh', 'Refresh Cursor account status', () => send({ type: 'refreshAccounts' }), 'text-button')); if (state.cursor.authUrl) footer.appendChild(button('Open sign-in page', 'Open Cursor sign-in page', () => send({ type: 'openAuthUrl', url: state.cursor.authUrl }), 'text-button')); section.appendChild(footer);
+      } else {
+        if (accounts.length) for (const account of accounts) section.appendChild(accountRow(account, previous)); else { const empty = document.createElement('div'); empty.className = 'empty-row'; empty.textContent = 'No accounts added'; section.appendChild(empty); }
+        if (group.provider !== 'legacy') { const footer = document.createElement('div'); footer.className = 'group-footer'; footer.appendChild(button(group.oauth ? 'Connect account' : 'Add API key', 'Add an account for ' + group.title, () => openAccountForm(group), 'text-button')); section.appendChild(footer); }
+      } root.appendChild(section);
     });
   }
+  function usageSummary() {
+    const entries = []; const shades = new Map();
+    for (const group of accountGroups) for (const account of state.accounts.filter(item => item.provider === group.provider)) {
+      const metrics = (state.usage[account.id]?.metrics || []).filter(metric => typeof metric.usedPercent === 'number' && Number.isFinite(metric.usedPercent));
+      if (!metrics.length) continue; const binding = metrics.reduce((best, metric) => metric.usedPercent > best.usedPercent ? metric : best); const used = percent(binding.usedPercent); const k = shades.get(account.provider) || 0; shades.set(account.provider, k + 1);
+      entries.push({ account, binding, used, color: k ? `color-mix(in srgb, ${providerColor(account.provider)} ${Math.max(44, 100 - k * 28)}%, white)` : providerColor(account.provider) });
+    }
+    const eligible = new Set(entries.map(entry => entry.account.id)); const missing = state.accounts.filter(account => account.provider !== 'openai' && account.provider !== 'anthropic' && !eligible.has(account.id)).length;
+    return { entries, missing, combined: entries.length ? Math.round(entries.reduce((sum, entry) => sum + entry.used, 0) / entries.length) : 0 };
+  }
+  function renderUsageStack(root, entries) {
+    const previous = new Map([...root.querySelectorAll('[data-account-id]')].map(node => [node.dataset.accountId, node.dataset.width])); root.textContent = '';
+    for (const entry of entries) {
+      const segment = document.createElement('span'); const width = entry.used / entries.length; const old = previous.get(entry.account.id); segment.className = 'usage-stack-segment'; segment.dataset.accountId = entry.account.id; segment.dataset.width = String(width); segment.style.width = width + '%'; segment.style.background = entry.color; root.appendChild(segment);
+      if (old !== undefined && Number(old) !== width && !calm()) play(segment, [{ width: old + '%' }, { width: width + '%' }], { duration: 460, easing: railSpring });
+    }
+  }
+  // Green when usage comes back soon, red when it is days away (log scale from 30 minutes to 5 days).
+  function resetColor(at) {
+    const hours = Math.max(0.5, Math.min(120, (at - Date.now()) / 3600000));
+    return `hsl(${Math.round(130 * (1 - Math.log(hours / 0.5) / Math.log(240)))} 65% 55%)`;
+  }
+  function renderUsageButton() {
+    const summary = usageSummary(); const toggle = el('usage-toggle'); const menu = el('usage-menu');
+    toggle.hidden = !summary.entries.length; const title = `AI usage ${summary.combined}% across ${summary.entries.length} accounts`; toggle.title = title; toggle.setAttribute('aria-label', title);
+    if (!summary.entries.length) { menu.hidden = true; toggle.setAttribute('aria-expanded', 'false'); return; }
+    if (menu.hidden) return;
+    const oldStack = menu.querySelector('.usage-stack'); const stack = oldStack || document.createElement('div'); stack.className = 'usage-stack usage-menu-stack'; renderUsageStack(stack, summary.entries); menu.textContent = '';
+    const head = document.createElement('div'); head.className = 'usage-menu-head'; const heading = document.createElement('span'); heading.textContent = 'AI usage — all accounts';
+    const refresh = button('', 'Refresh usage', () => send({ type: 'refreshUsage' }), 'icon-button', 'refresh'); if (Object.values(state.usage).some(usage => usage?.loading)) refresh.firstChild.classList.add('spinning'); head.append(heading, refresh);
+    const big = document.createElement('div'); big.className = 'usage-big'; const number = document.createElement('strong'); number.textContent = summary.combined + '%'; const caption = document.createElement('span'); caption.textContent = 'combined usage'; big.append(number, caption);
+    const legend = document.createElement('div'); legend.className = 'usage-legend';
+    for (const entry of summary.entries) {
+      const { account, binding, used, color } = entry; const row = button('', 'View ' + account.label + ' account', () => { selectedAccountProvider = account.provider; saveLocal(); closeMenus(); showPage('accounts'); }, 'usage-legend-row');
+      const swatch = document.createElement('span'); swatch.className = 'usage-swatch'; swatch.style.background = color; const name = document.createElement('span'); name.className = 'usage-legend-name'; name.textContent = (providerNames[account.provider] || account.provider) + ' · ' + account.label;
+      const value = document.createElement('span'); value.className = 'usage-legend-value'; value.textContent = Math.round(used) + '%';
+      const reset = resetIn(binding.resetsAt); const time = document.createElement('span'); time.className = 'usage-legend-reset'; time.textContent = reset;
+      if (reset) { time.style.color = resetColor(binding.resetsAt); time.title = binding.label + ' resets in ' + reset; }
+      row.append(swatch, name, value, time); legend.appendChild(row);
+    }
+    menu.append(head, big, stack, legend);
+    if (summary.missing) { const foot = document.createElement('div'); foot.className = 'usage-foot'; foot.textContent = summary.missing + ' account' + (summary.missing === 1 ? '' : 's') + ' without usage data'; menu.appendChild(foot); }
+    menu.appendChild(button('Manage accounts', 'Manage accounts', () => { closeMenus(); showPage('accounts'); }, 'text-button'));
+  }
+  el('usage-toggle').onclick = () => { const menu = el('usage-menu'); const wasHidden = menu.hidden; closeMenus(); closeSettings(); el('recent-menu').hidden = true; el('recent-toggle').setAttribute('aria-expanded', 'false'); closeSendMenu(); menu.hidden = !wasHidden; el('usage-toggle').setAttribute('aria-expanded', String(wasHidden)); if (wasHidden) { renderUsageButton(); if (!calm()) play(menu, [{ opacity: 0, transform: 'translateY(-4px)' }, { opacity: 1, transform: 'translateY(0)' }], { duration: 220, easing: popEasing }); } };
+  setInterval(() => { if (page === 'accounts') renderAccounts(); }, 60000);
 
   function openAccountForm(group) {
     showPage('accounts');
@@ -1444,7 +1515,7 @@
   window.addEventListener('resize', placeModelMenu);
 
   function closeMenus() {
-    for (const [menuId, buttonId] of [['model-menu', 'model-picker'], ['speed-options', 'speed-picker'], ['effort-options', 'effort-picker'], ['agents-menu', 'agents-picker']]) {
+    for (const [menuId, buttonId] of [['model-menu', 'model-picker'], ['speed-options', 'speed-picker'], ['effort-options', 'effort-picker'], ['agents-menu', 'agents-picker'], ['approval-menu', 'approval'], ['usage-menu', 'usage-toggle']]) {
       el(menuId).hidden = true; el(buttonId).setAttribute('aria-expanded', 'false');
     }
   }
@@ -1485,17 +1556,22 @@
     for (const row of rows.values()) row.remove();
   }
 
+  const approvalModes = { ask: ['Ask approval', 'shield', 'Ask before running tools'], auto: ['Approve for me', 'bolt', 'Routine actions run automatically; risky ones still ask'], full: ['Full access', 'warning', 'No approval prompts, unrestricted file and network access'] };
   function renderApproval() {
-    const mode = state.approvalMode;
-    const toggle = el('approval');
-    const info = {
-      ask: ['Ask approval', 'shield', 'Ask before running tools. Click for "Approve for me".'],
-      auto: ['Approve for me', 'bolt', 'Routine actions run automatically; risky ones still ask. Click for Full access.'],
-      full: ['Full access', 'warning', 'No approval prompts, unrestricted file and network access. Click to go back to Ask approval.'],
-    }[mode] || ['Ask approval', 'shield', 'Ask before running tools.'];
-    toggle.setAttribute('aria-pressed', String(mode !== 'ask')); toggle.title = info[2]; toggle.setAttribute('aria-label', info[2]);
-    el('approval-label').textContent = info[0];
-    el('approval-icon').textContent = info[1];
+    const mode = Object.hasOwn(approvalModes, state.approvalMode) ? state.approvalMode : 'ask';
+    const [label, glyph, desc] = approvalModes[mode], approval = el('approval');
+    approval.dataset.mode = mode; approval.title = `${label}: ${desc}. Click to change.`; approval.setAttribute('aria-label', approval.title);
+    el('approval-label').textContent = label; el('approval-icon').textContent = glyph;
+    const menu = el('approval-menu'); menu.textContent = '';
+    for (const [value, [name, iconName, description]] of Object.entries(approvalModes)) {
+      const option = document.createElement('button'); option.type = 'button'; option.className = 'send-option'; option.setAttribute('role', 'menuitemradio'); option.dataset.mode = value; option.setAttribute('aria-checked', String(value === mode));
+      const glyph = document.createElement('span'); glyph.className = 'symbol send-option-icon'; glyph.textContent = iconName;
+      const copy = document.createElement('span'); copy.className = 'send-option-copy';
+      const title = document.createElement('span'); title.className = 'send-option-title'; title.textContent = name;
+      const detail = document.createElement('span'); detail.className = 'send-option-desc'; detail.textContent = description; copy.append(title, detail); option.append(glyph, copy);
+      if (value === mode) { const check = document.createElement('span'); check.className = 'symbol approval-check'; check.textContent = 'check'; option.append(check); }
+      option.onclick = () => { state.approvalMode = value; closeMenus(); renderApproval(); send({ type: 'setApproval', mode: value }); }; menu.append(option);
+    }
     fitComposerActions();
   }
 
@@ -1503,19 +1579,11 @@
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
   function fitComposerActions() {
     const actions = el('compose-actions'); if (!actions.clientWidth) return;
-    const sendGroup = el('compose-send'), cancel = el('cancel'), approval = el('approval');
-    const wasCompact = actions.classList.contains('compact');
-    const first = cancel.hidden ? undefined : cancel.getBoundingClientRect();
-    if (wasCompact) { actions.classList.remove('compact'); sendGroup.prepend(cancel); }
-    const compact = approval.offsetWidth + sendGroup.offsetWidth + 12 > actions.clientWidth;
-    if (compact) { actions.classList.add('compact'); el('compose-tools').append(cancel); }
-    if (compact === wasCompact || reduceMotion.matches) return;
-    if (first) {
-      const last = cancel.getBoundingClientRect();
-      const dx = first.left + first.width / 2 - (last.left + last.width / 2), dy = first.top + first.height / 2 - (last.top + last.height / 2);
-      cancel.animate([{ transform: `translate(${dx}px, ${dy}px) scale(.7)` }, { transform: 'none' }], { duration: 520, easing: popEasing });
-    }
-    approval.animate([{ transform: 'scale(.82)' }, { transform: 'none' }], { duration: 440, easing: popEasing });
+    const wasCompact = actions.classList.contains('compact'); actions.classList.remove('compact');
+    const tools = el('compose-tools'), label = el('model-picker-label');
+    const compact = tools.scrollWidth + el('compose-send').offsetWidth + 6 > actions.clientWidth || label.scrollWidth > label.clientWidth + 1;
+    actions.classList.toggle('compact', compact);
+    if (compact !== wasCompact && !reduceMotion.matches) el('approval').animate([{ transform: 'scale(.82)' }, { transform: 'none' }], { duration: 440, easing: popEasing });
   }
   new ResizeObserver(fitComposerActions).observe(el('compose-actions'));
 
@@ -1888,7 +1956,7 @@
     for (const name of settingsPages) el(name).classList.toggle('current', page === name);
     el('settings-toggle').setAttribute('aria-pressed', String(settingsPages.includes(page)));
     el('accounts').setAttribute('aria-pressed', String(page === 'accounts'));
-    renderNotice(); renderPicker(); renderApproval(); renderSessions(); renderFeed();
+    renderNotice(); renderPicker(); renderApproval(); renderSessions(); renderFeed(); renderUsageButton();
     if (page === 'accounts') renderAccounts();
     if (page === 'subagents') renderSubagents();
     if (page === 'instructions') renderInstructions();
@@ -1899,18 +1967,18 @@
     if (page === 'sync') renderSync();
   }
 
-  el('recent-toggle').onclick = () => { const menu = el('recent-menu'); menu.hidden = !menu.hidden; el('recent-toggle').setAttribute('aria-expanded', String(!menu.hidden)); };
-  for (const [buttonId, menuId] of [['model-picker', 'model-menu'], ['speed-picker', 'speed-options'], ['effort-picker', 'effort-options'], ['agents-picker', 'agents-menu']]) {
+  el('recent-toggle').onclick = () => { const menu = el('recent-menu'); const wasHidden = menu.hidden; closeMenus(); menu.hidden = !wasHidden; el('recent-toggle').setAttribute('aria-expanded', String(!menu.hidden)); };
+  for (const [buttonId, menuId] of [['model-picker', 'model-menu'], ['speed-picker', 'speed-options'], ['effort-picker', 'effort-options'], ['agents-picker', 'agents-menu'], ['approval', 'approval-menu']]) {
     el(buttonId).onclick = () => { const wasHidden = el(menuId).hidden; closeMenus(); el(menuId).hidden = !wasHidden; el(buttonId).setAttribute('aria-expanded', String(wasHidden)); if (menuId === 'model-menu') placeModelMenu(); };
   }
-  el('settings-toggle').onclick = () => { const menu = el('settings-menu'); menu.hidden = !menu.hidden; el('settings-toggle').setAttribute('aria-expanded', String(!menu.hidden)); };
+  el('settings-toggle').onclick = () => { const menu = el('settings-menu'); const wasHidden = menu.hidden; closeMenus(); menu.hidden = !wasHidden; el('settings-toggle').setAttribute('aria-expanded', String(!menu.hidden)); };
   el('customize').onclick = () => showPage(page === 'customize' ? 'chat' : 'customize');
   el('accessibility').onclick = () => showPage(page === 'accessibility' ? 'chat' : 'accessibility');
   el('sync').onclick = () => showPage(page === 'sync' ? 'chat' : 'sync');
   document.addEventListener('click', event => {
     if (!event.target.closest('.settings-wrap')) closeSettings();
     if (!event.target.closest('.recent-wrap')) { el('recent-menu').hidden = true; el('recent-toggle').setAttribute('aria-expanded', 'false'); }
-    if (!event.target.closest('.model-picker-wrap') && !event.target.closest('.option-wrap')) closeMenus();
+    if (!event.target.closest('.model-picker-wrap') && !event.target.closest('.option-wrap') && !event.target.closest('.usage-wrap')) closeMenus();
     if (!event.target.closest('.send-wrap')) closeSendMenu();
   });
   function slashMenuOpen() { return slashMenuEl && !slashMenuEl.hidden; }
@@ -2014,7 +2082,7 @@
     }
     send({ type: 'sendPrompt', prompt, images: attachments }); el('prompt').value = ''; attachments = []; renderAttachments();
   };
-  document.querySelectorAll('.send-option').forEach((option, index, options) => {
+  document.querySelectorAll('#send-menu .send-option').forEach((option, index, options) => {
     option.onclick = () => {
       const prompt = el('prompt').value.trim();
       closeSendMenu();
@@ -2078,7 +2146,6 @@
     send({ type: 'saveInstruction', id: form.dataset.id || undefined, kind, scope: el('instruction-scope').value, file: el('instruction-file').value,
       name, description: el('instruction-description').value.trim(), content: content.value });
   };
-  el('approval').onclick = () => { state.approvalMode = { ask: 'auto', auto: 'full', full: 'ask' }[state.approvalMode] || 'ask'; renderApproval(); send({ type: 'setApproval', mode: state.approvalMode }); };
   el('prompt').oninput = () => updateSlashMenu();
   el('prompt').onkeyup = event => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) updateSlashMenu(); };
   el('prompt').onclick = () => updateSlashMenu();
@@ -2161,6 +2228,7 @@
       case 'queueState': (state.queues ||= {})[message.sessionId] = message.items || []; renderQueue(); break;
       case 'accountState': state.providerLabel = message.provider; state.accountLabel = message.label; state.accountConnected = message.connected; break;
       case 'accountsState': state.accounts = message.accounts || []; state.cursor = message.cursor || state.cursor; break;
+      case 'usageState': state.usage = message.usage || {}; break;
       case 'accountSaved': el('account-form').hidden = true; el('account-key').value = ''; el('account-submit').disabled = false; state.error = undefined; break;
       case 'modelSaved': el('model-form').hidden = true; state.error = undefined; break;
       case 'modelRemoveFailed': removingModels.delete(message.name); break;

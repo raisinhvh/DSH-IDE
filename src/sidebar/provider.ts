@@ -76,6 +76,7 @@ export class DshSidebarProvider implements vscode.WebviewViewProvider {
       case 'modelState': Object.assign(this.state, { models: message.models, cursorBackends: message.cursorBackends, selectedModelId: message.selectedModelId, selectedSpeed: message.selectedSpeed, selectedEffort: message.selectedEffort }); break;
       case 'accountState': Object.assign(this.state, { providerLabel: message.provider, accountLabel: message.label, accountConnected: message.connected }); break;
       case 'accountsState': Object.assign(this.state, { accounts: message.accounts, cursor: message.cursor }); break;
+      case 'usageState': this.state.usage = message.usage; break;
       case 'subagentProfilesState': this.state.subagentProfiles = message.profiles; break;
       case 'instructionsState': this.state.instructions = message.items; break;
       case 'customizeState': this.state.features = message.features; this.state.nameModel = message.nameModel; this.state.reviewModel = message.reviewModel; this.state.summaryModel = message.summaryModel;

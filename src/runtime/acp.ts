@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import * as vscode from 'vscode';
 import { AgentModel, agentModels } from './models';
 import { cancellationDeadline, terminateProcessTree } from './cancellation';
-import { openRouterCatalog, piAiPatch } from './piAi';
+import { isPiAiProvider, piAiCatalog, piAiPatch } from './piAi';
 
 type Json = Record<string, unknown>;
 type Pending = { resolve(value: Json): void; reject(error: Error): void; timer?: NodeJS.Timeout; method: string; sessionId?: string; clearCancellation?: () => void };
@@ -22,7 +22,7 @@ export interface DshRuntimeRoute {
   /** Folder holding a downloaded DSH update; the bundled DSH is used when absent. */
   dshRoot?: string;
   envName: string;
-  /** The model's effort choices; they become the reasoning levels of an OpenRouter model DSH's catalog lacks. */
+  /** The model's effort choices; they become the reasoning levels of an OpenRouter or OpenCode Go model DSH's catalog lacks. */
   efforts?: string[];
 }
 
@@ -93,8 +93,8 @@ export class AcpRuntime implements vscode.Disposable {
       // and skill discovery. Compaction remains owned by dsh-base's defaults.
       const instructionsHome = process.env.DSH_HOME || join(homedir(), '.dsh');
       const dshBin = dshBinFrom(route.dshRoot);
-      const piAi = route.provider === 'openrouter'
-        ? piAiPatch(route.provider, route.envName, route.model, await openRouterCatalog(dshBin), route.efforts) : '';
+      const piAi = isPiAiProvider(route.provider)
+        ? piAiPatch(route.provider, route.envName, route.model, await piAiCatalog(route.provider, dshBin), route.efforts) : '';
       await writeFile(patch, `- id: acp\n  config:\n    provider: ${JSON.stringify(route.provider)}\n    model: ${JSON.stringify(route.model)}\n- id: agent-instructions\n  config:\n    maxBytes: 65536\n    dshHome: ${JSON.stringify(instructionsHome)}\n- id: skill-filesystem\n  config:\n    dshHome: ${JSON.stringify(instructionsHome)}\n${piAi}`, 'utf8');
       this.secrets = [route.apiKey, route.webSearchKey].filter((value): value is string => !!value);
       env = { ...env, DSH_HOME: route.home, [route.envName]: route.apiKey, ...(route.webSearchKey ? { DEEPSEEK_API_KEY: route.webSearchKey } : {}) };

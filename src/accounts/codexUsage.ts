@@ -123,8 +123,10 @@ export async function readCodexUsage(account: OAuthCliAccount): Promise<AccountU
         const used = quota.usedPercent;
         if (typeof used !== 'number' || !Number.isFinite(used)) continue;
         const minutes = quota.windowDurationMins;
-        const duration = typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0 ? ` (${formatDuration(minutes)})` : '';
-        const label = `${name === 'codex' ? 'Codex' : name}${duration || (key === 'primary' ? ' usage' : ' additional usage')}`;
+        const duration = typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0
+          ? minutes === 300 ? '5-hour' : minutes === 10080 ? 'Weekly' : formatDuration(minutes)
+          : key === 'primary' ? 'Usage' : 'Additional usage';
+        const label = `${name === 'codex' ? '' : `${name} · `}${duration}`;
         const seconds = quota.resetsAt;
         if (used < 0) continue;
         metrics.push({ label, value: `${used}% used`, usedPercent: used,

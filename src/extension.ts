@@ -6,6 +6,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve as reso
 import { homedir } from 'node:os';
 import * as vscode from 'vscode';
 import { AccountRegistry, ModelEntry, ModelRegistry, ResolvedModel } from './accounts';
+import { AccountUsageService, UsageTarget } from './accounts/usageService';
 import { cliCommand, cliEnv, OAuthCliAccount, OAuthCliAccounts, OAuthCliProvider, setDetectedCliCommand } from './accounts/oauthCli';
 import { WindowsDependencies } from './runtime/dependencies';
 import { ReviewController, ReviewProposal } from './review/controller';
@@ -80,6 +81,7 @@ const PROVIDER_USAGE_URLS = new Map([
   ['cursor-acp', 'https://cursor.com/dashboard?tab=usage'],
   ['deepseek-official', 'https://platform.deepseek.com/usage'],
   ['openrouter', 'https://openrouter.ai/activity'],
+  ['opencode-go', 'https://opencode.ai/console'],
 ]);
 const RISKY_ACTION = /\brm\s+-[a-z]*[rf]|\bsudo\b|\bchmod\b|\bchown\b|\bmkfs\b|\bdd\s+if=|\bformat\s+[a-z]:|\bdel\s+\/|Remove-Item|git\s+(push|reset\s+--hard|clean|checkout\s+--)|\b(curl|wget|iwr|Invoke-WebRequest)\b|\|\s*(sh|bash|iex)\b|\b(npm|pip|pnpm|yarn)\s+(publish|install\s+-g)|\bkill(all)?\b|\bshutdown\b|\.env\b|\.ssh|credentials|\.\.[\\/]|(^|\s)(\/|~|[A-Za-z]:[\\/])/i;
 const isRiskyAction = (description: string): boolean => RISKY_ACTION.test(description);
@@ -186,6 +188,7 @@ class ExtensionHost implements vscode.Disposable {
   private readonly output = vscode.window.createOutputChannel('DeepSeek Harness');
   private readonly accounts: AccountRegistry;
   private readonly oauthAccounts: OAuthCliAccounts;
+  private readonly usage = new AccountUsageService(usage => this.sidebar.postMessage({ type: 'usageState', usage }));
   private readonly models: ModelRegistry;
   private readonly sidebar: DshSidebarProvider;
   private readonly status: vscode.StatusBarItem;
@@ -660,6 +663,22 @@ class ExtensionHost implements vscode.Disposable {
     return { ...model, backend };
   }
 
+  private usageTargets(): UsageTarget[] {
+    return [
+      ...this.oauthAccounts.list().map(account => ({ id: account.id, provider: account.provider, oauth: account })),
+      ...this.accounts.list().map(account => ({ id: account.id, provider: account.provider, secret: () => this.accounts.getSecret(account.id) })),
+    ];
+  }
+
+  private refreshUsage(force = false, accountId?: string): void {
+    try {
+      const targets = this.usageTargets();
+      const target = accountId === undefined ? undefined : targets.find(item => item.id === accountId);
+      const refresh = accountId === undefined ? this.usage.refresh(targets, force) : target ? this.usage.refreshOne(target, force) : undefined;
+      void refresh?.catch(error => this.output.appendLine(`Usage refresh failed: ${String(error)}`));
+    } catch (error) { this.output.appendLine(`Usage refresh failed: ${String(error)}`); }
+  }
+
   private async refreshAccounts(checkCursor = true): Promise<void> {
     if (checkCursor && !this.cursorAccount.busy) {
       try {
@@ -676,6 +695,7 @@ class ExtensionHost implements vscode.Disposable {
         isDefault: this.accounts.getDefault(account.provider)?.id === account.id, authType: 'api-key' as const })),
     ], cursor: this.cursorAccount });
     await this.refreshAccount();
+    this.refreshUsage();
   }
 
   private availableModels(): ModelEntry[] {
@@ -746,6 +766,7 @@ class ExtensionHost implements vscode.Disposable {
       anthropic: 'ANTHROPIC_API_KEY',
       openai: 'OPENAI_API_KEY',
       openrouter: 'OPENROUTER_API_KEY',
+      'opencode-go': 'OPENCODE_API_KEY',
     };
     const name = configured[provider];
     if (!name) throw new Error(`Provider '${provider}' needs an explicit DSH adapter and credential mapping before it can run.`);
@@ -1756,7 +1777,8 @@ class ExtensionHost implements vscode.Disposable {
         await this.saveSession(record);
       } else {
         if (!chat.runtime) throw new Error('This chat has no running agent. Use "DSH: Restart Runtime" and try again.');
-        await chat.runtime.prompt(this.rid(record), fullPrompt, imageAttachments);
+        try { await chat.runtime.prompt(this.rid(record), fullPrompt, imageAttachments); }
+        finally { const accountId = record.accountId; if (accountId) setTimeout(() => this.refreshUsage(true, accountId), 1500); }
       }
       const sentTo = oauth ? record.cliSessionId : session;
       if (sentTo) chat.sent = { session: sentTo, instructions, context };
@@ -1807,8 +1829,11 @@ class ExtensionHost implements vscode.Disposable {
       current = { ...current, sessionId: undefined, ...(await retarget?.(current.account, turn.account)) };
     }
     for (let index = 0; ; index++) {
-      try { return await cli.prompt(current); }
-      catch (error) {
+      const attempt = current;
+      try {
+        try { return await cli.prompt({ ...attempt, onRateLimit: info => { this.usage.applyClaudeEvent(attempt.account.id, info); attempt.onRateLimit?.(info); } }); }
+        finally { setTimeout(() => this.refreshUsage(true, attempt.account.id), 1500); }
+      } catch (error) {
         if (!isUsageLimit(error) || cancelled()) throw error;
         this.limitedAt.set(current.account.id, Date.now());
         const next = pool[index + 1];
@@ -2511,7 +2536,7 @@ class ExtensionHost implements vscode.Disposable {
   }
 
   private async saveModel(message: Extract<SidebarWebviewMessage, { type: 'saveModel' }>): Promise<void> {
-    const allowed = new Set(['deepseek-official', 'openai', 'anthropic', 'openrouter', 'cursor-acp', 'codex-cli', 'claude-cli']);
+    const allowed = new Set(['deepseek-official', 'openai', 'anthropic', 'openrouter', 'opencode-go', 'cursor-acp', 'codex-cli', 'claude-cli']);
     if (!allowed.has(message.provider)) throw new Error('Choose a supported model provider.');
     const name = message.name.trim();
     const backend = message.backend.trim();
@@ -2804,8 +2829,8 @@ class ExtensionHost implements vscode.Disposable {
       switch (message.type) {
         case 'checkDependencies': await this.refreshDependencies(); break;
         case 'installProvider': await this.installProvider(message.provider); break;
-        case 'pageChanged': this.sidebar.setPage(message.page); if (message.page === 'instructions') await this.refreshInstructions(); break;
-        case 'ready': if (this.active) { this.restoreJob(this.active); this.postJob(this.active); } await this.refreshInstructions(); this.postToolpacks(); this.sidebar.postMessage({ type: 'approvalState', mode: this.approvalMode }); this.refreshCustomize(); this.sync.post(); this.refreshSubagents(); this.refreshModels(); this.refreshSessions(); await this.refreshAccount(); await this.refreshAccounts(); break;
+        case 'pageChanged': this.sidebar.setPage(message.page); if (message.page === 'accounts') this.refreshUsage(); if (message.page === 'instructions') await this.refreshInstructions(); break;
+        case 'ready': this.sidebar.postMessage({ type: 'usageState', usage: this.usage.snapshot() }); this.refreshUsage(); if (this.active) { this.restoreJob(this.active); this.postJob(this.active); } await this.refreshInstructions(); this.postToolpacks(); this.sidebar.postMessage({ type: 'approvalState', mode: this.approvalMode }); this.refreshCustomize(); this.sync.post(); this.refreshSubagents(); this.refreshModels(); this.refreshSessions(); await this.refreshAccount(); await this.refreshAccounts(); break;
         case 'sendPrompt': {
           const slash = parseSlash(message.prompt);
           if (slash?.name === 'job') await this.startJob(slash.args, message.images);
@@ -2866,13 +2891,14 @@ class ExtensionHost implements vscode.Disposable {
         case 'removeModel': await this.removeModel(message.name); break;
         case 'manageAccounts': await this.manageAccounts(); break;
         case 'refreshAccounts': await this.refreshAccounts(); break;
+        case 'refreshUsage': this.refreshUsage(true, message.accountId); break;
         case 'viewProviderUsage': {
           const url = PROVIDER_USAGE_URLS.get(message.provider);
           if (url) await vscode.env.openExternal(vscode.Uri.parse(url));
           break;
         }
         case 'addAccount': {
-          if (!['deepseek-official', 'openrouter'].includes(message.provider)) throw new Error('Choose a supported API provider.');
+          if (!['deepseek-official', 'openrouter', 'opencode-go'].includes(message.provider)) throw new Error('Choose a supported API provider.');
           await this.accounts.add({ provider: message.provider, label: message.label, email: message.email, secret: message.secret });
           await this.refreshAccounts(false);
           this.sidebar.postMessage({ type: 'accountSaved' });
