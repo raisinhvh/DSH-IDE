@@ -134,6 +134,30 @@ test('Claude denies native agents before approval callbacks and preserves the de
   }
 });
 
+test('Claude keeps stdin open after a result while background tasks can still ask permission', async () => {
+  const result = new OAuthCliRuntime().prompt(turn('claude-cli', { onApproval: () => Promise.resolve(true) }));
+  const launch = launches.at(-1);
+  const responses = [];
+  launch.child.stdin.on('data', chunk => { for (const line of String(chunk).split('\n').filter(Boolean)) { const message = JSON.parse(line); if (message.type === 'control_response') responses.push(message); } });
+  const send = event => launch.child.stdout.write(JSON.stringify(event) + '\n');
+  const tick = () => new Promise(resolve => setImmediate(resolve));
+  await tick();
+  send({ type: 'system', subtype: 'task_started', task_id: 'shell-1' });
+  send({ type: 'result', subtype: 'success', result: 'Started it.' });
+  await tick();
+  assert.equal(launch.child.stdin.writableEnded, false);
+  send({ type: 'control_request', request_id: 'late', request: { subtype: 'can_use_tool', tool_name: 'PowerShell', input: { command: 'Get-Location' } } });
+  await tick(); await tick();
+  assert.equal(responses.at(-1).response.request_id, 'late');
+  assert.equal(responses.at(-1).response.response.behavior, 'allow');
+  send({ type: 'system', subtype: 'task_notification', task_id: 'shell-1', status: 'completed' });
+  send({ type: 'result', subtype: 'success', result: 'Done.' });
+  await tick();
+  assert.equal(launch.child.stdin.writableEnded, true);
+  launch.child.emit('close', 0);
+  await result;
+});
+
 test('Claude AskUserQuestion is answered in the chat instead of as a permission prompt', async () => {
   const questions = [{ question: 'Which bridge?', header: 'Bridge', options: [{ label: 'HTTP' }, { label: 'WebSocket' }], multiSelect: false }];
   for (const [onQuestions, expected] of [

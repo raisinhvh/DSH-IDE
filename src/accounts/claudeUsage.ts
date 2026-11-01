@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { OAuthCliAccount } from './oauthCli';
 import type { AccountUsage, AccountUsageMetric } from './usageTypes';
+import { claudePlan } from './planPrices';
 
 type Json = Record<string, unknown>;
 const RENEWING = "Claude's sign-in has expired. Sign in again to see usage.";
@@ -39,11 +40,19 @@ export async function readClaudeUsage(account: OAuthCliAccount): Promise<Account
   if (credentials.expiresAt <= Date.now()) return result('unavailable', [], RENEWING, 'signin');
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8_000);
+  const get = (path: string): Promise<Response> => fetch(`https://api.anthropic.com/api/oauth/${path}`, {
+    method: 'GET', headers: { Authorization: `Bearer ${credentials.accessToken}`, 'anthropic-beta': 'oauth-2025-04-20', Accept: 'application/json' },
+    redirect: 'error', signal: controller.signal,
+  });
+  // The plan saved at sign-in goes stale after an upgrade, so the profile's current plan wins.
+  const savedPlan = claudePlan(credentials.subscriptionType, credentials.rateLimitTier);
+  const planInfo = get('profile').then(async response => {
+    const organization = response.ok ? record(record(await response.json())?.organization) : undefined;
+    const type = typeof organization?.organization_type === 'string' ? organization.organization_type.replace(/^claude_/, '') : undefined;
+    return claudePlan(type, organization?.rate_limit_tier) ?? savedPlan;
+  }).catch(() => savedPlan);
   try {
-    const response = await fetch('https://api.anthropic.com/api/oauth/usage', {
-      method: 'GET', headers: { Authorization: `Bearer ${credentials.accessToken}`, 'anthropic-beta': 'oauth-2025-04-20', Accept: 'application/json' },
-      redirect: 'error', signal: controller.signal,
-    });
+    const response = await get('usage');
     if (response.status === 401 || response.status === 403) return result('unavailable', [], RENEWING, 'signin');
     if (!response.ok) return result('error', [], 'Could not read Claude usage. Try again later.', 'retry');
     const reader = response.body?.getReader();
@@ -84,7 +93,9 @@ export async function readClaudeUsage(account: OAuthCliAccount): Promise<Account
       metrics.push({ label: 'Extra usage', value: `${used} of ${limit}${typeof extra.currency === 'string' && extra.currency ? ` ${extra.currency}` : ''}`,
         ...(Number.isFinite(percent) ? { usedPercent: percent } : {}) });
     }
-    return metrics.length ? result('ready', metrics) : result('unavailable', [], 'Claude did not report any usage windows for this account.', 'browser');
+    if (!metrics.length) return result('unavailable', [], 'Claude did not report any usage windows for this account.', 'browser');
+    const plan = await planInfo;
+    return { ...result('ready', metrics), ...(plan ? { plan } : {}) };
   } catch { return result('error', [], 'Could not read Claude usage. Try again later.', 'retry'); }
-  finally { clearTimeout(timeout); }
+  finally { await planInfo; clearTimeout(timeout); }
 }

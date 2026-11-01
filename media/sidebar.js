@@ -1155,6 +1155,9 @@
       if (pendingAccountRemoval === account.id) { pendingAccountRemoval = ''; send({ type: 'removeAccount', accountId: account.id }); }
       else { pendingAccountRemoval = account.id; renderAccounts(); }
     }, 'icon-button', pendingAccountRemoval === account.id ? 'delete_forever' : 'delete')); head.appendChild(actions); row.appendChild(head);
+    row.appendChild(usageBlock(account, previous)); return row;
+  }
+  function usageBlock(account, previous) {
     const usage = state.usage[account.id]; const block = document.createElement('div'); block.className = 'usage-block';
     if (!usage) { const note = document.createElement('div'); note.className = 'usage-note'; note.textContent = 'Loading usage…'; block.appendChild(note); }
     else {
@@ -1170,8 +1173,10 @@
       if (!(usage.metrics || []).length && (usage.status === 'unavailable' || usage.status === 'error')) { const note = document.createElement('div'); note.className = 'usage-note' + (usage.status === 'error' ? ' usage-error' : ''); note.textContent = usage.detail || (usage.status === 'error' ? 'Usage unavailable' : 'Usage not available'); block.appendChild(note); const fix = usageFix(account, usage.fix); if (fix) block.appendChild(fix); }
       if (usage.fetchedAt) { const note = document.createElement('div'); note.className = 'usage-note'; const mins = Math.max(0, Math.floor((Date.now() - usage.fetchedAt) / 60000)); note.textContent = 'Updated ' + (mins < 1 ? 'just now' : mins + 'm ago'); block.appendChild(note); }
     }
-    row.appendChild(block); return row;
+    return block;
   }
+  // Cursor has one CLI sign-in instead of stored accounts; usage is keyed by its model account id.
+  function cursorUsageAccount() { return state.cursor.connected ? { id: 'cursor-login', provider: 'cursor-acp', label: state.cursor.label || 'Cursor account' } : undefined; }
   function renderAccounts() {
     const root = el('account-groups'); const previous = new Map([...root.querySelectorAll('[data-usage-key]')].map(node => [node.dataset.usageKey, node.dataset.percent]));
     const legacy = state.accounts.filter(account => account.provider === 'openai' || account.provider === 'anthropic');
@@ -1190,11 +1195,11 @@
       const group = groups.find(item => item.provider === selectedAccountProvider); const accounts = accountsFor(group);
       const section = keyed(document.createElement('section'), 'group:' + group.provider); section.className = 'provider-group'; section.setAttribute('role', 'tabpanel');
       const heading = document.createElement('div'); heading.className = 'group-heading'; heading.appendChild(providerLogo(group.provider)); const title = document.createElement('h2'); title.textContent = group.title; heading.appendChild(title);
-      const refresh = button('', 'Refresh usage', () => send({ type: 'refreshUsage' }), 'icon-button', 'refresh'); if (accounts.some(account => state.usage[account.id]?.loading)) refresh.firstChild.classList.add('spinning'); heading.appendChild(refresh);
+      const refresh = button('', 'Refresh usage', () => send({ type: 'refreshUsage' }), 'icon-button', 'refresh'); if (accounts.some(account => state.usage[account.id]?.loading) || group.provider === 'cursor-acp' && state.usage['cursor-login']?.loading) refresh.firstChild.classList.add('spinning'); heading.appendChild(refresh);
       if (group.provider !== 'legacy') heading.appendChild(button('', 'View ' + providerNames[group.provider] + ' usage in your browser', () => send({ type: 'viewProviderUsage', provider: group.provider }), 'icon-button', 'open_in_new')); section.appendChild(heading);
       if (group.provider === 'cursor-acp') {
         const card = document.createElement('div'); card.className = 'account-card'; const line = document.createElement('div'); line.className = 'row-title'; line.textContent = state.cursor.connected ? state.cursor.label || 'Cursor account' : state.cursor.busy ? 'Complete sign-in in your browser…' : 'No Cursor account connected'; card.appendChild(line);
-        if (state.cursor.connected) { const sub = document.createElement('div'); sub.className = 'row-subtitle'; sub.textContent = 'Browser sign-in'; card.appendChild(sub); } section.appendChild(card);
+        if (state.cursor.connected) { const sub = document.createElement('div'); sub.className = 'row-subtitle'; sub.textContent = 'Browser sign-in'; card.append(sub, usageBlock(cursorUsageAccount(), previous)); } section.appendChild(card);
         for (const account of accounts) section.appendChild(accountRow(account, previous));
         const footer = document.createElement('div'); footer.className = 'group-footer'; const action = button(state.cursor.connected ? 'Disconnect' : state.cursor.busy ? 'Connecting…' : 'Connect Cursor', state.cursor.connected ? 'Disconnect Cursor' : 'Sign in with Cursor', () => send({ type: state.cursor.connected ? 'cursorLogout' : 'cursorLogin' }), 'secondary-button'); action.disabled = !!state.cursor.busy; footer.appendChild(action); footer.appendChild(button('Refresh', 'Refresh Cursor account status', () => send({ type: 'refreshAccounts' }), 'text-button')); if (state.cursor.authUrl) footer.appendChild(button('Open sign-in page', 'Open Cursor sign-in page', () => send({ type: 'openAuthUrl', url: state.cursor.authUrl }), 'text-button')); section.appendChild(footer);
       } else {
@@ -1205,18 +1210,26 @@
   }
   function usageSummary() {
     const entries = []; const shades = new Map();
-    for (const group of accountGroups) for (const account of state.accounts.filter(item => item.provider === group.provider)) {
+    const cursor = cursorUsageAccount();
+    for (const group of accountGroups) for (const account of [...state.accounts.filter(item => item.provider === group.provider), ...(cursor && group.provider === 'cursor-acp' ? [cursor] : [])]) {
       const metrics = (state.usage[account.id]?.metrics || []).filter(metric => typeof metric.usedPercent === 'number' && Number.isFinite(metric.usedPercent));
       if (!metrics.length) continue; const binding = metrics.reduce((best, metric) => metric.usedPercent > best.usedPercent ? metric : best); const used = percent(binding.usedPercent); const k = shades.get(account.provider) || 0; shades.set(account.provider, k + 1);
-      entries.push({ account, binding, used, color: k ? `color-mix(in srgb, ${providerColor(account.provider)} ${Math.max(44, 100 - k * 28)}%, white)` : providerColor(account.provider) });
+      entries.push({ account, binding, used, plan: state.usage[account.id]?.plan, color: k ? `color-mix(in srgb, ${providerColor(account.provider)} ${Math.max(44, 100 - k * 28)}%, white)` : providerColor(account.provider) });
     }
+    // Each account counts in proportion to what its plan costs; unpriced plans count as the average priced one.
+    const prices = entries.map(entry => entry.plan?.monthlyUsd).filter(price => typeof price === 'number' && Number.isFinite(price) && price >= 0);
+    const fallback = prices.length ? prices.reduce((sum, price) => sum + price, 0) / prices.length : 1;
+    for (const entry of entries) { const price = entry.plan?.monthlyUsd; entry.weight = typeof price === 'number' && Number.isFinite(price) && price >= 0 ? price : fallback; }
+    if (!entries.some(entry => entry.weight > 0)) for (const entry of entries) entry.weight = 1;
+    const total = entries.reduce((sum, entry) => sum + entry.weight, 0);
+    for (const entry of entries) { entry.share = entry.weight / total * 100; entry.width = entry.used * entry.weight / total; }
     const eligible = new Set(entries.map(entry => entry.account.id)); const missing = state.accounts.filter(account => account.provider !== 'openai' && account.provider !== 'anthropic' && !eligible.has(account.id)).length;
-    return { entries, missing, combined: entries.length ? Math.round(entries.reduce((sum, entry) => sum + entry.used, 0) / entries.length) : 0 };
+    return { entries, missing, combined: Math.round(entries.reduce((sum, entry) => sum + entry.width, 0)) };
   }
   function renderUsageStack(root, entries) {
     const previous = new Map([...root.querySelectorAll('[data-account-id]')].map(node => [node.dataset.accountId, node.dataset.width])); root.textContent = '';
     for (const entry of entries) {
-      const segment = document.createElement('span'); const width = entry.used / entries.length; const old = previous.get(entry.account.id); segment.className = 'usage-stack-segment'; segment.dataset.accountId = entry.account.id; segment.dataset.width = String(width); segment.style.width = width + '%'; segment.style.background = entry.color; root.appendChild(segment);
+      const segment = document.createElement('span'); const width = entry.width; const old = previous.get(entry.account.id); segment.className = 'usage-stack-segment'; segment.dataset.accountId = entry.account.id; segment.dataset.width = String(width); segment.style.width = width + '%'; segment.style.background = entry.color; root.appendChild(segment);
       if (old !== undefined && Number(old) !== width && !calm()) play(segment, [{ width: old + '%' }, { width: width + '%' }], { duration: 460, easing: railSpring });
     }
   }
@@ -1236,7 +1249,8 @@
     const big = document.createElement('div'); big.className = 'usage-big'; const number = document.createElement('strong'); number.textContent = summary.combined + '%'; const caption = document.createElement('span'); caption.textContent = 'combined usage'; big.append(number, caption);
     const legend = document.createElement('div'); legend.className = 'usage-legend';
     for (const entry of summary.entries) {
-      const { account, binding, used, color } = entry; const row = button('', 'View ' + account.label + ' account', () => { selectedAccountProvider = account.provider; saveLocal(); closeMenus(); showPage('accounts'); }, 'usage-legend-row');
+      const { account, binding, used, color, plan, share } = entry; const row = button('', 'View ' + account.label + ' account', () => { selectedAccountProvider = account.provider; saveLocal(); closeMenus(); showPage('accounts'); }, 'usage-legend-row');
+      row.title = (plan ? `${plan.name} · $${plan.monthlyUsd}/mo` : 'Plan price unknown, counted as an average plan') + ` · ${Math.round(share)}% of combined usage`;
       const swatch = document.createElement('span'); swatch.className = 'usage-swatch'; swatch.style.background = color; const name = document.createElement('span'); name.className = 'usage-legend-name'; name.textContent = (providerNames[account.provider] || account.provider) + ' · ' + account.label;
       const value = document.createElement('span'); value.className = 'usage-legend-value'; value.textContent = Math.round(used) + '%';
       const reset = resetIn(binding.resetsAt); const time = document.createElement('span'); time.className = 'usage-legend-reset'; time.textContent = reset;
@@ -1256,7 +1270,7 @@
     const signingIn = reauthing.has(account.id);
     const fixes = {
       retry: ['Try again', 'Read usage again', 'refresh', () => send({ type: 'refreshUsage', accountId: account.id })],
-      signin: [signingIn ? 'Waiting for browser…' : 'Sign in again', 'Sign in to this account again in your browser', 'login', () => { reauthing.add(account.id); renderAccounts(); send({ type: 'reauthAccount', accountId: account.id }); }],
+      signin: [signingIn ? 'Waiting for browser…' : 'Sign in again', 'Sign in to this account again in your browser', 'login', () => { if (account.provider === 'cursor-acp') { send({ type: 'cursorLogin' }); return; } reauthing.add(account.id); renderAccounts(); send({ type: 'reauthAccount', accountId: account.id }); }],
       key: ['Replace API key', 'Enter a new API key for this account', 'key', () => openKeyForm(account)],
       cli: ['Open CLI path setting', 'Set where the ' + (providerNames[account.provider] || 'provider') + ' CLI is installed', 'settings', () => send({ type: 'openCliSetting', provider: account.provider })],
       browser: ['View usage in browser', 'Open ' + (providerNames[account.provider] || 'provider') + ' usage in your browser', 'open_in_new', () => send({ type: 'viewProviderUsage', provider: account.provider })],

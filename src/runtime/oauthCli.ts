@@ -68,6 +68,17 @@ export class OAuthCliRuntime {
       const subagentTools = new Set<string>();
       const subagentText = new Map<string, string>();
       const subagentMessages = new Map<string, Map<string, string>>();
+      // Claude keeps working after its result while background tasks run, and asks permission over stdin.
+      // Ending stdin then fails those requests with "Stream closed", so it stays open until Claude goes quiet.
+      const backgroundTasks = new Set<string>();
+      let turnOver = false;
+      let idleTimer: NodeJS.Timeout | undefined;
+      const endInput = (): void => { clearTimeout(idleTimer); if (!child.stdin.writableEnded) child.stdin.end(); };
+      const settleInput = (): void => {
+        clearTimeout(idleTimer);
+        if (!turnOver || child.stdin.writableEnded) return;
+        idleTimer = setTimeout(endInput, backgroundTasks.size ? 120_000 : 5_000);
+      };
       const noteSubagentText = (agent: string, message: string, text: string, append: boolean): void => {
         const messages = subagentMessages.get(agent) || new Map<string, string>();
         subagentMessages.set(agent, messages);
@@ -81,6 +92,7 @@ export class OAuthCliRuntime {
       const finish = (error?: Error): void => {
         if (done) return;
         done = true;
+        clearTimeout(idleTimer);
         this.child = undefined;
         this.cancelTurn = undefined;
         if (error) reject(error); else resolve(sessionId);
@@ -121,6 +133,19 @@ export class OAuthCliRuntime {
               continue;
             }
             if (typeof event.session_id === 'string') sessionId = event.session_id;
+            if (event.type === 'system' && typeof event.task_id === 'string') {
+              const status = event.subtype === 'task_updated' ? (event.patch as Record<string, unknown> | undefined)?.status : event.status;
+              if (event.subtype === 'task_started') backgroundTasks.add(event.task_id);
+              else if (event.subtype === 'task_notification' || (event.subtype === 'task_updated' && typeof status === 'string')) {
+                if (status !== 'running' && status !== 'pending') backgroundTasks.delete(event.task_id);
+              }
+            }
+            if (event.type === 'assistant' || event.type === 'stream_event' || event.type === 'control_request') turnOver = false;
+            if (event.type === 'result') {
+              turnOver = true;
+              if (!backgroundTasks.size) endInput();
+            }
+            settleInput();
             if (event.type === 'control_request') {
               const request = (event.request || {}) as Record<string, unknown>;
               const requestId = String(event.request_id || '');
@@ -150,7 +175,6 @@ export class OAuthCliRuntime {
               }
               continue;
             }
-            if (event.type === 'result') child.stdin.end();
             if (event.type === 'stream_event') {
               const stream = event.event as Record<string, unknown> | undefined;
               const delta = stream?.delta as Record<string, unknown> | undefined;

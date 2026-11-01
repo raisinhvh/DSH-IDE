@@ -667,6 +667,7 @@ class ExtensionHost implements vscode.Disposable {
     return [
       ...this.oauthAccounts.list().map(account => ({ id: account.id, provider: account.provider, oauth: account })),
       ...this.accounts.list().map(account => ({ id: account.id, provider: account.provider, secret: () => this.accounts.getSecret(account.id) })),
+      ...(this.cursorAccount.connected ? [{ id: 'cursor-login', provider: 'cursor-acp' }] : []),
     ];
   }
 

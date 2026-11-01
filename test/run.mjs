@@ -27,5 +27,7 @@ await import('./image-gen.test.mjs');
 await import('./pi-ai.test.mjs');
 
 await import('./codex-usage.test.mjs');
+await import('./cursor-usage.test.mjs');
+await import('./plan-weights.test.mjs');
 await import('./deepseek-usage.test.mjs');
 await import('./usage-fixes.test.mjs');

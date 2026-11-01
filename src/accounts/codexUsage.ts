@@ -1,5 +1,8 @@
 import { spawn } from 'node:child_process';
-import type { AccountUsage, AccountUsageMetric } from './usageTypes';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import type { AccountPlan, AccountUsage, AccountUsageMetric } from './usageTypes';
+import { chatGptPlan } from './planPrices';
 import { cliCommand, cliEnv } from './oauthCli';
 import type { OAuthCliAccount } from './oauthCli';
 
@@ -144,7 +147,8 @@ export async function readCodexUsage(account: OAuthCliAccount): Promise<AccountU
       }
     }
     if (!metrics.length) return result('unavailable', [], 'Codex did not report any usage windows for this account.', 'browser');
-    return result('ready', metrics);
+    const plan = chatGptPlan(response.planType ?? root?.planType) ?? await storedPlan(account);
+    return { ...result('ready', metrics), ...(plan ? { plan } : {}) };
   } catch (error) {
     if (invalidAuth) return result('error', [], "This Codex account isn't signed in with ChatGPT. Sign in again to see usage.", 'signin');
     const message = error instanceof Error ? error.message : '';
@@ -160,6 +164,17 @@ export async function readCodexUsage(account: OAuthCliAccount): Promise<AccountU
     failPending('Codex app-server connection closed.');
     if (waitForClose) await waitForClose();
   }
+}
+
+/** The ChatGPT plan from the sign-in Codex saved; usage still shows when it cannot be read. */
+async function storedPlan(account: OAuthCliAccount): Promise<AccountPlan | undefined> {
+  try {
+    const auth = JSON.parse(await readFile(join(account.directory, 'auth.json'), 'utf8')) as { tokens?: { id_token?: unknown } };
+    const token = typeof auth.tokens?.id_token === 'string' ? auth.tokens.id_token : '';
+    const claims = JSON.parse(Buffer.from(token.split('.')[1] || '', 'base64url').toString('utf8')) as Json;
+    const openai = claims['https://api.openai.com/auth'] as Json | undefined;
+    return chatGptPlan(openai?.chatgpt_plan_type);
+  } catch { return undefined; }
 }
 
 function formatDuration(minutes: number): string {

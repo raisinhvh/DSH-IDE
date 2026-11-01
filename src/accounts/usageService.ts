@@ -2,6 +2,7 @@ import type { OAuthCliAccount } from './oauthCli';
 import type { AccountUsage } from './usageTypes';
 import { readClaudeUsage, claudeEventMetric } from './claudeUsage';
 import { readCodexUsage } from './codexUsage';
+import { readCursorUsage } from './cursorUsage';
 import { readDeepSeekUsage } from './deepseekUsage';
 import { readOpenRouterUsage } from './openRouterUsage';
 
@@ -49,6 +50,7 @@ export class AccountUsageService {
             const secret = await target.secret?.();
             return !secret ? missing('key') : target.provider === 'deepseek-official' ? await readDeepSeekUsage(secret) : await readOpenRouterUsage(secret);
           }
+          if (target.provider === 'cursor-acp') return await readCursorUsage();
           return { status: 'unavailable', metrics: [], detail: 'This provider does not report usage to DSH yet.', fetchedAt: Date.now() };
         } catch { return { status: 'error', metrics: [], detail: 'Could not read account usage. Try again later.', fix: 'retry', fetchedAt: Date.now() }; }
       };
@@ -71,7 +73,8 @@ export class AccountUsageService {
     const metrics = [...(this.usage[accountId]?.metrics || [])];
     const index = metrics.findIndex(item => item.label === metric.label);
     if (index < 0) metrics.push(metric); else metrics[index] = metric;
-    this.usage[accountId] = { status: 'ready', metrics, fetchedAt: Date.now(), ...(this.inFlight.has(accountId) ? { loading: true } : {}) };
+    const plan = this.usage[accountId]?.plan;
+    this.usage[accountId] = { status: 'ready', metrics, fetchedAt: Date.now(), ...(plan ? { plan } : {}), ...(this.inFlight.has(accountId) ? { loading: true } : {}) };
     this.emit();
   }
 }
