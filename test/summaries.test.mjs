@@ -58,41 +58,41 @@ test('replies split into one summary per requested file', () => {
 
 test('reads are summarized in one batch, saved, and skipped once current', async () => {
   const { dir, cwd, calls, summaries } = await fixture();
-  await writeFile(join(cwd, 'src', 'a.ts'), 'export function a(): number { return 1; }');
-  await writeFile(join(cwd, 'src', 'b.ts'), 'export function b(): void {}');
-  summaries.request(cwd, join(cwd, 'src', 'a.ts'));
-  summaries.request(cwd, 'src/b.ts');
+  await writeFile(join(cwd, 'src', 'a.txt'), 'export function a(): number { return 1; }');
+  await writeFile(join(cwd, 'src', 'b.txt'), 'export function b(): void {}');
+  summaries.request(cwd, join(cwd, 'src', 'a.txt'));
+  summaries.request(cwd, 'src/b.txt');
   summaries.request(cwd, '.dsh/context/x.txt');
   await until(async () => calls.length === 1);
-  assert.deepEqual(calls, [['src/a.ts', 'src/b.ts']]);
-  assert.equal(await summaries.lookup(cwd, ['src/a.ts']), 'File: src/a.ts\nSummary of src/a.ts');
-  summaries.request(cwd, 'src/a.ts');
+  assert.deepEqual(calls, [['src/a.txt', 'src/b.txt']]);
+  assert.equal(await summaries.lookup(cwd, ['src/a.txt']), 'File: src/a.txt\nSummary of src/a.txt');
+  summaries.request(cwd, 'src/a.txt');
   await wait(50);
   assert.equal(calls.length, 1);
-  await until(async () => { try { return JSON.parse(await readFile(join(dir, 'store', 'summaries.json'), 'utf8'))['src/a.ts']?.hash === hashText('export function a(): number { return 1; }'); } catch { return false; } });
+  await until(async () => { try { return JSON.parse(await readFile(join(dir, 'store', 'summaries.json'), 'utf8'))['src/a.txt']?.hash === hashText('export function a(): number { return 1; }'); } catch { return false; } });
   summaries.dispose();
 });
 
 test('lookup writes missing summaries in one batch before replying', async () => {
   const { cwd, calls, summaries } = await fixture();
-  await writeFile(join(cwd, 'src', 'a.ts'), 'one');
-  await writeFile(join(cwd, 'src', 'b.ts'), 'two');
-  assert.equal(await summaries.lookup(cwd, ['src/a.ts', 'src/b.ts']), 'File: src/a.ts\nSummary of src/a.ts\n\nFile: src/b.ts\nSummary of src/b.ts');
-  assert.deepEqual(calls, [['src/a.ts', 'src/b.ts']]);
-  assert.match(await summaries.lookup(cwd, ['src/missing.ts']), /Not found/);
+  await writeFile(join(cwd, 'src', 'a.txt'), 'one');
+  await writeFile(join(cwd, 'src', 'b.txt'), 'two');
+  assert.equal(await summaries.lookup(cwd, ['src/a.txt', 'src/b.txt']), 'File: src/a.txt\nSummary of src/a.txt\n\nFile: src/b.txt\nSummary of src/b.txt');
+  assert.deepEqual(calls, [['src/a.txt', 'src/b.txt']]);
+  assert.match(await summaries.lookup(cwd, ['src/missing.txt']), /Not found/);
   summaries.dispose();
 });
 
 test('changed files are rewritten when looked up', async () => {
   const { cwd, calls, summaries } = await fixture();
-  await writeFile(join(cwd, 'src', 'a.ts'), 'one');
-  await summaries.lookup(cwd, ['src/a.ts']);
-  await writeFile(join(cwd, 'src', 'a.ts'), 'two');
+  await writeFile(join(cwd, 'src', 'a.txt'), 'one');
+  await summaries.lookup(cwd, ['src/a.txt']);
+  await writeFile(join(cwd, 'src', 'a.txt'), 'two');
   await wait(50);
   assert.equal(calls.length, 1);
-  assert.equal(await summaries.lookup(cwd, ['src/a.ts']), 'File: src/a.ts\nSummary of src/a.ts');
+  assert.equal(await summaries.lookup(cwd, ['src/a.txt']), 'File: src/a.txt\nSummary of src/a.txt');
   assert.equal(calls.length, 2);
-  await summaries.lookup(cwd, ['src/a.ts']);
+  await summaries.lookup(cwd, ['src/a.txt']);
   assert.equal(calls.length, 2);
   summaries.dispose();
 });
@@ -101,11 +101,11 @@ test('folders get a one-line overview from stored summaries and never write any'
   const { cwd, calls, summaries } = await fixture(files => files.map(path => `=== SUMMARY ${path} ===\nPurpose: Does ${path}.\nexport a(): void`).join('\n'));
   await mkdir(join(cwd, 'src', 'lib'));
   await mkdir(join(cwd, '.dsh'));
-  await writeFile(join(cwd, 'src', 'a.ts'), 'one');
-  await writeFile(join(cwd, 'src', 'b.ts'), 'two');
-  await summaries.lookup(cwd, ['src/a.ts']);
-  await writeFile(join(cwd, 'src', 'a.ts'), 'changed');
-  const overview = 'Folder: src/\nlib/\na.ts: Does src/a.ts.\nb.ts (no summary yet)';
+  await writeFile(join(cwd, 'src', 'a.txt'), 'one');
+  await writeFile(join(cwd, 'src', 'b.txt'), 'two');
+  await summaries.lookup(cwd, ['src/a.txt']);
+  await writeFile(join(cwd, 'src', 'a.txt'), 'changed');
+  const overview = 'Folder: src/\nlib/\na.txt: Does src/a.txt.\nb.txt (no summary yet)';
   assert.equal(await summaries.lookup(cwd, ['src']), overview);
   assert.equal(await summaries.lookup(cwd, ['src/']), overview);
   assert.equal(await summaries.lookup(cwd, ['.']), 'Folder: ./\nsrc/');
@@ -115,12 +115,37 @@ test('folders get a one-line overview from stored summaries and never write any'
 
 test('failed summaries fall back to reading the file, and nothing runs while disabled', async () => {
   const { cwd, calls, summaries, disable } = await fixture(() => '');
-  await writeFile(join(cwd, 'src', 'a.ts'), 'one');
-  assert.match(await summaries.lookup(cwd, ['src/a.ts']), /No summary could be written/);
+  await writeFile(join(cwd, 'src', 'a.txt'), 'one');
+  assert.match(await summaries.lookup(cwd, ['src/a.txt']), /No summary could be written/);
   disable();
-  await writeFile(join(cwd, 'src', 'c.ts'), 'three');
-  await summaries.request(cwd, 'src/c.ts');
+  await writeFile(join(cwd, 'src', 'c.txt'), 'three');
+  await summaries.request(cwd, 'src/c.txt');
   await wait(50);
   assert.equal(calls.length, 1);
   summaries.dispose();
+});
+
+
+test('static outlines bypass the model', async () => {
+  const { cwd, calls, summaries } = await fixture();
+  await writeFile(join(cwd, 'src', 'static.ts'), '/** A useful module. */\nexport function run(value: string): void {}');
+  assert.match(await summaries.lookup(cwd, ['src/static.ts']), /Purpose: A useful module\.[\s\S]*export function run\(value: string\): void/);
+  assert.deepEqual(calls, []);
+  summaries.dispose();
+});
+
+test('unknown files are skipped when the model is unavailable', async () => {
+  const { cwd, calls, summaries } = await fixture();
+  summaries.dispose();
+  const disabled = new FileSummaries({
+    file: join(cwd, 'disabled.json'),
+    enabled: () => true,
+    canGenerate: () => false,
+    generate: async () => { calls.push('unexpected'); return ''; },
+    log: () => undefined,
+  });
+  await writeFile(join(cwd, 'src', 'unknown.txt'), 'unknown');
+  assert.match(await disabled.lookup(cwd, ['src/unknown.txt']), /No summary could be written/);
+  assert.deepEqual(calls, []);
+  disabled.dispose();
 });

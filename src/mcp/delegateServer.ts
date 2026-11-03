@@ -25,7 +25,7 @@ async function tools(): Promise<Json[]> {
     try {
         const described = await post('/describe', {});
         const list = Array.isArray(described.agents) ? described.agents as { name: string; description?: string; mode: string; model: string }[] : [];
-        agents = list.map(agent => `- ${agent.name} (${agent.mode}, model ${agent.model})${agent.description ? `: ${agent.description}` : ''}`).join('\n');
+        agents = list.sort((a, b) => a.name.localeCompare(b.name)).map(agent => `- ${agent.name} (${agent.mode}, model ${agent.model})${agent.description ? `: ${agent.description}` : ''}`).join('\n');
         custom = Array.isArray(described.tools) ? described.tools as Json[] : [];
     } catch { /* the host may be unavailable; fall back to a generic description */ }
     const customTools = custom.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema }));
@@ -102,6 +102,11 @@ async function tools(): Promise<Json[]> {
         },
         ...customTools,
         {
+            name: 'checkpoint',
+            description: 'Call this when a subtask is done and most of your earlier context is no longer needed. Write the summary for yourself: goal, decisions, files changed, open items. The next message starts a fresh session from it. Older messages stay available through read_chat_history.',
+            inputSchema: { type: 'object', properties: { summary: { type: 'string' }, keep_files: { type: 'array', items: { type: 'string' } }, reason: { type: 'string' } }, required: ['summary', 'reason'] },
+        },
+        {
             name: CHAT_HISTORY_TOOL,
             description: 'Read earlier messages of this chat word for word, most recent last. Use it when a conversation summary you were given leaves out something you need.',
             annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
@@ -136,7 +141,7 @@ async function handle(message: Json): Promise<void> {
             const isError = result.isError === true || !!result.error;
             reply(id, { content, isError });
             // Loaded pack tools join the tool list; clients that follow list changes can call them directly.
-            if (params.name === LOAD_TOOLPACK && !isError) process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' }) + '\n');
+            if (params.name === LOAD_TOOLPACK && !isError && result.skipListChanged !== true) process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' }) + '\n');
         } else fail(id, -32601, `Method not found: ${String(method)}`);
     } catch (error) {
         reply(id, { content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }], isError: true });

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
-import { copyFile, mkdir, writeFile, readFile, rm, stat } from 'node:fs/promises';
+import { appendFile, copyFile, mkdir, writeFile, readFile, rm, stat } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
 import * as vscode from 'vscode';
@@ -29,11 +29,16 @@ import { addDecision, createJob, runJob } from './goal/runner';
 import { parseSlash } from './slash/registry';
 import { terminateProcessTree } from './runtime/cancellation';
 import { answersByQuestion, formatAnswers, parseQuestions } from './sidebar/questions';
+import { withExplorer } from './runtime/explorer';
+import { promptPrefix, skipToolListChanged } from './runtime/promptPrefix';
 import { AfterTurn, CANCEL_SUBAGENT, delegationInstructions, isDelegationTool, isNativeSubagentTool, TOOLPACK_SCOPE, WAIT_SUBAGENTS } from './runtime/delegation';
+import { editorContextDiff } from './runtime/editorContext';
 import { AcpRuntime, RuntimeEvent } from './runtime/acp';
-import { CliTurn, OAuthCliRuntime } from './runtime/oauthCli';
+import { CliTurn, OAuthCliRuntime, TurnUsage } from './runtime/oauthCli';
 import { MirrorChange, mirrorPathExcluded, WorkspaceMirror } from './runtime/shadow';
 import { FileSummaries, readToolPath, SUMMARY_INSTRUCTIONS, SUMMARY_TOOL } from './summaries/store';
+import { shouldKeepAlive } from './runtime/keepAlive';
+import { Checkpoint, checkpointHandoff, parseCheckpoint } from './runtime/checkpoint';
 import { buildHandoff, CHAT_HISTORY_TOOL, chatHistoryReply, ChatMessage, handoffSummaryPrompt, KEEP_WITH_TOOL } from './runtime/handoff';
 import { describePackTools, LOAD_TOOLPACK, loadToolpackTool, packCommands, RUN_TOOLPACK_TOOL, runToolpackTool } from './toolpacks/access';
 import { DshSidebarProvider, SidebarWebviewMessage } from './sidebar/provider';
@@ -54,6 +59,22 @@ interface SessionRecord {
   accountId: string;
   job?: JobState;
   cliSessionId?: string;
+  previousCliSessionId?: string;
+  checkpoint?: Checkpoint;
+  contextTokens?: number;
+  explorerTokens?: number;
+  sessionInstructions?: string;
+  lastInstructions?: string;
+  initTools?: string[];
+  prefixHash?: string;
+  lastTurnAt?: number;
+  lastPingAt?: number;
+  pingsSent?: number;
+  resumeNotice?: 'checkpoint' | 'idle';
+  idleHandoff?: boolean;
+  resumeFullNext?: boolean;
+  shortCache?: boolean;
+  nudgedAt?: number;
   runtimeId?: string;
   pendingMirror?: boolean;
   /** The agent edits the real workspace instead of a private copy (dsh.runtime.mirror off when the chat was created). */
@@ -95,7 +116,7 @@ const FEATURE_SETTINGS: Record<SidebarFeatureKey, string> = {
   reduceMotion: 'features.reduceMotion', updateChecks: 'updates.check', mirror: 'runtime.mirror', reviewAgent: 'features.reviewAgent',
   fileSummaries: 'features.fileSummaries', smartAuto: 'features.smartAuto',
 };
-type ModelSettingKey = 'nameModel' | 'reviewModel' | 'summaryModel' | 'deciderModel';
+type ModelSettingKey = 'nameModel' | 'reviewModel' | 'summaryModel' | 'deciderModel' | 'explorerModel';
 type ResolvedRoute = ResolvedModel | { model: ModelEntry } | { model: ModelEntry; oauthAccount: OAuthCliAccount };
 
 function isOAuthProvider(value: string): value is OAuthCliProvider { return value === 'codex-cli' || value === 'claude-cli'; }
@@ -164,6 +185,8 @@ interface Chat {
   subagentText: Map<string, string>;
   turnReply: string;
   handoffPending: boolean;
+  pendingCheckpoint?: Checkpoint;
+  ping?: Promise<void>;
   /** Instructions and editor context last sent into this agent session, so unchanged text is not repeated. */
   sent?: { session: string; instructions: string; context: string };
   ownerId: string;
@@ -257,15 +280,17 @@ class ExtensionHost implements vscode.Disposable {
     this.status.text = '$(hubot) DSH';
     this.status.tooltip = 'DeepSeek Harness: click to continue chat';
     this.status.show();
+    const keepAliveTimer = setInterval(() => { void this.keepAliveChats(); }, 60_000);
     this.disposables.push(
       this.output, this.status, this.sidebar, this.sync,
+      { dispose: () => clearInterval(keepAliveTimer) },
       { dispose: () => { for (const runtime of this.runtimes.values()) runtime.dispose(); this.runtimes.clear(); this.delegateHost.dispose(); void this.toolpacks.dispose(); this.fileSummaries?.dispose(); } },
       this.toolpacks.onChange(() => { this.postToolpacks(); this.sync.schedule(); }),
       vscode.window.registerWebviewViewProvider(DshSidebarProvider.viewType, this.sidebar, { webviewOptions: { retainContextWhenHidden: true } }),
       vscode.workspace.onDidChangeConfiguration(event => {
         if (event.affectsConfiguration('dsh.models')) this.refreshModels();
         if (event.affectsConfiguration('dsh.subagents')) this.refreshSubagents();
-        if (['dsh.features', 'dsh.nameModel', 'dsh.reviewModel', 'dsh.summaryModel', 'dsh.deciderModel', 'dsh.smartAutoRanks', 'dsh.updates.check', 'dsh.accessibility'].some(key => event.affectsConfiguration(key))) this.refreshCustomize();
+        if (['dsh.features', 'dsh.nameModel', 'dsh.reviewModel', 'dsh.summaryModel', 'dsh.deciderModel', 'dsh.explorerModel', 'dsh.smartAutoRanks', 'dsh.updates.check', 'dsh.accessibility'].some(key => event.affectsConfiguration(key))) this.refreshCustomize();
         if (['dsh.models', 'dsh.features.smartAuto', 'dsh.deciderModel', 'dsh.smartAutoRanks'].some(key => event.affectsConfiguration(key))) void this.guarded(() => this.dropSmartAuto());
         if (SYNCED_SETTINGS.some(key => event.affectsConfiguration(`dsh.${key}`))) this.sync.schedule();
       }),
@@ -378,6 +403,7 @@ class ExtensionHost implements vscode.Disposable {
     const chat = this.chats.get(id);
     if (!chat) return;
     this.chats.delete(id);
+    if (chat.ping) { chat.cli.cancel(); await chat.ping; }
     if (this.active?.id === id) this.active = undefined;
     if (chat.runtime) await chat.runtime.closeSession(this.rid(chat.record)).catch(() => undefined);
     chat.review.dispose(); chat.mirror.dispose();
@@ -411,7 +437,7 @@ class ExtensionHost implements vscode.Disposable {
   public dispose(): Thenable<void> {
     if (this.timelineTimer) clearTimeout(this.timelineTimer);
     const saved = this.context.workspaceState.update(TIMELINES_KEY, this.timelines);
-    for (const chat of this.chats.values()) { chat.review.dispose(); chat.mirror.dispose(); }
+    for (const chat of this.chats.values()) { if (chat.ping) chat.cli.cancel(); chat.review.dispose(); chat.mirror.dispose(); }
     for (const disposable of this.disposables) disposable.dispose();
     return saved;
   }
@@ -630,7 +656,7 @@ class ExtensionHost implements vscode.Disposable {
   private refreshSessions(): void {
     this.sidebar.postMessage({
       type: 'sessionState',
-      sessions: this.sessions().map(item => ({ id: item.id, name: item.name, icon: item.icon, updatedAt: item.updatedAt })),
+      sessions: this.sessions().map(item => ({ id: item.id, name: item.name, icon: item.icon, updatedAt: item.updatedAt, contextTokens: item.contextTokens, explorerTokens: item.explorerTokens, resumeNotice: item.resumeNotice })),
       activeSessionId: this.active?.id || this.context.workspaceState.get<string>(ACTIVE_SESSION_KEY),
     });
   }
@@ -980,7 +1006,11 @@ class ExtensionHost implements vscode.Disposable {
     const packs = this.toolpacks.running();
     if (packs.length) {
       const chat = owner ? this.chatForOwner(owner) : undefined;
-      tools.push(loadToolpackTool(packs), runToolpackTool, ...this.toolpacks.packDescriptors(new Set(chat?.record.toolpacks || [])));
+      let descriptors = this.toolpacks.packDescriptors(new Set(chat?.record.toolpacks || []));
+      if (chat && owner === chat.ownerId && skipToolListChanged(chat.record.provider, chat.record.initTools)) {
+        descriptors = descriptors.filter(tool => chat.record.initTools?.some(name => name === tool.name || name.endsWith(`__${tool.name}`)));
+      }
+      tools.push(loadToolpackTool(packs), runToolpackTool, ...descriptors);
     }
     return tools;
   }
@@ -1003,7 +1033,7 @@ class ExtensionHost implements vscode.Disposable {
     return this.enablePacks(chat, packCommands(prompt, this.toolpacks.running().map(pack => pack.id)));
   }
 
-  private loadToolpacks(chat: Chat, args: Record<string, unknown>): DelegateResult {
+  private loadToolpacks(chat: Chat, args: Record<string, unknown>, stable = false): DelegateResult {
     const asked = (Array.isArray(args.packs) ? args.packs : [args.packs ?? args.pack]).filter((item): item is string => typeof item === 'string').map(item => item.trim().toLowerCase());
     const running = new Set(this.toolpacks.running().map(pack => pack.id));
     const found = asked.filter(id => running.has(id));
@@ -1011,7 +1041,8 @@ class ExtensionHost implements vscode.Disposable {
     if (!found.length) return { text: `No such running toolpack: ${missing.join(', ') || '(none given)'}. Available: ${[...running].join(', ') || '(none)'}.`, isError: true };
     this.enablePacks(chat, found);
     const tools = describePackTools(this.toolpacks.packDescriptors(new Set(found)));
-    return { text: `${missing.length ? `Not available: ${missing.join(', ')}.\n\n` : ''}Loaded ${found.join(', ')} for this chat. Tools:\n\n${tools}` };
+    const skipListChanged = stable && skipToolListChanged(chat.record.provider, chat.record.initTools);
+    return { text: `${missing.length ? `Not available: ${missing.join(', ')}.\n\n` : ''}Loaded ${found.join(', ')} for this chat. ${skipListChanged ? `Call these tools through ${RUN_TOOLPACK_TOOL}. ` : ''}Tools:\n\n${tools}`, skipListChanged };
   }
 
   private runPackTool(chat: Chat, args: Record<string, unknown>): Promise<DelegateResult> | DelegateResult {
@@ -1024,14 +1055,14 @@ class ExtensionHost implements vscode.Disposable {
   }
 
   /** Handles the toolpack tools shared by main agents and subagents, or returns undefined for other tools. */
-  private packCall(chat: Chat, tool: string, args: Record<string, unknown>): Promise<DelegateResult> | DelegateResult | undefined {
-    if (tool === LOAD_TOOLPACK) return this.loadToolpacks(chat, args);
+  private packCall(chat: Chat, tool: string, args: Record<string, unknown>, stable = false): Promise<DelegateResult> | DelegateResult | undefined {
+    if (tool === LOAD_TOOLPACK) return this.loadToolpacks(chat, args, stable);
     if (tool === RUN_TOOLPACK_TOOL) return this.runPackTool(chat, args);
     if (this.toolpacks.owns(tool)) return this.toolpacks.call(tool, args);
     return undefined;
   }
 
-  private summariesOn(): boolean { return this.feature('fileSummaries') && !!this.modelSetting('summaryModel').model; }
+  private summariesOn(): boolean { return this.feature('fileSummaries'); }
 
   /** This workspace's file summaries, kept in extension storage. Undefined without a local workspace folder. */
   private get summaries(): FileSummaries | undefined {
@@ -1045,6 +1076,7 @@ class ExtensionHost implements vscode.Disposable {
         return this.runOneShot({ ...choice, model: choice.model }, cwd, prompt, 300_000);
       },
       enabled: () => this.summariesOn(),
+      canGenerate: () => !!this.modelSetting('summaryModel').model,
       log: line => this.output.appendLine(line),
       excluded: path => mirrorPathExcluded(path),
     });
@@ -1100,13 +1132,14 @@ class ExtensionHost implements vscode.Disposable {
     const slot = await this.ensureRuntime(route, cwd, chat.ownerId);
     const previous = { runtime: chat.runtime, key: chat.runtimeKey };
     if (oauth || !slot) {
-      if (!sameBackendSession) { record.cliSessionId = undefined; chat.handoffPending = true; }
+      if (!sameBackendSession) { record.cliSessionId = undefined; record.explorerTokens = 0; chat.handoffPending = true; }
       chat.runtime = undefined; chat.runtimeKey = undefined;
     } else {
       const reuse = previous.runtime === slot.runtime && previous.key === slot.key && record.provider === model.provider && model.provider === 'cursor-acp';
       if (!reuse) {
         if (previous.runtime) await previous.runtime.closeSession(this.rid(record)).catch(() => undefined);
         record.runtimeId = await slot.runtime.newSession(cwd, this.mcpServers(chat.ownerId));
+        record.explorerTokens = 0;
         chat.handoffPending = true;
       }
       chat.runtime = slot.runtime; chat.runtimeKey = slot.key;
@@ -1156,7 +1189,7 @@ class ExtensionHost implements vscode.Disposable {
   private addChat(record: SessionRecord, mirror: WorkspaceMirror, review: ReviewController, ownerId: string, slot?: { runtime: AcpRuntime; key: string }): Chat {
     const chat: Chat = {
       record, mirror, review, cli: new OAuthCliRuntime(), running: false, cancelRequested: false, jobActive: false, jobCancelled: false, jobNotes: [], jobInterrupted: false, queue: [], turnEntryId: '',
-      segment: 0, startedTools: new Set(), subagentIds: new Set(), delegationToolIds: new Set(), subagentText: new Map(), turnReply: '', handoffPending: false,
+      segment: 0, startedTools: new Set(), subagentIds: new Set(), delegationToolIds: new Set(), subagentText: new Map(), turnReply: '', handoffPending: !!record.checkpoint,
       ownerId, runtime: slot?.runtime, runtimeKey: slot?.key, locks: new Map(), children: new Set(), background: new Map(),
     };
     this.chats.set(record.id, chat);
@@ -1323,6 +1356,7 @@ class ExtensionHost implements vscode.Disposable {
       if (chat.record.effort) await chat.runtime.setConfigOption(newId, 'reasoning_effort', chat.record.effort);
     }
     chat.record.cliSessionId = undefined;
+    chat.record.explorerTokens = 0;
     chat.handoffPending = true;
     const retained = timeline.slice(0, index);
     const userIndex = timeline.slice(0, index).filter(entry => entry.kind === 'message' && entry.role === 'user').length;
@@ -1630,6 +1664,7 @@ class ExtensionHost implements vscode.Disposable {
     try { target = await this.loadChat(recordToLoad); }
     catch (error) { if (this.deletedSessions.has(recordToLoad.id)) return; throw error; }
     if (this.deletedSessions.has(recordToLoad.id)) return;
+    if (target.ping) { target.cli.cancel(); await target.ping; }
     if (target.jobActive && !options.job) {
       // A message sent during a job joins the job's decisions log. Sending (not queueing) ends the current step so it reruns with the message.
       if (!displayed) display();
@@ -1707,6 +1742,7 @@ class ExtensionHost implements vscode.Disposable {
     if (firstTurn) record.name = firstMessageTitle(prompt);
     record.updatedAt = Date.now();
     if (firstTurn && prompt.trim()) void this.autoName(record.id, prompt, chat.mirror.cwd);
+    let completed = false;
     try {
       await this.saveSession(record);
       await chat.mirror.beginTurn();
@@ -1721,12 +1757,42 @@ class ExtensionHost implements vscode.Disposable {
         await this.switchModel(chat, { ...configured, provider: record.provider, backend: record.backend, account: record.accountId });
       }
       if (chat.cancelRequested) return;
+      const hint = vscode.workspace.getConfiguration('dsh').get<number>('checkpointHint', 80000);
+      const lastActivity = Math.max(record.lastTurnAt || 0, record.lastPingAt || 0);
+      if (!options.internal && record.resumeNotice) {
+        // The notice and its "Resume full session" button only cover the turn that started the new session.
+        record.resumeNotice = undefined;
+        // A checkpoint taken during that turn already moved the session it ended into previousCliSessionId.
+        if (!record.checkpoint) record.previousCliSessionId = undefined;
+        this.refreshSessions();
+      }
+      if (!options.internal && record.provider === 'claude-cli') {
+        record.pingsSent = 0;
+        if (!record.resumeFullNext && !chat.handoffPending && record.cliSessionId && lastActivity && Date.now() - lastActivity > 60 * 60_000 && (record.contextTokens || 0) >= hint) {
+          record.previousCliSessionId = record.cliSessionId;
+          record.cliSessionId = undefined;
+          record.explorerTokens = 0;
+          record.idleHandoff = true;
+          chat.handoffPending = true;
+          record.resumeNotice = record.checkpoint ? 'checkpoint' : 'idle';
+        }
+        record.resumeFullNext = undefined;
+      }
       const history = this.transcripts.get(record.id) || [];
       this.transcripts.set(record.id, history);
       const bridged = !!this.delegateConfig(chat.ownerId);
-      const handoff = chat.handoffPending ? await this.handoffText(history, bridged, chat.mirror.cwd) : '';
+      const handoff = chat.handoffPending
+        ? record.checkpoint ? checkpointHandoff(history, record.checkpoint, bridged) : record.idleHandoff ? buildHandoff(history, undefined, bridged) : await this.handoffText(history, bridged, chat.mirror.cwd)
+        : '';
       if (chat.cancelRequested) return;
+      if (chat.handoffPending && record.checkpoint && record.provider === 'claude-cli' && record.previousCliSessionId) record.resumeNotice = 'checkpoint';
       chat.handoffPending = false;
+      record.idleHandoff = undefined;
+      this.refreshSessions();
+      if (record.checkpoint) {
+        record.checkpoint = undefined;
+        await this.saveSession(record);
+      }
       history.push({ role: 'user', text: historyPrompt + (fileContext.length ? '\nContext files:\n' + fileContext.join('\n') : ''), ...(options.internal ? { internal: true } : {}) });
       chat.turnReply = '';
       const packsOn = this.turnOnPacks(chat, prompt);
@@ -1738,27 +1804,65 @@ class ExtensionHost implements vscode.Disposable {
       const session = oauth ? record.cliSessionId : this.rid(record);
       const fresh = !session || chat.sent?.session !== session;
       const sendInstructions = !oauth && (fresh || chat.sent?.instructions !== instructions);
-      const sendContext = !!context && (fresh || chat.sent?.context !== context);
+      const contextUpdate = editorContextDiff(fresh ? undefined : chat.sent?.context, context);
       // Background subagents that finished since the last turn ("hold" ones, or "resume" ones overtaken by this message).
       const background = this.takeBackgroundResults(chat);
-      const buildPrompt = (opening: string, withContext: boolean): string => [
+      const tokens = record.contextTokens;
+      const nudge = bridged && !fresh && !options.internal && tokens !== undefined && tokens >= hint && (record.nudgedAt === undefined || tokens >= record.nudgedAt + 20000)
+        ? `Context is about ${Math.round(tokens / 1000)}k tokens. If the last subtask is done, call checkpoint. If you stop here, call checkpoint with a summary.` : '';
+      if (nudge) record.nudgedAt = tokens;
+      const buildPrompt = (opening: string, withContext: boolean, fullContext = false): string => [
+        nudge,
         opening.trim(),
         sendInstructions ? instructions : '',
-        withContext ? context : '',
+        withContext ? (fullContext ? context : contextUpdate) : '',
         packsOn.length ? `The user turned on toolpacks: ${packsOn.join(', ')}. Use their tools directly if they are in your tool list; otherwise call ${LOAD_TOOLPACK} to see them.` : '',
         fileContext.length ? 'Attached context files (read as needed):\n' + fileContext.join('\n') : '',
         background ? `Results from background subagents you started earlier:\n\n${background}` : '',
         `User request:\n${prompt}`,
       ].filter(Boolean).join('\n\n');
-      const fullPrompt = buildPrompt(handoff, sendContext);
+      const prefix = record.provider === 'claude-cli' ? promptPrefix(instructions, !!record.cliSessionId, record.sessionInstructions, record.lastInstructions) : undefined;
+      if (prefix) {
+        if (!record.cliSessionId) {
+          record.sessionInstructions = prefix.system;
+          record.explorerTokens = 0;
+          record.initTools = undefined;
+          record.prefixHash = undefined;
+        }
+        record.lastInstructions = prefix.last;
+      }
+      const fullPrompt = [prefix?.note, buildPrompt(handoff, !!contextUpdate)].filter(Boolean).join('\n\n');
       if (oauth) {
         const account = this.oauthAccounts.get(record.accountId);
         if (!account) throw new Error('The selected OAuth account is missing. Connect it again.');
         await this.shareGlobalInstructions(account);
         if (chat.cancelRequested) return;
-        record.cliSessionId = await this.promptPooled(chat.cli, { account, cwd: chat.mirror.cwd, backend: record.backend, system: instructions,
+        record.cliSessionId = await this.promptPooled(chat.cli, { account, cwd: chat.mirror.cwd, backend: record.backend, system: prefix?.system ?? instructions,
           prompt: fullPrompt, sessionId: record.cliSessionId, effort: record.effort, readOnly: this.jobReadOnly(chat), fullAccess: this.approvalMode === 'full' && !this.jobReadOnly(chat),
           speed: record.smartAuto ? undefined : this.choiceFor(this.availableModel(record.modelName)).speed,
+          onInit: info => {
+            if (record.provider !== 'claude-cli') return;
+            record.initTools = info.tools;
+            const hash = createHash('sha256').update(JSON.stringify([prefix?.system ?? instructions, info.tools])).digest('hex').slice(0, 16);
+            if (record.prefixHash && record.prefixHash !== hash && record.cliSessionId) {
+              this.output.appendLine(`Prompt prefix changed within Claude session ${record.cliSessionId}; the next turn re-reads the conversation uncached.`);
+            }
+            record.prefixHash = hash;
+          },
+          onUsage: usage => {
+            this.logUsage(record.id, 'main', record.modelName, usage);
+            if (record.provider === 'claude-cli') {
+              record.contextTokens = usage.context ?? usage.total.input + usage.total.cacheRead + usage.total.cacheWrite;
+              record.lastTurnAt = Date.now();
+              if (usage.total.cacheWrite1h > 0) record.shortCache = false;
+              else if (usage.total.cacheWrite5m > 0) record.shortCache = true;
+              this.refreshSessions();
+            }
+          },
+          onBackgroundWait: tasks => {
+            if (!tasks.length) this.postRun(record.id, 'thinking', 'Thinking…');
+            else this.postRun(record.id, 'tool', tasks.length === 1 ? `Waiting for background task: ${tasks[0]}` : `Waiting for ${tasks.length} background tasks…`);
+          },
           onText: postText,
           onMessageBreak: breakMessage,
           onTool: postTool,
@@ -1769,11 +1873,11 @@ class ExtensionHost implements vscode.Disposable {
           onQuestions: input => this.askNativeQuestions(chat, input),
         }, () => chat.cancelRequested, async (next, failed) => {
           // The new account has none of this chat's session, so it gets the conversation so far as a handoff.
-          record.accountId = next.id; record.cliSessionId = undefined;
+          record.accountId = next.id; record.cliSessionId = undefined; record.explorerTokens = 0;
           await this.saveSession(record, false);
           breakMessage();
           postTool(`account:${randomUUID()}`, 'Account switch', `${failed.label} hit its usage limit; continuing on ${next.label}.`, 'complete');
-          return { prompt: buildPrompt(await this.handoffText(history.slice(0, -1), bridged, chat.mirror.cwd), !!context) };
+          return { prompt: buildPrompt(await this.handoffText(history.slice(0, -1), bridged, chat.mirror.cwd), !!context, true) };
         });
         await this.saveSession(record);
       } else {
@@ -1783,17 +1887,51 @@ class ExtensionHost implements vscode.Disposable {
       }
       const sentTo = oauth ? record.cliSessionId : session;
       if (sentTo) chat.sent = { session: sentTo, instructions, context };
+      completed = !chat.cancelRequested;
     } catch (error) {
       if (!chat.cancelRequested) throw error;
     } finally {
       this.settleChatApprovals(record.id, true);
       for (const task of [...chat.background.values()]) if (!task.done && task.afterTurn === 'cancel') { chat.background.delete(task.id); task.run?.cancel(); }
       if (chat.turnReply.trim()) this.transcripts.get(record.id)?.push({ role: 'assistant', text: chat.turnReply.trim() });
+      if (completed) {
+        if (record.provider !== 'claude-cli') record.lastTurnAt = Date.now();
+        if (chat.pendingCheckpoint) {
+          if (chat.runtime) {
+            // A failure here must not skip the rest of this block, or the chat would stay "Thinking…" forever.
+            try {
+              record.runtimeId = await chat.runtime.newSession(chat.mirror.cwd, this.mcpServers(chat.ownerId));
+              if (record.provider === 'cursor-acp') {
+                await this.refreshCursorModels(chat.runtime, record.runtimeId);
+                if (record.backend !== 'auto' || chat.runtime.models(record.runtimeId).some(option => option.value === 'auto')) {
+                  await chat.runtime.setModel(record.runtimeId, record.backend);
+                }
+              }
+              if (record.effort) await chat.runtime.setConfigOption(record.runtimeId, 'reasoning_effort', record.effort);
+            } catch (error) {
+              this.output.appendLine(`Starting a session after the checkpoint failed: ${String(error)}`);
+            }
+          }
+          record.previousCliSessionId = record.cliSessionId;
+          record.cliSessionId = undefined;
+          record.explorerTokens = 0;
+          record.checkpoint = chat.pendingCheckpoint;
+          chat.pendingCheckpoint = undefined;
+          chat.handoffPending = true;
+          record.nudgedAt = undefined;
+        }
+        await this.saveSession(record);
+      }
       const reply = chat.turnReply;
       const cancelled = chat.cancelRequested;
       chat.turnReply = '';
       await this.saveTranscripts();
+      // The agent is done; a slow scan of the working copy should not read as the agent still thinking.
+      const scanStarted = Date.now();
+      const scanLabel = setTimeout(() => this.postRun(record.id, 'tool', 'Checking changes…'), 500);
       await chat.mirror.endTurn().catch(error => this.output.appendLine(`Mirror scan failed: ${String(error)}`));
+      clearTimeout(scanLabel);
+      if (Date.now() - scanStarted > 5_000) this.output.appendLine(`End-of-turn change scan took ${((Date.now() - scanStarted) / 1000).toFixed(1)} s.`);
       chat.running = false;
       this.postRun(record.id, 'idle', 'Ready');
       this.updateStatus();
@@ -1802,6 +1940,47 @@ class ExtensionHost implements vscode.Disposable {
       if (next) this.postQueue(chat);
       if (next && this.chats.get(record.id) === chat) void this.guarded(() => this.sendPrompt(next.prompt, undefined, next.images, record.id));
       else if (!next) this.backgroundSettled(chat);
+    }
+  }
+
+  /** Refresh the cache of each loaded, idle Claude chat without adding a visible turn. */
+  private async keepAliveChats(): Promise<void> {
+    for (const chat of this.chats.values()) {
+      const record = chat.record;
+      const config = vscode.workspace.getConfiguration('dsh');
+      // Usage credits are drawn only once a plan window is full; "Extra usage" alone just means credits are enabled.
+      const metrics = this.usage.snapshot()[record.accountId]?.metrics || [];
+      const extraEnabled = metrics.some(metric => metric.label === 'Extra usage');
+      const planFull = metrics.some(metric => metric.label !== 'Extra usage' && (metric.usedPercent ?? 0) >= 100);
+      const credits = extraEnabled && planFull;
+      if (record.provider !== 'claude-cli' || !record.cliSessionId || chat.handoffPending || credits || !shouldKeepAlive({
+        now: Date.now(), lastTurnAt: Math.max(record.lastTurnAt || 0, record.lastPingAt || 0) || undefined,
+        contextTokens: record.contextTokens, hint: config.get<number>('checkpointHint', 80000),
+        pingsSent: record.pingsSent || 0, max: config.get<number>('keepAliveMax', 3),
+        shortCache: record.shortCache, running: chat.running || !!chat.ping, visible: this.active?.id === record.id,
+      })) continue;
+      const account = this.oauthAccounts.get(record.accountId);
+      if (!account) continue;
+      record.pingsSent = (record.pingsSent || 0) + 1;
+      chat.ping = (async () => {
+        try {
+          await chat.cli.prompt({ account, cwd: chat.mirror.cwd, backend: record.backend,
+            system: this.agentInstructions(chat, !!this.delegateConfig(chat.ownerId)), prompt: '(keep-alive: reply with OK only)',
+            sessionId: record.cliSessionId, effort: 'low', speed: record.smartAuto ? undefined : this.choiceFor(this.availableModel(record.modelName)).speed,
+            delegate: this.delegateConfig(chat.ownerId), onText: () => {}, onTool: () => {},
+            readOnly: this.jobReadOnly(chat), fullAccess: this.approvalMode === 'full' && !this.jobReadOnly(chat),
+            onApproval: async () => false, onUsage: usage => this.logUsage(record.id, 'keepalive', record.modelName, usage),
+          });
+          record.lastPingAt = Date.now();
+        } catch (error) {
+          this.output.appendLine(`Keep-alive failed: ${String(error)}`);
+        } finally {
+          if (this.chats.get(record.id) === chat && !this.deletedSessions.has(record.id)) {
+            await this.saveSession(record).catch(error => this.output.appendLine(`Saving keep-alive state failed: ${String(error)}`));
+          }
+        }
+      })();
+      void chat.ping.then(() => { chat.ping = undefined; });
     }
   }
 
@@ -1826,7 +2005,7 @@ class ExtensionHost implements vscode.Disposable {
     const pool = this.accountPool(turn.account);
     let current = { ...turn, account: pool[0] };
     if (current.account.id !== turn.account.id) {
-      await this.shareGlobalInstructions(current.account);
+      if (!current.lean) await this.shareGlobalInstructions(current.account);
       current = { ...current, sessionId: undefined, ...(await retarget?.(current.account, turn.account)) };
     }
     for (let index = 0; ; index++) {
@@ -1841,7 +2020,7 @@ class ExtensionHost implements vscode.Disposable {
         const message = error instanceof Error ? error.message : String(error);
         this.output.appendLine(`${runtimeLabel(current.account.provider)} account "${current.account.label}" hit its usage limit: ${message}`);
         if (!next) throw new Error(pool.length > 1 ? `All ${pool.length} ${runtimeLabel(current.account.provider)} accounts have hit their usage limits. ${message}` : message);
-        await this.shareGlobalInstructions(next);
+        if (!current.lean) await this.shareGlobalInstructions(next);
         if (cancelled()) throw error;
         current = { ...current, account: next, sessionId: undefined, ...(await retarget?.(next, current.account)) };
       }
@@ -1871,7 +2050,7 @@ class ExtensionHost implements vscode.Disposable {
       : 'Work within this working copy. Proposed edits will be reviewed in the IDE before they reach the source workspace.';
     return [
       `DSH IDE. Workspace: ${this.root().name}. ${scope}`,
-      delegationInstructions(bridged),
+      delegationInstructions(bridged, { explorer: this.delegationProfiles().some(profile => profile.name === 'explorer') }),
       bridged ? MEDIA_INSTRUCTIONS : '',
       bridged && this.oauthAccounts.list('codex-cli').length ? IMAGE_INSTRUCTIONS : '',
       bridged && this.summariesOn() ? SUMMARY_INSTRUCTIONS : '',
@@ -1895,7 +2074,11 @@ class ExtensionHost implements vscode.Disposable {
       const path = relative(folder.uri.fsPath, editor.document.uri.fsPath);
       if (!path.startsWith('..')) {
         parts.push(`Active file: ${path}`, `Cursor: line ${editor.selection.active.line + 1}, column ${editor.selection.active.character + 1}`);
-        if (!editor.selection.isEmpty) parts.push(`Selected text:\n${editor.document.getText(editor.selection).slice(0, 20000)}`);
+        if (!editor.selection.isEmpty) {
+          const selection = editor.document.getText(editor.selection);
+          const truncated = selection.length > 4000 ? `\n[selection truncated: ${selection.length} chars]` : '';
+          parts.push(`Selected text:\n${selection.slice(0, 4000)}${truncated}`);
+        }
         const diagnostics = vscode.languages.getDiagnostics(editor.document.uri).slice(0, 10);
         if (diagnostics.length) parts.push(`Diagnostics: ${diagnostics.map(d => `line ${d.range.start.line + 1}: ${d.message}`).join(' | ')}`);
       }
@@ -1916,6 +2099,11 @@ class ExtensionHost implements vscode.Disposable {
     return value.filter((item): item is SubagentProfile => !!item && typeof item === 'object' && typeof item.name === 'string' && !!item.name.trim()
       && typeof item.model === 'string' && item.enabled !== false)
       .map(item => ({ ...item, name: item.name.trim(), mode: item.mode === 'edit' ? 'edit' as const : 'read-only' as const, tools: item.tools !== false }));
+  }
+
+  /** Profiles available to delegation, including the optional built-in explorer. */
+  private delegationProfiles(): SubagentProfile[] {
+    return withExplorer(this.subagentProfiles(), this.modelSetting('explorerModel')).sort((a, b) => a.name.localeCompare(b.name));
   }
 
   private refreshSubagents(): void {
@@ -1945,7 +2133,7 @@ class ExtensionHost implements vscode.Disposable {
   }
 
   private modelSetting(key: ModelSettingKey): SidebarNameModel {
-    const value = vscode.workspace.getConfiguration('dsh').get<unknown>(key);
+    const value = vscode.workspace.getConfiguration?.('dsh').get<unknown>(key);
     if (!value || typeof value !== 'object') return {};
     const { model, effort, speed } = value as Record<string, unknown>;
     const text = (item: unknown): string | undefined => typeof item === 'string' && item.trim() ? item.trim() : undefined;
@@ -1955,7 +2143,7 @@ class ExtensionHost implements vscode.Disposable {
   private refreshCustomize(): void {
     const features = Object.fromEntries((Object.keys(FEATURE_SETTINGS) as SidebarFeatureKey[]).map(key => [key, this.feature(key)])) as SidebarFeatures;
     this.sidebar.postMessage({ type: 'customizeState', features, nameModel: this.modelSetting('nameModel'), reviewModel: this.modelSetting('reviewModel'), summaryModel: this.modelSetting('summaryModel'),
-      deciderModel: this.modelSetting('deciderModel'), smartAutoRanks: this.smartAutoRanks(),
+      deciderModel: this.modelSetting('deciderModel'), explorerModel: this.modelSetting('explorerModel'), smartAutoRanks: this.smartAutoRanks(),
       accessibility: normalizeAccessibility(vscode.workspace.getConfiguration('dsh').get<unknown>('accessibility')) });
   }
 
@@ -2097,6 +2285,15 @@ class ExtensionHost implements vscode.Disposable {
     }
   }
 
+  /** Records usage without delaying or failing the agent turn. */
+  private logUsage(chatId: string, kind: 'main' | 'oneshot' | 'subagent' | 'keepalive' | 'explorer', model: string, usage: TurnUsage): void {
+    const file = join(this.context.globalStorageUri.fsPath, 'usage-log.jsonl');
+    const line = JSON.stringify({ at: new Date().toISOString(), chatId, kind, model, ...usage.total, context: usage.context ?? (usage.total.input + usage.total.cacheRead + usage.total.cacheWrite) }) + '\n';
+    void mkdir(dirname(file), { recursive: true }).then(() => appendFile(file, line)).catch(error => {
+      this.output.appendLine(`Usage logging failed: ${String(error)}`);
+    });
+  }
+
   /** Runs one prompt on a configured model with tools denied, and returns the reply text. `onCancel` receives a function that stops the run. */
   private async runOneShot(choice: { model: string; effort?: string; speed?: string }, cwd: string, prompt: string, timeoutMs = 120_000, onCancel?: (cancel: () => void) => void): Promise<string> {
     const entry = this.availableModel(choice.model);
@@ -2112,6 +2309,13 @@ class ExtensionHost implements vscode.Disposable {
         let timedOut = false;
         limit(() => { timedOut = true; cli.cancel(); });
         await this.promptPooled(cli, { account: route.oauthAccount, cwd, backend, effort: choice.effort, speed: choice.speed, readOnly: true, prompt,
+          lean: route.oauthAccount.provider === 'claude-cli',
+          onUsage: usage => {
+            const input = usage.total.input + usage.total.cacheRead + usage.total.cacheWrite;
+            this.output.appendLine(`One-shot input: ${input} tokens`);
+            const chat = [...this.chats.values()].find(item => item.mirror.cwd === cwd);
+            this.logUsage(chat?.record.id || '', 'oneshot', choice.model, usage);
+          },
           onText: text => { reply += text; }, onTool: () => undefined, onApproval: async () => 'Tools are not available for this request.' },
         () => timedOut, () => { reply = ''; return {}; });
         return reply;
@@ -2143,7 +2347,7 @@ class ExtensionHost implements vscode.Disposable {
   }
 
   private subagentInfos(): DelegateAgentInfo[] {
-    return this.subagentProfiles().map(profile => ({ name: profile.name, description: profile.description, mode: profile.mode, model: profile.model }));
+    return this.delegationProfiles().map(profile => ({ name: profile.name, description: profile.description, mode: profile.mode, model: profile.model }));
   }
 
   /** Subagents get a toolpack-only bridge so they can use external apps without delegating further. */
@@ -2170,7 +2374,7 @@ class ExtensionHost implements vscode.Disposable {
     }
     const chat = [...this.chats.values()].find(item => item.ownerId === owner);
     if (!chat) return { text: 'This chat is no longer active.', isError: true };
-    if (chat.cancelRequested) return { text: 'Cancelled.', isError: true };
+    if (chat.cancelRequested || chat.ping) return { text: 'Tools are unavailable during this turn.', isError: true };
     if (tool === 'list_subagents') {
       const infos = this.subagentInfos();
       return { text: infos.length ? infos.map(info => `- ${info.name} (${info.mode}, model ${info.model})${info.description ? `: ${info.description}` : ''}`).join('\n') : 'No subagents are configured. Add them to the dsh.subagents setting.' };
@@ -2178,6 +2382,14 @@ class ExtensionHost implements vscode.Disposable {
     if (tool === 'list_locked_files') {
       const locks = [...chat.locks];
       return { text: locks.length ? locks.map(([path, lock]) => `${path} (locked by subagent "${lock.label}")`).join('\n') : 'No files are locked.' };
+    }
+    if (tool === 'checkpoint') {
+      try {
+        chat.pendingCheckpoint = parseCheckpoint(args);
+        return { text: 'Checkpoint saved; it takes effect after this turn.' };
+      } catch (error) {
+        return { text: error instanceof Error ? error.message : String(error), isError: true };
+      }
     }
     if (tool === CHAT_HISTORY_TOOL) {
       // The running turn's own message is already in the agent's prompt.
@@ -2191,14 +2403,14 @@ class ExtensionHost implements vscode.Disposable {
     if (tool === SUMMARY_TOOL.name) return this.readSummaries(chat, args);
     if (tool === SEND_MEDIA) return this.sendMedia(chat, args);
     if (tool === GENERATE_IMAGE) return this.generateImage(chat, args);
-    return this.packCall(chat, tool, args) ?? { text: `Unknown tool "${tool}".`, isError: true };
+    return this.packCall(chat, tool, args, true) ?? { text: `Unknown tool "${tool}".`, isError: true };
   }
 
   private async runSubagent(chat: Chat, args: Record<string, unknown>): Promise<DelegateResult> {
     const fail = (text: string): DelegateResult => ({ text, isError: true });
     const name = typeof args.agent === 'string' ? args.agent.trim() : '';
     const task = typeof args.task === 'string' ? args.task.trim() : '';
-    const profile = this.subagentProfiles().find(item => item.name === name);
+    const profile = this.delegationProfiles().find(item => item.name === name);
     if (!profile) return fail(`Unknown subagent "${name}". Available: ${this.subagentInfos().map(info => info.name).join(', ') || '(none)'}.`);
     if (!task) return fail('"task" is required.');
     const files = (Array.isArray(args.files) ? args.files : []).filter((item): item is string => typeof item === 'string');
@@ -2381,7 +2593,9 @@ class ExtensionHost implements vscode.Disposable {
       ? 'You are a READ-ONLY subagent. Do not modify, create or delete any files.'
       : `You may edit ONLY these paths: ${files.join(', ')}. Do not touch anything else; other agents are working in parallel.`;
     const summaries = profile.tools !== false && this.summariesOn() ? `${SUMMARY_INSTRUCTIONS}\n\n` : '';
-    const body = `${summaries}Task:\n${task}\n\nWhen you finish, reply with a concise final report of at most 300 words unless the task asks for more: findings, files changed, and anything the requester must still do.`;
+    const explorer = name === 'explorer' && readOnly;
+    const explorerNote = explorer ? 'Answer in at most about 300 words. Include file paths with line numbers for every claim.\n\n' : '';
+    const body = `${summaries}Task:\n${explorerNote}${task}\n\nWhen you finish, reply with a concise final report of at most 300 words unless the task asks for more: findings, files changed, and anything the requester must still do.`;
     const intro = `You are a subagent working in a shared working copy on behalf of another agent. ${instructions}`;
     // Claude and Codex already get the delegation note as system text.
     const prompt = `${intro}\n\n${delegationInstructions(false)}\n\n${body}`;
@@ -2408,6 +2622,16 @@ class ExtensionHost implements vscode.Disposable {
         await this.shareGlobalInstructions(route.oauthAccount);
         if (cancelled) throw new Error('Cancelled.');
         await this.promptPooled(cli, { account: route.oauthAccount, cwd: chat.mirror.cwd, backend, effort, speed, readOnly, fullAccess: this.approvalMode === 'full',
+          cacheTtl: explorer && route.oauthAccount.provider === 'claude-cli' ? '5m' : undefined,
+          onUsage: usage => {
+            this.logUsage(chat.record.id, explorer ? 'explorer' : 'subagent', entry.name, usage);
+            if (explorer) {
+              const total = usage.total;
+              chat.record.explorerTokens = (chat.record.explorerTokens || 0) + total.input + total.cacheRead + total.cacheWrite + total.output;
+              this.refreshSessions();
+              void this.saveSession(chat.record).catch(error => this.output.appendLine(`Saving explorer usage failed: ${String(error)}`));
+            }
+          },
           delegate: profile.tools === false ? undefined : this.delegateConfig(owner, true), prompt: cliPrompt, onText, onTool, onMessageBreak: () => { gap = true; }, onApproval: (description, info) => this.decideApproval(chat, { owner, label: profile.name, readOnly }, description, info) },
         () => cancelled, (next, failed) => { post({ text: `Account switch: ${failed.label} hit its usage limit; continuing on ${next.label}`, messageId: `account:${next.id}`, role: 'tool' }); gap = true; return {}; });
       } else {
@@ -2852,6 +3076,7 @@ class ExtensionHost implements vscode.Disposable {
         case 'saveNameModel': await this.saveModelSetting('nameModel', message.nameModel); break;
         case 'saveSummaryModel': await this.saveModelSetting('summaryModel', message.summaryModel); break;
         case 'saveDeciderModel': await this.saveModelSetting('deciderModel', message.deciderModel); break;
+        case 'saveExplorerModel': await this.saveModelSetting('explorerModel', message.explorerModel); break;
         case 'saveSmartAutoRanks': await this.saveSmartAutoRanks(message.ranks); break;
         case 'saveAccessibility': await this.saveAccessibility(message.accessibility); break;
         case 'deleteAllSessions': await this.deleteAllSessions(); break;
@@ -2873,6 +3098,20 @@ class ExtensionHost implements vscode.Disposable {
         case 'cancel': this.cancel(); break;
         case 'newSession': await this.newChat(); break;
         case 'selectSession': await this.continueChat(message.sessionId); break;
+        case 'resumeFullSession': {
+          const chat = this.chats.get(message.sessionId);
+          if (!chat || chat.running || !chat.record.previousCliSessionId) break;
+          chat.record.cliSessionId = chat.record.previousCliSessionId;
+          chat.record.previousCliSessionId = undefined;
+          chat.record.checkpoint = undefined;
+          chat.record.resumeNotice = undefined;
+          chat.record.idleHandoff = undefined;
+          chat.record.resumeFullNext = true;
+          chat.handoffPending = false;
+          await this.saveSession(chat.record);
+          this.refreshSessions();
+          break;
+        }
         case 'deleteSession': await this.deleteSession(message.sessionId); break;
         case 'renameSession': {
           // Prefer the loaded chat's record so a later turn save does not restore the old name.

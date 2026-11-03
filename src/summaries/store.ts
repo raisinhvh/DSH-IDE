@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { dirname, isAbsolute, join, relative } from 'node:path';
+import { outline } from './outline';
 
-/** A model-written summary of one file, valid while the file's text still hashes to `hash`. */
+export { outline } from './outline';
+
+/** A summary of one file (a static outline or model-written), valid while the file's text still hashes to `hash`. */
 export interface FileSummary { hash: string; summary: string; updatedAt: number }
 
 export interface SummaryOptions {
@@ -10,8 +13,10 @@ export interface SummaryOptions {
   file: string;
   /** Runs a summary prompt on the summary model in `cwd` and returns the reply. */
   generate(cwd: string, prompt: string): Promise<string>;
-  /** False while the feature is off or no summary model is set. */
+  /** False while the feature is off. */
   enabled(): boolean;
+  /** Whether model-based fallback is available. Defaults to true. */
+  canGenerate?(): boolean;
   log(line: string): void;
   /** Workspace-relative paths that never get summaries. */
   excluded?(path: string): boolean;
@@ -27,7 +32,7 @@ export const SUMMARY_TOOL = {
   },
 };
 
-export const SUMMARY_INSTRUCTIONS = 'DSH file summaries: read_file_summaries on the dsh-delegate MCP server returns short summaries of workspace files (purpose and bare definitions). Summaries are your primary way to learn the codebase. IMPORTANT: always call read_file_summaries before reading any file, and pass several files in one call. A folder path gives only a brief one-line-per-file overview of what is directly in it; ask for the files themselves to get full summaries. Read a whole file only when it is absolutely necessary: when you are about to edit it, or when you need exact code the summary does not give. Do not read files just to explore or to understand what they do; find candidate files with search tools and check their summaries instead. Never read the same file twice unless it has changed since you read it.';
+export const SUMMARY_INSTRUCTIONS = 'DSH file summaries: read_file_summaries on the dsh-delegate MCP server returns short summaries of workspace files (purpose and bare definitions). Summaries are your primary way to learn the codebase. Check read_file_summaries before reading whole files, and pass several files in one call. A folder path gives only a brief one-line-per-file overview of what is directly in it; ask for the files themselves to get full summaries. Read a whole file only when it is absolutely necessary: when you are about to edit it, or when you need exact code the summary does not give. Do not read files just to explore or to understand what they do; find candidate files with search tools and check their summaries instead. Never read the same file twice unless it has changed since you read it.';
 
 const MAX_FILE_CHARS = 150_000;
 const BATCH_CHARS = 120_000;
@@ -85,6 +90,16 @@ export function parseSummaries(reply: string, paths: string[]): Map<string, stri
   // A single-file reply without the header is still that file's summary.
   if (!marks.length && paths.length === 1 && clean(reply)) result.set(paths[0], clean(reply));
   return result;
+}
+
+/** The file's static outline, or undefined when its language has none or the extractor fails. */
+function safeOutline(path: string, text: string, log: (line: string) => void): string | undefined {
+  try {
+    return outline(path, text);
+  } catch (error) {
+    log(`Outlining ${path} failed: ${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  }
 }
 
 const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -243,18 +258,29 @@ export class FileSummaries {
           this.pending.delete(path);
         }
         if (!batch.length) continue;
-        const paths = batch.map(file => file.path);
         try {
-          const summaries = parseSummaries(await this.options.generate(cwd, summaryPrompt(batch)), paths);
+          const fallback: typeof batch = [];
           for (const file of batch) {
-            const summary = summaries.get(file.path);
+            const summary = safeOutline(file.path, file.text, this.options.log);
             if (summary) data[file.path] = { hash: file.hash, summary, updatedAt: Date.now() };
+            else fallback.push(file);
           }
-          const missing = paths.filter(path => !summaries.has(path));
-          if (missing.length) this.options.log(`The summary model returned no summary for: ${missing.join(', ')}`);
-          if (summaries.size) this.save();
-        } catch (error) {
-          this.options.log(`Summarizing ${paths.join(', ')} failed: ${error instanceof Error ? error.message : String(error)}`);
+          if (fallback.length < batch.length) this.save();
+          if (fallback.length && (this.options.canGenerate?.() ?? true)) {
+            const paths = fallback.map(file => file.path);
+            try {
+              const summaries = parseSummaries(await this.options.generate(cwd, summaryPrompt(fallback)), paths);
+              for (const file of fallback) {
+                const summary = summaries.get(file.path);
+                if (summary) data[file.path] = { hash: file.hash, summary, updatedAt: Date.now() };
+              }
+              const missing = paths.filter(path => !summaries.has(path));
+              if (missing.length) this.options.log(`The summary model returned no summary for: ${missing.join(', ')}`);
+              if (summaries.size) this.save();
+            } catch (error) {
+              this.options.log(`Summarizing ${paths.join(', ')} failed: ${error instanceof Error ? error.message : String(error)}`);
+            }
+          }
         } finally {
           for (const file of batch) file.finish();
         }

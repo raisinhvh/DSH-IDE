@@ -31,3 +31,13 @@ await import('./cursor-usage.test.mjs');
 await import('./plan-weights.test.mjs');
 await import('./deepseek-usage.test.mjs');
 await import('./usage-fixes.test.mjs');
+
+await import('./claude-args.test.mjs');
+await import('./outline.test.mjs');
+await import('./editor-context.test.mjs');
+
+await import('./checkpoint.test.mjs');
+await import('./keep-alive.test.mjs');
+
+await import('./explorer.test.mjs');
+await import('./prompt-prefix.test.mjs');

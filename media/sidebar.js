@@ -17,6 +17,7 @@
   state.reviewModel ||= {};
   state.summaryModel ||= {};
   state.deciderModel ||= {};
+  state.explorerModel ||= {};
   state.smartAutoRanks ||= [];
   state.jobs ||= {};
   state.slashCommands ||= [];
@@ -834,6 +835,20 @@
       : 'scale(.92)';
     play(image, [{ transform: current }, { transform: end }], { duration: 200, easing: 'cubic-bezier(.4, 0, .8, .6)', fill: 'forwards' });
     play(root, [{ opacity: 1 }, { opacity: 0 }], { duration: 200, easing: 'ease-in', fill: 'forwards' }, () => root.remove());
+  }
+
+  function renderContext() {
+    const sessionId = state.activeSessionId || '';
+    const session = state.sessions.find(item => item.id === sessionId);
+    const meter = el('context-meter');
+    const tokens = session?.contextTokens;
+    meter.hidden = typeof tokens !== 'number';
+    const formatTokens = value => (value < 1000 ? (value / 1000).toFixed(1) : Math.round(value / 1000)) + 'k';
+    meter.textContent = meter.hidden ? '' : 'Context ' + formatTokens(tokens) + (session.explorerTokens > 0 ? ' \u00b7 explorer ' + formatTokens(session.explorerTokens) : '');
+    const resume = el('resume-notice');
+    resume.hidden = !session?.resumeNotice;
+    el('resume-label').textContent = session?.resumeNotice === 'checkpoint' ? 'Resumed from checkpoint' : 'Started a fresh session after idle';
+    el('resume-full').onclick = () => send({ type: 'resumeFullSession', sessionId });
   }
 
   function renderFeed() {
@@ -1702,7 +1717,7 @@
     { key: 'activityRail', icon: 'view_sidebar', title: 'Activity rail', desc: 'A rail left of the chat: gray while a chat runs, amber when it needs you, blue when it finished while you were elsewhere. When off, the top chat tabs return.' },
     { key: 'autoName', icon: 'title', title: 'Name chats automatically', desc: 'A name model turns your first message into a short title. Renaming a chat yourself keeps your name.' },
     { key: 'reviewAgent', icon: 'rate_review', title: 'Separate review agent', desc: 'A separate read-only agent reviews each /job round. When off, the chat agent reviews its own work in the same chat.' },
-    { key: 'fileSummaries', icon: 'summarize', title: 'File summaries', desc: 'When an agent first reads a file or edits one, a summary model writes a short summary of it: its purpose and bare definitions. Agents check summaries before reading whole files.' },
+    { key: 'fileSummaries', icon: 'summarize', title: 'File summaries', desc: 'Outlines come from code for TS/JS, Python, Go, Rust and Lua. The summary model is only used for other languages.' },
     { key: 'smartAuto', icon: 'auto_awesome', title: 'Smart Auto', desc: 'Adds Smart Auto to the model menu. For each message you send, a decider model picks a model and effort from your ranked list.' },
     { key: 'shareRules', icon: 'share', title: 'Share global rules and skills', desc: 'Before each Claude or Codex turn, copies your all-workspace rules and skills into that account. DSH already reads them.' },
     { key: 'editorContext', icon: 'code', title: 'Send editor context', desc: 'Adds your open files, cursor position, selection and diagnostics to each message.' },
@@ -1733,6 +1748,22 @@
     const help = document.createElement('p'); help.className = 'helper';
     help.textContent = model ? helperWithModel : helperWithoutModel;
     detail.appendChild(help);
+    const oauth = model && (model.provider === 'claude-cli' || model.provider === 'codex-cli');
+    let hint = '';
+    if (oauth && ['nameModel', 'deciderModel', 'summaryModel'].includes(stateKey)) {
+      hint = 'Uses your subscription. A cheap API model is recommended.';
+    } else if (stateKey === 'explorerModel' && model) {
+      const selected = state.models.find(item => item.id === state.selectedModelId);
+      const accountFor = item => item?.account && item.account !== 'default' ? item.account : state.accounts.find(account => account.provider === item?.provider && account.isDefault)?.id;
+      if (selected?.id === model.id) hint = 'No saving: the explorer uses the same model as this chat.';
+      else if (oauth && selected?.provider === model.provider && accountFor(model) && accountFor(model) === accountFor(selected)) hint = "Searches still count against this account's limits.";
+    }
+    if (hint) {
+      const note = document.createElement('p');
+      note.className = 'helper';
+      note.textContent = hint;
+      detail.appendChild(note);
+    }
     return detail;
   }
 
@@ -1781,7 +1812,7 @@
     return detail;
   }
 
-  const customizeStateKey = () => JSON.stringify([state.features, state.nameModel, state.reviewModel, state.summaryModel, state.deciderModel, state.smartAutoRanks, state.models.map(item => [item.id, item.enabled, item.effortOptions, item.speedOptions])]);
+  const customizeStateKey = () => JSON.stringify([state.features, state.nameModel, state.reviewModel, state.summaryModel, state.deciderModel, state.explorerModel, state.smartAutoRanks, state.selectedModelId, state.accounts, state.models.map(item => [item.id, item.enabled, item.provider, item.account, item.effortOptions, item.speedOptions])]);
 
   function renderCustomize() {
     const root = el('feature-list');
@@ -1801,9 +1832,14 @@
         if (feature.key === 'autoName' && enabled) row.appendChild(featureModelFields('nameModel', 'saveNameModel', 'Name model', 'None (use the first message)', 'Pick a fast, cheap model. It only sees your first message.', 'Without a name model, chats are named after the first message.'));
         if (feature.key === 'reviewAgent' && enabled) row.appendChild(featureModelFields('reviewModel', 'saveReviewModel', 'Review model', 'Choose a model', 'It reads the working copy and checks every criterion.', 'Pick a model, or each /job stops when it reaches review.'));
         if (feature.key === 'smartAuto' && enabled) row.append(featureModelFields('deciderModel', 'saveDeciderModel', 'Decider model', 'Choose a model', 'Pick a fast, cheap model. It sees your message and the last few exchanges, then picks a model below.', 'Pick a decider model to use Smart Auto.'), smartAutoRankFields());
-        if (feature.key === 'fileSummaries' && enabled) row.appendChild(featureModelFields('summaryModel', 'saveSummaryModel', 'Summary model', 'Choose a model', 'Pick a fast, cheap model. It runs in the background and only sees the files it summarizes.', 'Pick a model to start writing summaries.'));
+        if (feature.key === 'fileSummaries' && enabled) row.appendChild(featureModelFields('summaryModel', 'saveSummaryModel', 'Summary model', 'Choose a model', 'Pick a fast, cheap model. It runs in the background and only sees the files it summarizes.', 'A model is only needed for other languages.'));
         root.appendChild(row);
       }
+      // The explorer has no on/off switch of its own (it is off until a model is picked), so it follows the toggles.
+      const explorer = document.createElement('div');
+      explorer.className = 'feature-row explorer-row';
+      explorer.appendChild(featureModelFields('explorerModel', 'saveExplorerModel', 'Explorer model', 'Off', 'Searches and reads files for the chat and returns only the answer. Off until you pick a model.', 'Searches and reads files for the chat and returns only the answer. Off until you pick a model.'));
+      root.appendChild(explorer);
     });
   }
 
@@ -2005,7 +2041,7 @@
     for (const name of settingsPages) el(name).classList.toggle('current', page === name);
     el('settings-toggle').setAttribute('aria-pressed', String(settingsPages.includes(page)));
     el('accounts').setAttribute('aria-pressed', String(page === 'accounts'));
-    renderNotice(); renderPicker(); renderApproval(); renderSessions(); renderFeed(); renderUsageButton();
+    renderNotice(); renderPicker(); renderApproval(); renderSessions(); renderContext(); renderFeed(); renderUsageButton();
     if (page === 'accounts') renderAccounts();
     if (page === 'subagents') renderSubagents();
     if (page === 'instructions') renderInstructions();
@@ -2289,7 +2325,7 @@
       case 'instructionsState': state.instructions = message.items || []; break;
       case 'customizeState':
         state.features = message.features || state.features; state.nameModel = message.nameModel || {}; state.reviewModel = message.reviewModel || {}; state.summaryModel = message.summaryModel || {};
-        state.deciderModel = message.deciderModel || {}; state.smartAutoRanks = message.smartAutoRanks || [];
+        state.deciderModel = message.deciderModel || {}; state.explorerModel = message.explorerModel || {}; state.smartAutoRanks = message.smartAutoRanks || [];
         state.accessibility = message.accessibility || state.accessibility;
         applyAccessibility(state.accessibility);
         break;

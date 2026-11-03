@@ -80,7 +80,7 @@ export class DshSidebarProvider implements vscode.WebviewViewProvider {
       case 'subagentProfilesState': this.state.subagentProfiles = message.profiles; break;
       case 'instructionsState': this.state.instructions = message.items; break;
       case 'customizeState': this.state.features = message.features; this.state.nameModel = message.nameModel; this.state.reviewModel = message.reviewModel; this.state.summaryModel = message.summaryModel;
-        this.state.deciderModel = message.deciderModel; this.state.smartAutoRanks = message.smartAutoRanks; this.state.accessibility = message.accessibility; break;
+        this.state.deciderModel = message.deciderModel; this.state.explorerModel = message.explorerModel; this.state.smartAutoRanks = message.smartAutoRanks; this.state.accessibility = message.accessibility; break;
       case 'jobState': if (message.job) this.state.jobs[message.sessionId] = message.job; else delete this.state.jobs[message.sessionId]; break;
       case 'syncState': this.state.sync = message.sync; break;
       case 'approvalState': this.state.approvalMode = message.mode; break;

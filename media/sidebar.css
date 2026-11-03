@@ -102,7 +102,7 @@ body.reduce-motion .rail-tab.running::before, body.reduce-motion .rail-flyout.ru
 .feature-detail { margin: 9px 0 0 26px; padding-top: 8px; border-top: 1px solid var(--quiet-line); }
 .feature-detail label { display: block; margin-top: 7px; font-weight: 600; }
 .feature-detail label:first-child { margin-top: 0; }
-.feature-detail select { display: block; width: 100%; margin-top: 4px; padding: 4px 6px; border: 1px solid var(--vscode-dropdown-border, var(--line)); border-radius: 4px; background: var(--vscode-dropdown-background, var(--input)); font-weight: 400; }
+.feature-detail select { display: block; width: 100%; margin-top: 4px; padding: 4px 6px; border: 1px solid var(--vscode-dropdown-border, var(--line)); border-radius: 4px; background: var(--vscode-dropdown-background, var(--input)); color: var(--vscode-dropdown-foreground, inherit); font-weight: 400; }
 .feature-detail .helper { margin: 7px 0 0; font-size: calc(11px * var(--text-scale, 1)); }
 .smart-ranks-title { font-weight: 600; }
 .smart-rank-item { margin-top: 7px; }
@@ -654,3 +654,9 @@ body.a11y-contrast .account-card, body.a11y-contrast .usage-track, body.a11y-con
 body.a11y-targets .usage-legend-row { min-height: calc(34px * var(--text-scale, 1)); }
 body.a11y-targets .account-tab { min-height: calc(34px * var(--text-scale, 1)); }
 body.a11y-targets .usage-toggle { min-height: calc(34px * var(--text-scale, 1)); }
+
+.context-meter { color: var(--muted); white-space: nowrap; padding: 2px 5px; font-size: calc(11px * var(--text-scale, 1)); }
+.resume-notice { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: auto; margin: 4px 11px; color: var(--muted); }
+.resume-notice[hidden] { display: none; }
+
+.explorer-row .feature-detail { margin: 0; padding: 0; border: 0; }

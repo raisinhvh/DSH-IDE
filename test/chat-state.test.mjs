@@ -563,3 +563,67 @@ test('turns DSH starts on its own never appear as the user speaking', async () =
   host.replayTranscript('two');
   assert.deepEqual(host.sidebar.timeline('two').map(entry => entry.text), ['mine', 'reply']);
 });
+
+
+test('checkpoint takes effect after a successful turn and opens the next prompt from its summary', async () => {
+  const record = { id: 'one', modelName: 'Model', provider: 'claude-cli', backend: 'default', accountId: 'account', cliSessionId: 'old', name: 'Chat' };
+  const { host } = preparePromptHost([record]);
+  const chat = promptChat(record);
+  chat.runtime = undefined;
+  chat.cli = {};
+  const gate = deferred();
+  const prompts = [];
+  host.chats.set(record.id, chat);
+  host.loadChat = async () => chat;
+  host.delegateConfig = () => ({});
+  host.oauthAccounts = { get: () => ({ id: 'account', provider: 'claude-cli' }) };
+  host.shareGlobalInstructions = async () => {};
+  host.runOneShot = () => { throw new Error('must not summarize'); };
+  host.promptPooled = async (_cli, turn) => {
+    prompts.push(turn.prompt);
+    if (prompts.length === 1) {
+      assert.equal((await host.handleDelegateCall('owner', 'checkpoint', { summary: 'Work completed', reason: 'done', keep_files: ['src/a.ts'] })).text, 'Checkpoint saved; it takes effect after this turn.');
+      await gate.promise;
+      return 'old';
+    }
+    return 'new';
+  };
+  host.childRuns = new Set();
+  const first = host.sendPrompt('first');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(record.cliSessionId, 'old');
+  gate.resolve();
+  await first;
+  assert.equal(record.cliSessionId, undefined);
+  assert.equal(record.previousCliSessionId, 'old');
+  await host.sendPrompt('next');
+  assert.match(prompts[1], /Work completed/);
+  assert.match(prompts[1], /Files to re-read if needed: src\/a.ts/);
+  assert.equal(record.checkpoint, undefined);
+});
+
+test('idle Claude sessions reset only above the hint', async () => {
+  for (const [tokens, expected] of [[80000, true], [79999, false]]) {
+    const record = { id: 'one', modelName: 'Model', provider: 'claude-cli', backend: 'default', accountId: 'account', cliSessionId: 'old', name: 'Chat', contextTokens: tokens, lastTurnAt: Date.now() - 61 * 60_000 };
+    const { host } = preparePromptHost([record]);
+    const chat = promptChat(record);
+    chat.runtime = undefined;
+    chat.cli = {};
+    host.chats.set(record.id, chat);
+    host.loadChat = async () => chat;
+    host.oauthAccounts = { get: () => ({ id: 'account', provider: 'claude-cli' }) };
+    host.shareGlobalInstructions = async () => {};
+    let sentSession;
+    let sentPrompt;
+    if (expected) {
+      record.checkpoint = { summary: 'Saved idle summary', keepFiles: ['src/a.ts'] };
+      chat.handoffPending = true;
+      record.previousCliSessionId = record.cliSessionId;
+      record.cliSessionId = undefined;
+    }
+    host.promptPooled = async (_cli, turn) => { sentSession = turn.sessionId; sentPrompt = turn.prompt; return 'new'; };
+    await host.sendPrompt('continue');
+    assert.equal(sentSession === undefined, expected);
+    if (expected) assert.match(sentPrompt, /Saved idle summary/);
+  }
+});
