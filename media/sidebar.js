@@ -840,11 +840,6 @@
   function renderContext() {
     const sessionId = state.activeSessionId || '';
     const session = state.sessions.find(item => item.id === sessionId);
-    const meter = el('context-meter');
-    const tokens = session?.contextTokens;
-    meter.hidden = typeof tokens !== 'number';
-    const formatTokens = value => (value < 1000 ? (value / 1000).toFixed(1) : Math.round(value / 1000)) + 'k';
-    meter.textContent = meter.hidden ? '' : 'Context ' + formatTokens(tokens) + (session.explorerTokens > 0 ? ' \u00b7 explorer ' + formatTokens(session.explorerTokens) : '');
     const resume = el('resume-notice');
     resume.hidden = !session?.resumeNotice;
     el('resume-label').textContent = session?.resumeNotice === 'checkpoint' ? 'Resumed from checkpoint' : 'Started a fresh session after idle';
