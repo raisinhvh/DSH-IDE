@@ -40,9 +40,10 @@ import { FileSummaries, readToolPath, SUMMARY_INSTRUCTIONS, SUMMARY_TOOL } from 
 import { shouldKeepAlive } from './runtime/keepAlive';
 import { Checkpoint, checkpointHandoff, parseCheckpoint } from './runtime/checkpoint';
 import { buildHandoff, CHAT_HISTORY_TOOL, chatHistoryReply, ChatMessage, handoffSummaryPrompt, KEEP_WITH_TOOL, MAX_TURN_TOOLS, toolLine } from './runtime/handoff';
+import { buildPartsHandoff, parsePartsReply, partsDir, partsPrompt, partWindows, TranscriptPart, unsummarizedPart, writeTranscriptParts } from './runtime/transcriptParts';
 import { findGit, GIT_DOWNLOAD_PAGE, installGit } from './runtime/git';
 import { globalMemoryFolder, isMemoryPath, memoryInstructions, memorySyncNeeded, syncGlobalMemory } from './runtime/memory';
-import { BATCH_INSTRUCTIONS, BatchCall, BatchOutcome, callLabel, formatBatchResult, isBatchFileTool, isBatchTool, parseBatchCalls, runBatchFileTool } from './runtime/batch';
+import { BATCH_INSTRUCTIONS, BatchCall, BatchOutcome, callLabel, executeBatch, formatBatchResult, isBatchFileTool, isBatchTool, parseBatchCalls, runBatchFileTool, uniqueBatchCalls } from './runtime/batch';
 import { describePackTools, LOAD_TOOLPACK, loadToolpackTool, packCommands, RUN_TOOLPACK_TOOL, runToolpackTool } from './toolpacks/access';
 import { DshSidebarProvider, SidebarWebviewMessage } from './sidebar/provider';
 import { ApprovalMode, CursorAccountState, SidebarAccessibility, SidebarFeatureKey, SidebarFeatures, SidebarImage, SidebarJob, SidebarNameModel, SidebarQuestion, SidebarSmartAutoRank, SidebarTimelineItem, SidebarSubagent, defaultFeatures, normalizeAccessibility, normalizeCompactTokens } from './sidebar/view';
@@ -67,8 +68,8 @@ interface SessionRecord {
   contextTokens?: number;
   /** Context of a fresh session before any conversation: system prompt, tools and the first message. Auto compaction counts from here. */
   baseTokens?: number;
-  /** The user resumed the full session after a compaction, so this session is not compacted again. */
-  compactPaused?: boolean;
+  /** With auto compaction: earlier messages archived as parts under .dsh/transcripts, in order. */
+  parts?: TranscriptPart[];
   explorerTokens?: number;
   sessionInstructions?: string;
   lastInstructions?: string;
@@ -79,7 +80,6 @@ interface SessionRecord {
   pingsSent?: number;
   resumeNotice?: 'checkpoint' | 'idle' | 'compact';
   idleHandoff?: boolean;
-  resumeFullNext?: boolean;
   shortCache?: boolean;
   nudgedAt?: number;
   runtimeId?: string;
@@ -668,13 +668,15 @@ class ExtensionHost implements vscode.Disposable {
     await this.chatLoads.get(id)?.catch(() => undefined);
     await rm(join(this.context.globalStorageUri.fsPath, 'media', id), { recursive: true, force: true }).catch(() => undefined);
     const folder = vscode.workspace.workspaceFolders?.[0];
+    // Direct chats save transcript parts in the real workspace; a mirror's go with the mirror.
+    if (folder?.uri.scheme === 'file' && record.parts) await rm(join(folder.uri.fsPath, ...partsDir(id).split('/')), { recursive: true, force: true }).catch(() => undefined);
     if (folder?.uri.scheme === 'file') await WorkspaceMirror.remove(folder.uri, this.context.globalStorageUri.fsPath, record.mirrorId).catch(error => this.output.appendLine(`Could not remove chat files: ${String(error)}`));
   }
 
   private refreshSessions(): void {
     this.sidebar.postMessage({
       type: 'sessionState',
-      sessions: this.sessions().map(item => ({ id: item.id, name: item.name, icon: item.icon, updatedAt: item.updatedAt, contextTokens: item.contextTokens, explorerTokens: item.explorerTokens, resumeNotice: item.resumeNotice, resumable: !!item.previousCliSessionId })),
+      sessions: this.sessions().map(item => ({ id: item.id, name: item.name, icon: item.icon, updatedAt: item.updatedAt, contextTokens: item.contextTokens, explorerTokens: item.explorerTokens, resumeNotice: item.resumeNotice })),
       activeSessionId: this.active?.id || this.context.workspaceState.get<string>(ACTIVE_SESSION_KEY),
     });
   }
@@ -1385,6 +1387,9 @@ class ExtensionHost implements vscode.Disposable {
     let users = 0;
     const cut = history.findIndex(item => item.role === 'user' && !item.internal && users++ === userIndex);
     this.transcripts.set(sessionId, cut >= 0 ? history.slice(0, cut) : retained.flatMap(entry => entry.kind === 'message' ? [{ role: entry.role, text: entry.text }] : []));
+    // Parts that reach past the edited message no longer match the transcript.
+    const kept = this.transcripts.get(sessionId)!.length;
+    if (chat.record.parts) chat.record.parts = chat.record.parts.filter(part => part.to <= kept);
     const agents = this.sidebar.subagents(sessionId);
     const retainedAgents = Object.fromEntries(retained.flatMap(entry => entry.kind === 'subagent' && agents[entry.agentId] ? [[entry.agentId, agents[entry.agentId]]] : []));
     this.sidebar.postMessage({ type: 'timelineState', sessionId, timeline: retained, subagents: retainedAgents });
@@ -1787,7 +1792,7 @@ class ExtensionHost implements vscode.Disposable {
       const hint = vscode.workspace.getConfiguration('dsh').get<number>('checkpointHint', 80000);
       const lastActivity = Math.max(record.lastTurnAt || 0, record.lastPingAt || 0);
       if (!options.internal && record.resumeNotice) {
-        // The notice and its "Resume full session" button only cover the turn that started the new session.
+        // The notice only covers the turn that started the new session.
         record.resumeNotice = undefined;
         // A checkpoint taken during that turn already moved the session it ended into previousCliSessionId.
         if (!record.checkpoint) record.previousCliSessionId = undefined;
@@ -1795,7 +1800,7 @@ class ExtensionHost implements vscode.Disposable {
       }
       if (!options.internal && record.provider === 'claude-cli') {
         record.pingsSent = 0;
-        if (!record.resumeFullNext && !chat.handoffPending && record.cliSessionId && lastActivity && Date.now() - lastActivity > 60 * 60_000 && (record.contextTokens || 0) >= hint) {
+        if (!chat.handoffPending && record.cliSessionId && lastActivity && Date.now() - lastActivity > 60 * 60_000 && (record.contextTokens || 0) >= hint) {
           record.previousCliSessionId = record.cliSessionId;
           record.cliSessionId = undefined;
           record.explorerTokens = 0;
@@ -1803,14 +1808,13 @@ class ExtensionHost implements vscode.Disposable {
           chat.handoffPending = true;
           record.resumeNotice = record.checkpoint ? 'checkpoint' : 'idle';
         }
-        record.resumeFullNext = undefined;
       }
       // Auto compaction: past the threshold, this message starts a fresh session from a summary. Nothing is dropped
       // from the transcript, which the agent can still read and search.
       const compactAt = this.autoCompactAt();
       const conversation = (record.contextTokens || 0) - (record.baseTokens || 0);
       const live = isOAuthProvider(record.provider) ? !!record.cliSessionId : !!chat.sent;
-      if (!options.internal && compactAt && !record.compactPaused && !chat.handoffPending && live && conversation >= compactAt) {
+      if (!options.internal && compactAt && !chat.handoffPending && live && conversation >= compactAt) {
         this.output.appendLine(`Auto compaction: "${record.name}" reached about ${Math.round(conversation / 1000)}k tokens of conversation; continuing in a fresh session from a summary.`);
         await this.freshBackendSession(chat, 'auto compaction');
         record.contextTokens = undefined;
@@ -1823,7 +1827,7 @@ class ExtensionHost implements vscode.Disposable {
       const bridged = !!this.delegateConfig(chat.ownerId);
       const handoff = chat.handoffPending
         ? record.checkpoint ? checkpointHandoff(history, record.checkpoint, bridged) : record.idleHandoff ? buildHandoff(history, undefined, bridged)
-          : await this.handoffText(history, bridged, chat.mirror.cwd, record.resumeNotice === 'compact' ? record.modelName : undefined)
+          : await this.handoffText(record, history, bridged, chat.mirror.cwd, record.resumeNotice === 'compact' ? record.modelName : undefined)
         : '';
       if (chat.cancelRequested) return;
       if (chat.handoffPending && record.checkpoint && record.provider === 'claude-cli' && record.previousCliSessionId) record.resumeNotice = 'checkpoint';
@@ -1922,7 +1926,7 @@ class ExtensionHost implements vscode.Disposable {
           await this.saveSession(record, false);
           breakMessage();
           postTool(`account:${randomUUID()}`, 'Account switch', `${failed.label} hit its usage limit; continuing on ${next.label}.`, 'complete');
-          return { prompt: buildPrompt(await this.handoffText(history.slice(0, -1), bridged, chat.mirror.cwd), !!context, true) };
+          return { prompt: buildPrompt(await this.handoffText(record, history.slice(0, -1), bridged, chat.mirror.cwd), !!context, true) };
         });
         await this.saveSession(record);
       } else {
@@ -2062,12 +2066,31 @@ class ExtensionHost implements vscode.Disposable {
    * latest exchange word for word. Without a summary model, or if summarizing fails, more messages are kept instead.
    */
   /** `fallbackModel` writes the summary when no name model is set (auto compaction always wants one). */
-  private async handoffText(history: ChatMessage[], bridged: boolean, cwd: string, fallbackModel?: string): Promise<string> {
+  private async handoffText(record: SessionRecord, history: ChatMessage[], bridged: boolean, cwd: string, fallbackModel?: string): Promise<string> {
     if (!history.length) return '';
     let summary: string | undefined;
     const older = history.slice(0, -KEEP_WITH_TOOL);
     const named = this.modelSetting('nameModel');
     const choice = named.model ? named : fallbackModel ? { model: fallbackModel } : named;
+    if (this.feature('autoCompact') && older.length && choice.model) {
+      try {
+        // Parts already archived stay as they are; only the messages since the last one are split and summarized.
+        const parts = (record.parts || []).filter(part => part.to <= older.length);
+        const covered = parts[parts.length - 1]?.to ?? 0;
+        const added = await Promise.all(partWindows(history, covered, older.length).map(async window => {
+          try { return parsePartsReply(await this.runOneShot({ ...choice, model: choice.model! }, cwd, partsPrompt(window)), window.from, window.to) ?? [unsummarizedPart(window.from, window.to)]; }
+          catch (error) {
+            this.output.appendLine(`Summarizing transcript parts failed: ${error instanceof Error ? error.message : String(error)}`);
+            return [unsummarizedPart(window.from, window.to)];
+          }
+        }));
+        record.parts = [...parts, ...added.flat()];
+        await writeTranscriptParts(cwd, record.id, history, record.parts);
+        return buildPartsHandoff(record.id, history, record.parts);
+      } catch (error) {
+        this.output.appendLine(`Saving transcript parts failed; using one summary instead: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     if (bridged && older.length && choice.model) {
       try { summary = (await this.runOneShot({ ...choice, model: choice.model }, cwd, handoffSummaryPrompt(older))).trim() || undefined; }
       catch (error) { this.output.appendLine(`Summarizing the chat for a new session failed: ${error instanceof Error ? error.message : String(error)}`); }
@@ -2252,13 +2275,13 @@ class ExtensionHost implements vscode.Disposable {
     record.cliSessionId = undefined;
     record.explorerTokens = 0;
     record.nudgedAt = undefined;
-    record.compactPaused = undefined;
   }
 
-  /** Advanced batching: runs the calls in parallel and returns one combined result. The sidebar shows one card with a row per call. */
+  /** Advanced batching: runs the calls in parallel, chained ones in order, and returns one combined result. The sidebar shows one card with a row per call. */
   private async runBatch(chat: Chat, args: Record<string, unknown>): Promise<DelegateResult> {
     let calls: BatchCall[];
-    try { calls = parseBatchCalls(args); } catch (error) { return { text: error instanceof Error ? error.message : String(error), isError: true }; }
+    let skipped: number;
+    try { ({ calls, skipped } = uniqueBatchCalls(parseBatchCalls(args))); } catch (error) { return { text: error instanceof Error ? error.message : String(error), isError: true }; }
     const id = `batch-${randomUUID().slice(0, 8)}`;
     const children = calls.map(call => ({ title: call.tool, detail: callLabel(call).slice(call.tool.length).trim() || undefined, state: 'running' as 'running' | 'complete' | 'error' }));
     const post = (): void => {
@@ -2270,26 +2293,20 @@ class ExtensionHost implements vscode.Disposable {
     };
     for (const call of calls) this.logTool(chat, call.tool, callLabel(call).slice(call.tool.length).trim() || undefined);
     post();
-    const outcomes = await Promise.all(calls.map(async (call, index): Promise<BatchOutcome> => {
-      let outcome: BatchOutcome;
-      try {
-        if (isBatchFileTool(call.tool)) {
-          const path = typeof call.args.path === 'string' ? call.args.path : '';
-          // Paths that need approval elsewhere (.env, .ssh, credentials, outside the copy) are not read silently here.
-          if (this.approvalMode !== 'full' && path && isRiskyAction(path)) outcome = { text: `${path} needs approval; read it with your own tools.`, isError: true };
-          else {
-            if (call.tool === 'read_file') this.noteRead(chat.mirror.cwd, path);
-            outcome = await runBatchFileTool(chat.mirror.cwd, call.tool, call.args);
-          }
-        } else outcome = await this.handleDelegateCall(chat.ownerId, call.tool, call.args);
-      } catch (error) {
-        outcome = { text: error instanceof Error ? error.message : String(error), isError: true };
-      }
+    // Calls arrive here with their placeholders filled in; forEach calls arrive once per item.
+    const runCall = async (call: BatchCall): Promise<BatchOutcome> => {
+      if (!isBatchFileTool(call.tool)) return this.handleDelegateCall(chat.ownerId, call.tool, call.args);
+      const path = typeof call.args.path === 'string' ? call.args.path : '';
+      // Paths that need approval elsewhere (.env, .ssh, credentials, outside the copy) are not read silently here.
+      if (this.approvalMode !== 'full' && path && isRiskyAction(path)) return { text: `${path} needs approval; read it with your own tools.`, isError: true };
+      if (call.tool === 'read_file') this.noteRead(chat.mirror.cwd, path);
+      return runBatchFileTool(chat.mirror.cwd, call.tool, call.args);
+    };
+    const outcomes = await executeBatch(calls, runCall, (index, outcome) => {
       children[index].state = outcome.isError ? 'error' : 'complete';
       post();
-      return outcome;
-    }));
-    const result = formatBatchResult(calls, outcomes);
+    });
+    const result = formatBatchResult(calls, outcomes, skipped);
     return { text: result.text, ...(result.content.length ? { content: [{ type: 'text', text: result.text }, ...result.content] } : {}) };
   }
 
@@ -3364,21 +3381,6 @@ class ExtensionHost implements vscode.Disposable {
         case 'cancel': this.cancel(); break;
         case 'newSession': await this.newChat(); break;
         case 'selectSession': await this.continueChat(message.sessionId); break;
-        case 'resumeFullSession': {
-          const chat = this.chats.get(message.sessionId);
-          if (!chat || chat.running || !chat.record.previousCliSessionId) break;
-          chat.record.cliSessionId = chat.record.previousCliSessionId;
-          chat.record.previousCliSessionId = undefined;
-          if (chat.record.resumeNotice === 'compact') chat.record.compactPaused = true;
-          chat.record.checkpoint = undefined;
-          chat.record.resumeNotice = undefined;
-          chat.record.idleHandoff = undefined;
-          chat.record.resumeFullNext = true;
-          chat.handoffPending = false;
-          await this.saveSession(chat.record);
-          this.refreshSessions();
-          break;
-        }
         case 'deleteSession': await this.deleteSession(message.sessionId); break;
         case 'renameSession': {
           // Prefer the loaded chat's record so a later turn save does not restore the old name.

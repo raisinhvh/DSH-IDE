@@ -1,9 +1,23 @@
 import type { ToolpackContent, ToolpackResult } from './types';
 
+/** Largest `data` (as JSON) a result may carry for batch placeholders; bigger data is dropped. */
+const MAX_DATA_CHARS = 200_000;
+
+/** The result's chaining data when it is JSON and small enough. */
+function chainingData(value: unknown): { data?: unknown } {
+    if (value === undefined) return {};
+    try {
+        const json = JSON.stringify(value);
+        return json !== undefined && json.length <= MAX_DATA_CHARS ? { data: JSON.parse(json) } : {};
+    } catch {
+        return {};
+    }
+}
+
 /** Keep binary tool output separate from the text truncation budget. */
 export function normalizeToolpackResult(value: unknown): ToolpackResult {
     if (value && typeof value === 'object' && 'content' in value) {
-        const raw = value as { content: unknown; isError?: unknown };
+        const raw = value as { content: unknown; isError?: unknown; data?: unknown };
         if (!Array.isArray(raw.content) || raw.content.length > 64) throw new Error('Tool content must be an array of at most 64 blocks.');
         const content: ToolpackContent[] = [];
         let bytes = 0;
@@ -22,7 +36,7 @@ export function normalizeToolpackResult(value: unknown): ToolpackResult {
             if (bytes > 32 * 1024 * 1024) throw new Error('Tool content exceeds 32 MiB.');
         }
         if (raw.isError !== undefined && typeof raw.isError !== 'boolean') throw new Error('isError must be a boolean.');
-        return { text: content.filter((block): block is Extract<ToolpackContent, { type: 'text' }> => block.type === 'text').map(block => block.text).join('\n'), content, ...(raw.isError === true ? { isError: true } : {}) };
+        return { text: content.filter((block): block is Extract<ToolpackContent, { type: 'text' }> => block.type === 'text').map(block => block.text).join('\n'), content, ...(raw.isError === true ? { isError: true } : {}), ...chainingData(raw.data) };
     }
     if (typeof value === 'string') return { text: value };
     if (value === undefined) return { text: '(no output)' };

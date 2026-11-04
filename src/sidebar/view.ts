@@ -103,7 +103,6 @@ export type SidebarWebviewMessage =
   | { type: 'cancel' }
   | { type: 'newSession' }
   | { type: 'selectSession'; sessionId: string }
-  | { type: 'resumeFullSession'; sessionId: string }
   | { type: 'renameSession'; sessionId: string; name: string }
   | { type: 'deleteSession'; sessionId: string }
   | { type: 'selectModel'; modelId: string }
@@ -202,8 +201,6 @@ export interface SidebarSession {
   contextTokens?: number;
   explorerTokens?: number;
   resumeNotice?: 'checkpoint' | 'idle' | 'compact';
-  /** The session before the notice can be resumed in full. */
-  resumable?: boolean;
 }
 
 /** A file an agent sent into the chat; `file` is relative to the sidebar's media base. */
@@ -457,7 +454,7 @@ export function getSidebarHtml(
   <div class="chat-column">
   <div class="chat-tabs"><div id="sessions" class="session-list" aria-label="Open chats"></div><div class="recent-wrap"><button id="recent-toggle" class="recent-toggle" type="button" title="Browse all recent chats" aria-label="Browse all recent chats" aria-expanded="false">Recent <span class="symbol small">expand_more</span></button><div id="recent-menu" class="recent-menu" hidden></div></div></div>
   <main id="feed" class="feed" aria-live="polite"></main>
-  <div id="resume-notice" class="resume-notice tool-batch" hidden><span id="resume-label"></span><button id="resume-full" class="text-button" type="button">Resume full session</button></div>
+  <div id="resume-notice" class="resume-notice tool-batch" hidden><span id="resume-label"></span></div>
   <div id="status" class="run-status"></div>
   <div id="queue" class="queue-list" aria-label="Queued messages" hidden></div>
   <section id="changes" class="changes" aria-label="File changes" hidden><div class="changes-head"><button id="changes-toggle" class="changes-toggle" type="button" aria-expanded="false"><span class="symbol small" id="changes-icon">expand_less</span><span id="changes-label">Changes</span><span id="changes-total" class="change-counts"></span></button><div id="changes-bulk" class="changes-bulk" hidden><button id="reject-all" class="change-action" type="button" title="Reject all pending changes">Reject all</button><button id="apply-all" class="change-action change-apply" type="button" title="Apply all pending changes">Apply all</button></div></div><div id="changes-body" class="changes-body"><div id="changes-list" class="changes-list"></div></div></section>

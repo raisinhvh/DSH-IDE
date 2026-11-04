@@ -630,7 +630,8 @@ test('idle Claude sessions reset only above the hint', async () => {
   }
 });
 
-test('auto compaction starts a fresh Claude session from a summary once the conversation passes the threshold', async () => {
+test('auto compaction starts a fresh Claude session from transcript parts once the conversation passes the threshold', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dsh-parts-'));
   for (const [tokens, expected] of [[85000, true], [84999, false]]) {
     // 15k of the context is the session's own overhead, so 85k is 70k of conversation.
     const record = { id: 'one', modelName: 'Model', provider: 'claude-cli', backend: 'default', accountId: 'account', cliSessionId: 'old', name: 'Chat', contextTokens: tokens, baseTokens: 15000, lastTurnAt: Date.now() - 60_000 };
@@ -638,6 +639,7 @@ test('auto compaction starts a fresh Claude session from a summary once the conv
     const chat = promptChat(record);
     chat.runtime = undefined;
     chat.cli = {};
+    chat.mirror.cwd = cwd;
     host.chats.set(record.id, chat);
     host.loadChat = async () => chat;
     host.oauthAccounts = { get: () => ({ id: 'account', provider: 'claude-cli' }) };
@@ -646,7 +648,10 @@ test('auto compaction starts a fresh Claude session from a summary once the conv
     host.delegateConfig = () => ({ command: 'node', args: [], env: {} });
     host.output = { appendLine() {} };
     const summarized = [];
-    host.runOneShot = async (choice, _cwd, prompt) => { summarized.push([choice.model, prompt]); return 'SUMMARY OF EARLIER WORK'; };
+    host.runOneShot = async (choice, _cwd, prompt) => {
+      summarized.push([choice.model, prompt]);
+      return '```json\n{"parts":[{"start":1,"title":"Parser","summary":"PARSER BUILT"},{"start":2,"title":"Reply","summary":"REPLY GIVEN"}]}\n```';
+    };
     host.transcripts.set(record.id, [
       { role: 'user', text: 'Build the parser' }, { role: 'assistant', text: 'Built it.', tools: ['Edit src/parser.ts'] },
       { role: 'user', text: 'Add tests' }, { role: 'assistant', text: 'Added them.' },
@@ -656,11 +661,18 @@ test('auto compaction starts a fresh Claude session from a summary once the conv
     await host.sendPrompt('continue');
     assert.equal(sent.sessionId === undefined, expected);
     if (expected) {
-      assert.match(sent.prompt, /SUMMARY OF EARLIER WORK/);
-      assert.match(sent.prompt, /read_chat_history/);
-      // No name model is set, so the chat's own model writes the summary, and it sees the tools each turn used.
+      // Every part's summary opens the session; the parts themselves are files the agent can read.
+      assert.match(sent.prompt, /part-01\.md \(messages 1-1\), Parser: PARSER BUILT/);
+      assert.match(sent.prompt, /part-02\.md \(messages 2-2\), Reply: REPLY GIVEN/);
+      assert.match(sent.prompt, /Latest messages, word for word:\nUser: Add tests/);
+      assert.deepEqual(record.parts.map(part => [part.from, part.to]), [[0, 1], [1, 2]]);
+      const part = await readFile(join(cwd, '.dsh', 'transcripts', 'one', 'part-02.md'), 'utf8');
+      assert.match(part, /Assistant: Built it\.\n\[Tools: Edit src\/parser\.ts\]/);
+      assert.equal(await readFile(join(cwd, '.dsh', 'transcripts', '.gitignore'), 'utf8'), '*\n');
+      // No name model is set, so the chat's own model splits and summarizes, and it sees the tools each turn used.
+      assert.equal(summarized.length, 1);
       assert.equal(summarized[0][0], 'Model');
-      assert.match(summarized[0][1], /\[Tools: Edit src\/parser\.ts\]/);
+      assert.match(summarized[0][1], /\[2\] Assistant: Built it\.\n\[Tools: Edit src\/parser\.ts\]/);
       assert.equal(record.resumeNotice, 'compact');
       assert.equal(record.previousCliSessionId, 'old');
       assert.equal(record.contextTokens, 30000);
@@ -673,6 +685,7 @@ test('auto compaction starts a fresh Claude session from a summary once the conv
     // The transcript keeps everything, including this turn.
     assert.equal(host.transcripts.get(record.id).length, 5);
   }
+  await rm(cwd, { recursive: true, force: true });
 });
 
 test('auto compaction stays off unless turned on', async () => {
@@ -688,13 +701,6 @@ test('auto compaction stays off unless turned on', async () => {
   host.feature = () => false;
   let sentSession = 'unset';
   host.promptPooled = async (_cli, turn) => { sentSession = turn.sessionId; return 'old'; };
-  await host.sendPrompt('continue');
-  assert.equal(sentSession, 'old');
-  // A session the user resumed in full after a compaction is not compacted again.
-  host.feature = key => key === 'autoCompact';
-  record.compactPaused = true;
-  record.contextTokens = 400000;
-  sentSession = 'unset';
   await host.sendPrompt('continue');
   assert.equal(sentSession, 'old');
 });

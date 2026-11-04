@@ -17,7 +17,7 @@ export const MAX_TURN_TOOLS = 60;
 export const MAX_TOOL_LINE = 160;
 
 const MAX_SUMMARY_INPUT = 100_000;
-const MAX_MESSAGE_CHARS = 10_000;
+export const MAX_MESSAGE_CHARS = 10_000;
 const MAX_HISTORY_CHARS = 80_000;
 
 /** One tool line for the transcript: the name plus a short detail on one line. */

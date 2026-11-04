@@ -10,14 +10,18 @@ export type ToolpackContent =
     | { type: 'text'; text: string }
     | { type: 'image'; data: string; mimeType: 'image/png' | 'image/jpeg' | 'image/webp' };
 
-export interface ToolpackResult { text: string; content?: ToolpackContent[]; isError?: boolean }
+/**
+ * `data` is optional JSON for chaining: batch placeholders such as "{{1.assetId}}" read it, while the agent
+ * only sees `text`/`content`. A tool returns it as `{ content: [...], data }`.
+ */
+export interface ToolpackResult { text: string; content?: ToolpackContent[]; isError?: boolean; data?: unknown }
 
 export interface ToolpackTool {
     name: string;
     description: string;
     /** JSON Schema object describing the arguments. Defaults to no arguments. */
     inputSchema?: Record<string, unknown>;
-    /** Strings/JSON are supported, or return { content: [text/image blocks], isError? } for MCP images. */
+    /** Strings/JSON are supported, or return { content: [text/image blocks], isError?, data? } for MCP images or chaining data. */
     run(args: Record<string, unknown>, ctx: ToolpackContext): unknown | Promise<unknown>;
 }
 

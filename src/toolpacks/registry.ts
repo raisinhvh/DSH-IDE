@@ -261,7 +261,7 @@ export class ToolpackRegistry {
                     if (!pending) return;
                     clearTimeout(pending.timer);
                     entry.pending.delete(message.id);
-                    pending.resolve({ text: message.text, content: message.content, isError: message.isError });
+                    pending.resolve({ text: message.text, content: message.content, isError: message.isError, ...(message.data !== undefined ? { data: message.data } : {}) });
                 } else if (message.type === 'status') {
                     entry.info.status = message.text;
                     this.emit();

@@ -38,12 +38,17 @@ test('runs a multi-tool pack in a child process and namespaces its tools', async
         { name: 'sum', description: 'Add numbers', run: (args: { a: number; b: number }) => ({ total: args.a + args.b }) },
         { name: 'boom', description: 'Always fails', run: () => { throw new Error('kaput'); } },
         { name: 'big', description: 'Huge output', run: () => 'x'.repeat(200000) },
+        { name: 'made', description: 'Text plus chaining data', run: () => ({ content: [{ type: 'text', text: 'Created asset 42.' }], data: { assetId: '42' } }) },
       ],
     };`);
   const info = await registry.add(file);
   assert.equal(info.id, 'echo');
   assert.equal(info.state, 'running');
-  assert.deepEqual(registry.descriptors().map(item => item.name), ['echo_say', 'echo_sum', 'echo_boom', 'echo_big']);
+  assert.deepEqual(registry.descriptors().map(item => item.name), ['echo_say', 'echo_sum', 'echo_boom', 'echo_big', 'echo_made']);
+  // The agent reads the text; batch placeholders read the data.
+  const made = await registry.call('echo_made', {});
+  assert.equal(made.text, 'Created asset 42.');
+  assert.deepEqual(made.data, { assetId: '42' });
   assert.equal((await registry.call('echo_say', { text: 'hi' })).text, 'said hi');
   assert.deepEqual(JSON.parse((await registry.call('echo_sum', { a: 2, b: 3 })).text), { total: 5 });
   const failure = await registry.call('echo_boom', {});

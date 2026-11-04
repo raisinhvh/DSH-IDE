@@ -843,8 +843,6 @@
     const resume = el('resume-notice');
     resume.hidden = !session?.resumeNotice;
     el('resume-label').textContent = session?.resumeNotice === 'checkpoint' ? 'Resumed from checkpoint' : session?.resumeNotice === 'compact' ? 'Context compacted into a summary' : 'Started a fresh session after idle';
-    el('resume-full').hidden = !session?.resumable;
-    el('resume-full').onclick = () => send({ type: 'resumeFullSession', sessionId });
   }
 
   function renderFeed() {
@@ -1876,9 +1874,9 @@
   }
 
   const experimentalInfo = [
-    { key: 'autoCompact', icon: 'compress', title: 'Auto compaction', desc: 'Once a chat\'s conversation passes the limit below (not counting the system prompt and tools), your next message starts a fresh session from a summary and the latest exchange. The agent can still read and search the whole chat, including which tools each turn used.' },
+    { key: 'autoCompact', icon: 'compress', title: 'Auto compaction', desc: 'Once a chat\'s conversation passes the limit below (not counting the system prompt and tools), your next message starts a fresh session. Earlier messages are split by topic into parts saved in .dsh/transcripts. The agent always sees each part\'s summary and reads a part when it needs the detail.' },
     { key: 'trimTools', icon: 'content_cut', title: 'Trim built-in tools', desc: 'Leaves out Claude Code and Codex tools that cannot work in DSH or that DSH replaces: native subagents and workflows, scheduled wake-ups, worktrees, claude.ai artifacts and cards, and Codex goals. Saves several thousand tokens on every request. Turn off to get them back.' },
-    { key: 'batching', icon: 'stacks', title: 'Advanced batching', desc: 'Gives agents a batch tool: several DSH tool calls (subagents, file summaries, chat history, toolpacks) and batch-only file reads and searches run in parallel and come back as one result. Shown as one card with a row per call.' },
+    { key: 'batching', icon: 'stacks', title: 'Advanced batching', desc: 'Gives agents a batch tool: several DSH tool calls (subagents, file summaries, chat history, toolpacks) and batch-only file reads and searches run in parallel and come back as one result. A call can also use an earlier call\'s result, such as finding something and then changing it. Shown as one card with a row per call.' },
   ];
   let experimentalKey = '';
 
