@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, statSync } from 'node:fs';
-import { appendFile, copyFile, mkdir, writeFile, readFile, rm, stat } from 'node:fs/promises';
+import { appendFile, copyFile, mkdir, readdir, writeFile, readFile, rm, stat } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
 import * as vscode from 'vscode';
@@ -41,7 +41,7 @@ import { shouldKeepAlive } from './runtime/keepAlive';
 import { Checkpoint, checkpointHandoff, parseCheckpoint } from './runtime/checkpoint';
 import { buildHandoff, CHAT_HISTORY_TOOL, chatHistoryReply, ChatMessage, handoffSummaryPrompt, KEEP_WITH_TOOL, MAX_TURN_TOOLS, toolLine } from './runtime/handoff';
 import { findGit, GIT_DOWNLOAD_PAGE, installGit } from './runtime/git';
-import { globalMemoryRoot, isMemoryPath, memoryInstructions, memorySyncNeeded, repoMemoryPath, syncGlobalMemory } from './runtime/memory';
+import { globalMemoryFolder, isMemoryPath, memoryInstructions, memorySyncNeeded, syncGlobalMemory } from './runtime/memory';
 import { BATCH_INSTRUCTIONS, BatchCall, BatchOutcome, callLabel, formatBatchResult, isBatchFileTool, isBatchTool, parseBatchCalls, runBatchFileTool } from './runtime/batch';
 import { describePackTools, LOAD_TOOLPACK, loadToolpackTool, packCommands, RUN_TOOLPACK_TOOL, runToolpackTool } from './toolpacks/access';
 import { DshSidebarProvider, SidebarWebviewMessage } from './sidebar/provider';
@@ -285,12 +285,6 @@ class ExtensionHost implements vscode.Disposable {
     this.sync = new ConfigSync(context, {
       roots: () => ({ ...this.instructionRoots(), toolpacks: join(context.globalStorageUri.fsPath, 'toolpacks'), memory: this.memorySettings().global }),
       git: () => this.gitPath(),
-      adoptMemoryRoot: async () => {
-        const folder = join(homedir(), 'DSH Memory');
-        await vscode.workspace.getConfiguration('dsh').update('memory.globalPath', folder, vscode.ConfigurationTarget.Global);
-        this.refreshMemory();
-        return folder;
-      },
       accounts: () => [...this.oauthAccounts.list(), ...this.accounts.list()].map(({ id, provider, label }) => ({ id, provider, label })),
       toolpacks: this.toolpacks,
       log: line => this.output.appendLine(line),
@@ -2088,7 +2082,7 @@ class ExtensionHost implements vscode.Disposable {
       : 'Edits stay in this working copy until the user reviews them.';
     return [
       `DSH IDE, workspace ${this.root().name}. ${scope}`,
-      memoryInstructions(chat.mirror.cwd, this.memorySettings().repo),
+      memoryInstructions(chat.mirror.cwd, this.memorySettings().enabled),
       delegationInstructions(bridged, { explorer: this.delegationProfiles().some(profile => profile.name === 'explorer') }),
       bridged && this.feature('batching') ? BATCH_INSTRUCTIONS : '',
       bridged && this.summariesOn() ? SUMMARY_INSTRUCTIONS : '',
@@ -2151,10 +2145,10 @@ class ExtensionHost implements vscode.Disposable {
     else await this.context.globalState.update(SYNC_OFFER_KEY, Date.now() + 7 * 24 * 60 * 60_000);
   }
 
-  /** The global memory folder on this PC and the repo vault's path in the workspace. */
-  private memorySettings(): { global?: string; repo?: string } {
-    const config = vscode.workspace.getConfiguration?.('dsh');
-    return { global: globalMemoryRoot(config?.get<unknown>('memory.globalPath')), repo: repoMemoryPath(config ? config.get<unknown>('memory.repoPath', '.dsh/memory') : '.dsh/memory') };
+  /** Whether memory is on for this PC, and then the global memory folder. */
+  private memorySettings(): { enabled: boolean; global?: string } {
+    const enabled = vscode.workspace.getConfiguration?.('dsh')?.get<boolean>('memory.enabled', true) !== false;
+    return { enabled, global: enabled ? globalMemoryFolder(this.instructionRoots().dshHome) : undefined };
   }
 
   /** Brings the global memory folder into the chat's working copy, or (after a turn) saves the agent's notes back to it. */
@@ -2177,38 +2171,39 @@ class ExtensionHost implements vscode.Disposable {
   }
 
   private refreshMemory(): void {
-    const config = vscode.workspace.getConfiguration('dsh');
-    const globalPath = String(config.get<unknown>('memory.globalPath') ?? '');
-    const repoPath = String(config.get<unknown>('memory.repoPath', '.dsh/memory') ?? '');
-    const global = globalMemoryRoot(globalPath), repo = repoMemoryPath(repoPath);
-    const folder = (path: string): boolean => { try { return statSync(path).isDirectory(); } catch { return false; } };
-    let root: string | undefined;
-    try { root = this.root().uri.fsPath; } catch { root = undefined; }
-    this.sidebar.postMessage({ type: 'memoryState', memory: {
-      globalPath, repoPath,
-      globalStatus: !globalPath.trim() ? 'off' : !global ? 'invalid' : folder(global) ? 'found' : 'missing',
-      repoStatus: !repoPath.trim() ? 'off' : !repo ? 'invalid' : root && folder(join(root, repo)) ? 'found' : 'missing',
-    } });
+    const { enabled } = this.memorySettings();
+    const folder = globalMemoryFolder(this.instructionRoots().dshHome);
+    if (enabled) void mkdir(folder, { recursive: true }).catch(() => undefined);
+    void countFiles(folder).then(notes => this.sidebar.postMessage({ type: 'memoryState', memory: { enabled, folder, notes, synced: this.sync.connected } }));
   }
 
-  private async saveMemorySettings(value: { globalPath?: string; repoPath?: string }): Promise<void> {
+  /** Turns memory on, or off after a warning: turning it off deletes the global notes on this PC (GitHub keeps its copy). */
+  private async setMemory(enabled: boolean): Promise<void> {
     const config = vscode.workspace.getConfiguration('dsh');
-    if (typeof value.globalPath === 'string') {
-      const path = value.globalPath.trim();
-      if (path && !globalMemoryRoot(path)) throw new Error('The global memory folder must be a full path, like C:\\Users\\you\\Notes or ~/Notes.');
-      await config.update('memory.globalPath', path, vscode.ConfigurationTarget.Global);
+    const folder = globalMemoryFolder(this.instructionRoots().dshHome);
+    if (enabled) {
+      await mkdir(folder, { recursive: true });
+      await config.update('memory.enabled', true, vscode.ConfigurationTarget.Global);
+      this.refreshMemory();
+      return;
     }
-    if (typeof value.repoPath === 'string') {
-      const path = value.repoPath.trim();
-      if (path && !repoMemoryPath(path)) throw new Error('The repo memory folder must be a path inside the project, like .dsh/memory or docs/notes.');
-      await config.update('memory.repoPath', path, vscode.ConfigurationTarget.Global);
+    const notes = await countFiles(folder);
+    if (notes) {
+      const synced = this.sync.connected;
+      const choice = await vscode.window.showWarningMessage(`Turn off memory and delete ${notes === 1 ? 'the 1 global memory file' : `all ${notes} global memory files`} on this PC?`, {
+        modal: true,
+        detail: synced
+          ? 'Your GitHub sync repository keeps its copy, so turning memory back on brings them back. Project memory in .dsh/memory is project content and is not touched.'
+          : `This cannot be undone: ${folder} is deleted and Sync is not on, so there is no other copy. Project memory in .dsh/memory is project content and is not touched.`,
+      }, 'Turn off and delete');
+      if (choice !== 'Turn off and delete') { this.refreshMemory(); return; }
     }
+    await config.update('memory.enabled', false, vscode.ConfigurationTarget.Global);
+    await rm(folder, { recursive: true, force: true });
+    // Loaded chats drop their copies now; others drop theirs on their next turn.
+    for (const chat of this.chats.values()) if (!chat.running) await syncGlobalMemory(undefined, chat.mirror.cwd).catch(() => undefined);
+    this.output.appendLine(`Memory turned off; deleted ${folder}.`);
     this.refreshMemory();
-  }
-
-  private async pickMemoryFolder(): Promise<void> {
-    const picked = await vscode.window.showOpenDialog({ canSelectFolders: true, canSelectFiles: false, canSelectMany: false, openLabel: 'Use as global memory' });
-    if (picked?.[0]) await this.saveMemorySettings({ globalPath: picked[0].fsPath });
   }
 
   /** Tokens of conversation (beyond the session's fixed overhead) at which a chat is compacted, or undefined when off. */
@@ -2836,7 +2831,7 @@ class ExtensionHost implements vscode.Disposable {
       ? 'You are a READ-ONLY subagent. Do not modify, create or delete any files.'
       : `You may edit ONLY these paths: ${files.join(', ')}. Do not touch anything else; other agents are working in parallel.`;
     const summaries = profile.tools !== false && this.summariesOn() ? `${SUMMARY_INSTRUCTIONS}\n\n` : '';
-    const memory = memoryInstructions(chat.mirror.cwd, this.memorySettings().repo);
+    const memory = memoryInstructions(chat.mirror.cwd, this.memorySettings().enabled);
     const explorer = name === 'explorer' && readOnly;
     const explorerNote = explorer ? 'Answer in at most about 300 words. Include file paths with line numbers for every claim.\n\n' : '';
     const body = `${memory ? `${memory}\n\n` : ''}${summaries}Task:\n${explorerNote}${task}\n\nWhen you finish, reply with a concise final report of at most 300 words unless the task asks for more: findings, files changed, and anything the requester must still do.`;
@@ -3247,7 +3242,7 @@ class ExtensionHost implements vscode.Disposable {
       const conflict = path ? this.lockConflict(chat, path, actor.owner) : undefined;
       if (conflict) return `"${path}" is locked by subagent "${conflict.label}" until it finishes. Edit other files or wait.`;
       // Memory vaults are part of every agent's permissions, like any file in the project.
-      if (path && isMemoryPath(path, this.memorySettings().repo)) return true;
+      if (path && isMemoryPath(path) && this.memorySettings().enabled) return true;
       // Outside the working copy nothing reviews the edit, so only full access skips asking.
       if (!path && this.rawToolPath(info.input)) {
         return this.approvalMode === 'full' || this.askInChat(chat.record.id, actor.owner === PARENT.owner ? 'Edit outside the project' : `Subagent "${actor.label}" wants to edit outside the project`, description, background);
@@ -3338,8 +3333,13 @@ class ExtensionHost implements vscode.Disposable {
         case 'saveDeciderModel': await this.saveModelSetting('deciderModel', message.deciderModel); break;
         case 'saveExplorerModel': await this.saveModelSetting('explorerModel', message.explorerModel); break;
         case 'saveSmartAutoRanks': await this.saveSmartAutoRanks(message.ranks); break;
-        case 'saveMemory': await this.saveMemorySettings(message.memory); break;
-        case 'pickMemoryFolder': await this.pickMemoryFolder(); break;
+        case 'setMemory': await this.setMemory(message.enabled === true); break;
+        case 'openMemoryFolder': {
+          const folder = globalMemoryFolder(this.instructionRoots().dshHome);
+          await mkdir(folder, { recursive: true });
+          await vscode.env.openExternal(vscode.Uri.file(folder));
+          break;
+        }
         case 'saveAutoCompactTokens':
           await vscode.workspace.getConfiguration('dsh').update('experimental.autoCompactTokens', normalizeCompactTokens(message.tokens), vscode.ConfigurationTarget.Global);
           this.refreshCustomize();
@@ -3482,3 +3482,18 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): Thenable<void> | undefined { const saved = host?.dispose(); host = undefined; return saved; }
+
+/** Files under a folder, for the memory status and the warning before deleting it. */
+async function countFiles(folder: string): Promise<number> {
+  let count = 0;
+  const walk = async (directory: string): Promise<void> => {
+    let entries;
+    try { entries = await readdir(directory, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (entry.isDirectory()) await walk(join(directory, entry.name));
+      else if (entry.isFile()) count += 1;
+    }
+  };
+  await walk(folder);
+  return count;
+}

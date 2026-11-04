@@ -121,8 +121,8 @@ export type SidebarWebviewMessage =
   | { type: 'saveExplorerModel'; explorerModel: SidebarNameModel }
   | { type: 'saveSmartAutoRanks'; ranks: SidebarSmartAutoRank[] }
   | { type: 'saveAutoCompactTokens'; tokens: number }
-  | { type: 'saveMemory'; memory: { globalPath?: string; repoPath?: string } }
-  | { type: 'pickMemoryFolder' }
+  | { type: 'setMemory'; enabled: boolean }
+  | { type: 'openMemoryFolder' }
   | { type: 'saveAccessibility'; accessibility: SidebarAccessibility }
   | { type: 'deleteAllSessions' }
   | { type: 'syncAction'; action: 'connect' | 'upload' | 'download' | 'disconnect' | 'openRepo' | 'keepRemote' | 'keepLocal' }
@@ -248,8 +248,8 @@ export interface CursorAccountState {
   error?: string;
 }
 
-/** Memory folders as set, and whether each was found. */
-export interface SidebarMemory { globalPath: string; repoPath: string; globalStatus: 'off' | 'invalid' | 'found' | 'missing'; repoStatus: 'off' | 'invalid' | 'found' | 'missing' }
+/** Whether memory is on, where global memory lives on this PC, how many files it holds, and whether Sync backs it up. */
+export interface SidebarMemory { enabled: boolean; folder: string; notes: number; synced: boolean }
 
 export interface SidebarToolEvent {
   id: string;

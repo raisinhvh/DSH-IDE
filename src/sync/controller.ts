@@ -54,8 +54,6 @@ export interface ConfigSyncHost {
   toolpacks: SyncToolpacks;
   /** A working git executable, if one is installed. */
   git(): Promise<string | undefined>;
-  /** Sets this PC's global memory folder to a default one, for config from GitHub that has memory, and returns it. */
-  adoptMemoryRoot(): Promise<string>;
   log(line: string): void;
   post(state: SidebarSync): void;
   /** Called after a download so views that do not watch settings can refresh. */
@@ -140,7 +138,10 @@ export class ConfigSync implements vscode.Disposable {
     return clone;
   }
 
-  /** The memory folder to sync: set and present. A missing folder (an unplugged drive) is not read as "all notes deleted". */
+  /**
+   * The memory folder to sync: memory on and the folder present. With memory off, or a folder deleted outside DSH,
+   * this PC leaves GitHub's notes alone rather than reading that as "all notes deleted".
+   */
   private memoryRoot(): string | undefined {
     const root = this.host.roots().memory;
     try { return root && statSync(root).isDirectory() ? root : undefined; } catch { return undefined; }
@@ -215,12 +216,9 @@ export class ConfigSync implements vscode.Disposable {
         if (stableJson(value) !== stableJson(current)) await config.update(key, value, vscode.ConfigurationTarget.Global);
       }
       const roots = this.host.roots();
-      let memory = this.memoryRoot();
-      if (!memory && hasMemory(bundle)) {
-        // A PC with no memory folder (or a missing one) gets GitHub's memory in a folder of its own.
-        memory = roots.memory && !existsSync(roots.memory) ? roots.memory : await this.host.adoptMemoryRoot();
-        await fs.mkdir(memory, { recursive: true });
-      }
+      // With memory on, GitHub's notes go to this PC's memory folder; with it off, they stay on GitHub only.
+      const memory = roots.memory;
+      if (memory && hasMemory(bundle)) await fs.mkdir(memory, { recursive: true });
       await applyFiles({ ...roots, memory }, memory ? bundle.files : withoutMemory(bundle).files);
       const failures = await this.applyToolpacks(roots.toolpacks, bundle.toolpacks);
       await this.host.applied();

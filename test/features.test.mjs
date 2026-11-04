@@ -171,6 +171,12 @@ test('memory folders are always allowed, and edits outside the project are never
     assert.equal(await host.decideApproval(chat, parent, 'Edit', edit('/copy/.dsh/global-memory/tools/rig.md')), true, mode);
     assert.equal(await host.decideApproval(chat, parent, 'Edit', edit('.dsh/memory/notes.md')), true, mode);
   }
+  // With memory turned off, its folders are ordinary files again and ask like any other edit.
+  host.approvalMode = 'ask';
+  host.memorySettings = () => ({ enabled: false });
+  assert.equal(await host.decideApproval(chat, parent, 'Edit', edit('.dsh/memory/notes.md')), false);
+  assert.deepEqual(asked.splice(0), ['Permission requested']);
+  delete host.memorySettings;
   // Read-only subagents and read-only job phases still may not write memory.
   assert.match(await host.decideApproval(chat, { owner: 'sub', label: 'explorer', readOnly: true }, 'Edit', edit('.dsh/memory/notes.md')), /read-only/);
   chat.record.job = { phase: 'verify' };

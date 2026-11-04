@@ -76,14 +76,12 @@ async function world(t) {
       globalState: { get: (key, fallback) => pc.state.has(key) ? pc.state.get(key) : fallback, update: async (key, value) => { pc.state.set(key, value); } },
     };
     pc.sync = new ConfigSync(context, {
-      roots: () => ({ ...pc.roots, memory: pc.settings['memory.globalPath'] }),
+      roots: () => ({ ...pc.roots, memory: pc.settings['memory.enabled'] === false ? undefined : pc.memory }),
       accounts: () => [],
       toolpacks: { list: () => [], add: async () => {}, remove: async () => {}, setEnabled: async () => {} },
       git: async () => 'git',
-      adoptMemoryRoot: async () => { pc.settings['memory.globalPath'] = join(root, 'adopted'); return pc.settings['memory.globalPath']; },
       log: () => {}, post: state => { pc.posted = state; }, applied: async () => {},
     });
-    pc.settings['memory.globalPath'] = pc.memory;
     pcs.set(name, pc);
     pc.on = async action => { globalThis.__dshSyncPc = name; const result = await action(pc.sync); return result; };
     pc.check = () => pc.on(sync => { sync.ready = true; return sync.run('checking', () => sync.withRetry(() => sync.sync()), true); });
@@ -155,7 +153,7 @@ test('two PCs share settings, rules and memory through the sync repository witho
   assert.ok(!existsSync(join(b.memory, copy)));
 });
 
-test('a missing or newly chosen memory folder never deletes notes from GitHub', { skip: !hasGit }, async t => {
+test('a missing memory folder, or memory turned off, never deletes notes from GitHub', { skip: !hasGit }, async t => {
   const { makePc, remoteFiles } = await world(t);
   const a = await makePc('a');
   await note(a, 'one.md', '1\n');
@@ -171,23 +169,25 @@ test('a missing or newly chosen memory folder never deletes notes from GitHub', 
   assert.equal(a.posted.error, undefined);
   assert.deepEqual(notes(), ['memory/one.md', 'memory/two.md']);
 
-  // Memory is pointed at a new, empty folder: GitHub's notes come into it instead of being deleted.
-  const fresh = join(a.memory, '..', 'fresh');
-  await mkdir(fresh, { recursive: true });
-  await writeFile(join(fresh, 'three.md'), '3\n');
-  a.settings['memory.globalPath'] = fresh;
-  a.memory = fresh;
+  // Memory turned off on this PC (its notes deleted locally): GitHub keeps them, and turning it back on brings them back.
+  a.settings['memory.enabled'] = false;
+  await mkdir(a.memory, { recursive: true });
+  a.settings.models = ['changed again'];
+  await a.check();
+  assert.deepEqual(notes(), ['memory/one.md', 'memory/two.md']);
+  await writeFile(join(a.memory, 'three.md'), '3\n');
+  a.settings['memory.enabled'] = true;
   await a.check();
   assert.deepEqual(notes(), ['memory/one.md', 'memory/three.md', 'memory/two.md']);
-  assert.deepEqual((await readdir(fresh)).sort(), ['one.md', 'three.md', 'two.md']);
+  assert.deepEqual((await readdir(a.memory)).sort(), ['one.md', 'three.md', 'two.md']);
 
-  // A PC with no memory folder at all gets one of its own when GitHub has memory.
+  // A PC whose memory is off does not receive notes, and does not remove them from GitHub.
   const b = await makePc('b');
-  delete b.settings['memory.globalPath'];
+  b.settings['memory.enabled'] = false;
   await b.on(sync => sync.connect());
   assert.equal(b.posted.error, undefined);
-  assert.ok(b.settings['memory.globalPath'].endsWith('adopted'));
-  assert.deepEqual((await readdir(b.settings['memory.globalPath'])).sort(), ['one.md', 'three.md', 'two.md']);
+  assert.deepEqual(await readdir(b.memory), []);
+  assert.deepEqual(notes(), ['memory/one.md', 'memory/three.md', 'memory/two.md']);
 });
 
 test('cancelling the first-connect question leaves the PC unconnected and changes nothing', { skip: !hasGit }, async t => {

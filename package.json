@@ -165,17 +165,11 @@
           "scope": "machine",
           "description": "Git executable for Settings > Sync. Empty finds Git on PATH or in the usual install folders, or uses the copy DSH installs."
         },
-        "dsh.memory.globalPath": {
-          "type": "string",
-          "default": "",
+        "dsh.memory.enabled": {
+          "type": "boolean",
+          "default": true,
           "scope": "machine",
-          "description": "Folder on this PC with your global memory: notes, conventions and scripts. Each chat's working copy gets it at .dsh/global-memory/, and notes agents add or change there are written back here after every turn. Empty turns global memory off."
-        },
-        "dsh.memory.repoPath": {
-          "type": "string",
-          "default": ".dsh/memory",
-          "scope": "application",
-          "description": "Folder inside each project with that project's memory, relative to the workspace. It is ordinary project content, so agent edits to it are reviewed like any file. Empty turns repo memory off."
+          "description": "Give agents memory: global notes, conventions and scripts in ~/.dsh/memory (seen in every project as .dsh/global-memory/), plus each project's .dsh/memory. Turn it off from Settings > Behavior, which warns before deleting this PC's global memory."
         },
         "dsh.experimental.autoCompact": {
           "type": "boolean",

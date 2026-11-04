@@ -62,6 +62,8 @@ function preparePromptHost(records) {
     pendingQuestions: new Map(),
     replayTranscript: id => { if (!fixture.messages.some(message => message.type === 'timelineState' && message.sessionId === id)) host.sidebar.postMessage({ type: 'timelineState', sessionId: id, timeline: [], subagents: {} }); },
     availableModel: () => undefined, effectiveModel: model => model, choiceFor: () => ({}),
+    // These tests are about turns and queues; memory is off so its sync does not change their timing.
+    memorySettings: () => ({ enabled: false }),
     editorContext: () => '', agentInstructions: () => '', turnOnPacks: () => [], delegateConfig: () => undefined, saveTranscripts: async () => {},
     saveSession: async () => {}, postRun() {}, postQueue(chat) { fixture.messages.push({ type: 'queueState', sessionId: chat.record.id, items: chat.queue.map(item => item.prompt) }); },
     cancel(_all, id) { host.chats.get(id).cancelRequested = true; },

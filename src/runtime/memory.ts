@@ -1,70 +1,61 @@
 import { createHash } from 'node:crypto';
 import { existsSync, promises as fs, statSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, sep } from 'node:path';
 
 /**
  * Memory: the user's knowledge vaults (Markdown notes, conventions, scripts), presented to agents as ordinary
  * folders in the working copy so every runtime can search, read and edit them with its own tools.
  *
- * The global vault lives anywhere on this PC. Each turn it is reconciled with a copy at GLOBAL_MEMORY_DIR in the
- * working copy: changes made on either side since the last sync are carried to the other, so notes an agent writes
- * reach the real folder and every other project. DSH's review skips .dsh/, so these edits are not proposals.
- * The repo vault is ordinary repository content (DEFAULT_REPO_MEMORY unless configured) and is reviewed like code.
+ * Global memory lives in ~/.dsh/memory. Each turn it is reconciled with a copy at GLOBAL_MEMORY_DIR in the working
+ * copy: changes made on either side since the last sync are carried to the other, so notes an agent writes reach
+ * the real folder and every other project. DSH's review skips .dsh/, so these edits are not proposals.
+ * The project's memory (REPO_MEMORY_DIR) is ordinary project content and is reviewed like code.
  */
 export const GLOBAL_MEMORY_DIR = '.dsh/global-memory';
-export const DEFAULT_REPO_MEMORY = '.dsh/memory';
+/** The project's own memory, ordinary project content. */
+export const REPO_MEMORY_DIR = '.dsh/memory';
 const MANIFEST = '.dsh/global-memory.json';
 const SKIP = new Set(['.git', '.obsidian', '.trash', 'node_modules', '.DS_Store', 'Thumbs.db']);
 export const MAX_MEMORY_FILES = 5000;
 export const MAX_MEMORY_BYTES = 50 * 1024 * 1024;
 const INDEX_FILES = ['INDEX.md', 'index.md', 'README.md', 'Home.md', '_index.md'];
 
-/** An absolute folder path from the setting, with a leading ~ expanded; undefined when unset or relative. */
-export function globalMemoryRoot(value: unknown): string | undefined {
-  if (typeof value !== 'string' || !value.trim()) return undefined;
-  const raw = value.trim();
-  const expanded = raw === '~' || raw.startsWith('~/') || raw.startsWith('~\\') ? join(homedir(), raw.slice(1)) : raw;
-  return isAbsolute(expanded) ? resolve(expanded) : undefined;
+/** Where global memory lives on this PC: beside DSH's global rules and skills, shared by every editor that runs DSH. */
+export function globalMemoryFolder(dshHome: string): string {
+  return join(dshHome, 'memory');
 }
 
-/** A repo vault path relative to the workspace, with forward slashes; undefined when it would leave the workspace. */
-export function repoMemoryPath(value: unknown): string | undefined {
-  const raw = typeof value === 'string' ? value.trim() : DEFAULT_REPO_MEMORY;
-  if (!raw) return undefined;
-  const path = raw.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/+$/, '');
-  if (!path || isAbsolute(path) || /^[A-Za-z]:/.test(path) || path.split('/').includes('..')) return undefined;
-  return path;
-}
-
-/** Whether a working-copy-relative path lies in the global copy or the repo vault. */
-export function isMemoryPath(rel: string, repoPath?: string): boolean {
+/** Whether a working-copy-relative path lies in the global copy or the project's memory. */
+export function isMemoryPath(rel: string): boolean {
   const path = rel.replaceAll('\\', '/').replace(/^\.\//, '');
-  return [GLOBAL_MEMORY_DIR, repoPath].some(root => !!root && (path === root || path.startsWith(`${root}/`)));
+  return [GLOBAL_MEMORY_DIR, REPO_MEMORY_DIR].some(root => path === root || path.startsWith(`${root}/`));
 }
 
 const isDir = (path: string): boolean => { try { return statSync(path).isDirectory(); } catch { return false; } };
 
 /**
- * The one instruction line that tells the agent where memory is and what is worth saving; empty when there is none.
- * A repo vault that does not exist yet is offered only alongside a global one, so a project without memory costs nothing.
+ * The memory section of the agent's instructions: where memory is and what is worth saving. Empty when memory is
+ * off, or when there is neither global memory nor project memory, so it costs nothing then.
  */
-export function memoryInstructions(cwd: string, repoPath?: string): string {
-  const where = (path: string): string => {
+export function memoryInstructions(cwd: string, enabled: boolean): string {
+  const start = (path: string): string => {
     const index = INDEX_FILES.find(name => existsSync(join(cwd, path, name)));
-    return `${path}/${index ? ` (start at ${index})` : ''}`;
+    return index ? ` (start at ${index})` : '';
   };
+  if (!enabled) return '';
   const global = isDir(join(cwd, GLOBAL_MEMORY_DIR));
-  const repo = !!repoPath && isDir(join(cwd, repoPath));
+  const repo = isDir(join(cwd, REPO_MEMORY_DIR));
   if (!global && !repo) return '';
   const places = [
-    global ? `global, for all projects, at ${where(GLOBAL_MEMORY_DIR)}` : '',
-    repoPath ? `this repo at ${repo ? where(repoPath) : `${repoPath}/ (create it when needed)`}` : '',
-  ].filter(Boolean).join('; ');
-  const both = global && !!repoPath;
-  return `Memory (the user's notes, conventions and scripts; [[name]] links a note): ${places}. Search it with your usual tools when a task may touch what it covers${both ? '; repo notes override global' : ''}. `
-    + 'Save only what a future task could reuse: tools, conventions, decisions and why. Never one-off details (one model\'s attachment position). '
-    + `${both ? 'Reusable anywhere goes global; project-specific goes in the repo. ' : ''}Update existing notes rather than adding near-duplicates.`;
+    global ? `Global, for every project: ${GLOBAL_MEMORY_DIR}/${start(GLOBAL_MEMORY_DIR)}.` : '',
+    `This project: ${REPO_MEMORY_DIR}/${repo ? start(REPO_MEMORY_DIR) : ' (create it when needed)'}.`,
+  ].filter(Boolean).join(' ');
+  return [
+    `Memory: the user's notes, conventions and reusable code ([[name]] links a note). ${places} Check it with your usual search when a task may touch what it covers${global ? '; project notes override global ones' : ''}.`,
+    'Save only what helps a future task: reusable code, conventions, and decisions with the reason. Skip details that only matter to the current task. '
+      + `${global ? 'Cross-project goes global; project-specific goes in the project. ' : ''}`
+      + 'Update an existing note rather than adding a near-duplicate, and keep notes short.',
+  ].join('\n');
 }
 
 interface Entry { hash: string; gSize?: number; gTime?: number; cSize?: number; cTime?: number }

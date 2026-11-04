@@ -2,9 +2,9 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { conflictName, globalMemoryRoot, isMemoryPath, memoryInstructions, memorySyncNeeded, repoMemoryPath, syncGlobalMemory } from '../dist/runtime/memory.mjs';
+import { conflictName, globalMemoryFolder, isMemoryPath, memoryInstructions, memorySyncNeeded, syncGlobalMemory } from '../dist/runtime/memory.mjs';
 
 const read = path => readFile(path, 'utf8');
 async function setup() {
@@ -21,18 +21,13 @@ async function setup() {
 // Size and modification time decide whether a file changed, so edits in a test must move the time on.
 async function touch(path, text) { await writeFile(path, text); const later = new Date(Date.now() + 5000); await utimes(path, later, later); }
 
-test('memory settings accept full global paths and in-project repo paths', () => {
-  assert.equal(globalMemoryRoot(''), undefined);
-  assert.equal(globalMemoryRoot('notes'), undefined);
-  assert.equal(globalMemoryRoot('~/Notes'), join(homedir(), 'Notes'));
-  assert.equal(repoMemoryPath(undefined), '.dsh/memory');
-  assert.equal(repoMemoryPath('docs\\notes/'), 'docs/notes');
-  assert.equal(repoMemoryPath(''), undefined);
-  for (const bad of ['../notes', '/abs', 'C:/x']) assert.equal(repoMemoryPath(bad), undefined, bad);
+test('global memory has a fixed home beside DSH\'s rules, and both memory folders are recognized', () => {
+  assert.equal(globalMemoryFolder(join('home', '.dsh')), join('home', '.dsh', 'memory'));
   assert.ok(isMemoryPath('.dsh/global-memory/a.md'));
-  assert.ok(isMemoryPath('docs/notes/a.md', 'docs/notes'));
-  assert.ok(!isMemoryPath('docs/notesx/a.md', 'docs/notes'));
-  assert.ok(!isMemoryPath('src/a.ts', '.dsh/memory'));
+  assert.ok(isMemoryPath('./.dsh/memory/notes.md'));
+  assert.ok(isMemoryPath('.dsh\\memory\\notes.md'));
+  assert.ok(!isMemoryPath('.dsh/memoryx/a.md'));
+  assert.ok(!isMemoryPath('src/a.ts'));
   assert.equal(conflictName('tools/rig.md', new Date(2026, 10, 4, 15, 30)), 'tools/rig (conflict 2026-11-04 1530).md');
 });
 
@@ -113,20 +108,25 @@ test('the copy stays out of git and a vault containing the project is refused', 
 test('the memory instruction says where memory is and what is worth saving, and is empty without memory', async () => {
   const { base, vault, cwd } = await setup();
   try {
-    assert.equal(memoryInstructions(cwd, '.dsh/memory'), '');
+    assert.equal(memoryInstructions(cwd, true), '');
     await syncGlobalMemory(vault, cwd);
-    const text = memoryInstructions(cwd, '.dsh/memory');
-    assert.match(text, /global, for all projects, at \.dsh\/global-memory\/ \(start at Home\.md\)/);
-    assert.match(text, /this repo at \.dsh\/memory\/ \(create it when needed\)/);
-    assert.match(text, /Save only what a future task could reuse/);
-    assert.match(text, /Never one-off details/);
-    assert.match(text, /Reusable anywhere goes global; project-specific goes in the repo/);
+    const text = memoryInstructions(cwd, true);
+    assert.match(text, /reusable code/);
+    assert.doesNotMatch(text, /script|attachment|model/i);
+    assert.match(text, /Global, for every project: \.dsh\/global-memory\/ \(start at Home\.md\)\./);
+    assert.match(text, /This project: \.dsh\/memory\/ \(create it when needed\)\./);
+    assert.match(text, /Save only what helps a future task/);
+    assert.match(text, /Skip details that only matter to the current task/);
+    assert.match(text, /Cross-project goes global; project-specific goes in the project/);
+    assert.match(text, /project notes override global ones/);
     assert.ok(text.length < 650, String(text.length));
+    // With memory off, nothing is said, even with a global copy or project memory in the working copy.
     await mkdir(join(cwd, '.dsh', 'memory'), { recursive: true });
-    assert.match(memoryInstructions(cwd, '.dsh/memory'), /this repo at \.dsh\/memory\/\./);
+    assert.equal(memoryInstructions(cwd, false), '');
+    // With no global memory here, only the project's is described.
     await syncGlobalMemory(undefined, cwd);
-    const repoOnly = memoryInstructions(cwd, '.dsh/memory');
-    assert.doesNotMatch(repoOnly, /global|Reusable anywhere/);
-    assert.match(repoOnly, /this repo at \.dsh\/memory\//);
+    const projectOnly = memoryInstructions(cwd, true);
+    assert.match(projectOnly, /This project: \.dsh\/memory\/\./);
+    assert.doesNotMatch(projectOnly, /global|Cross-project/i);
   } finally { await rm(base, { recursive: true, force: true }); }
 });

@@ -1376,34 +1376,32 @@
     });
   }
 
-  /** Memory folders at the top of Behavior. Inputs save on change; a field being typed in is not rebuilt. */
+  /** The memory switch at the top of Behavior. Turning it off is confirmed by the extension (a warning before deleting). */
   let memoryKey = '';
   function renderMemory() {
     const root = el('memory-settings');
-    const memory = state.memory || { globalPath: '', repoPath: '.dsh/memory', globalStatus: 'off', repoStatus: 'missing' };
+    const memory = state.memory || { enabled: true, folder: '~/.dsh/memory', notes: 0, synced: false };
     const key = JSON.stringify(memory);
     if (key === memoryKey && root.childElementCount) return;
-    if (root.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
     memoryKey = key;
-    root.textContent = '';
-    const heading = document.createElement('div'); heading.className = 'instruction-group'; heading.textContent = 'Memory';
-    const help = document.createElement('p'); help.className = 'helper';
-    help.textContent = 'Folders of notes, conventions and scripts. Agents find the global one at .dsh/global-memory/ in every project and the repo one in place, and can read and update both without asking. Notes they save to the global copy are written back to your folder after each turn.';
-    root.append(heading, help);
-    const status = { found: 'Found', missing: 'Folder not found', invalid: 'Not a valid path', off: 'Off', notYet: 'Not created yet; agents create it when they save a project note' };
-    const field = (label, value, placeholder, state, save, browse) => {
-      const wrap = document.createElement('label'); wrap.className = 'memory-field'; wrap.textContent = label;
-      const row = document.createElement('div'); row.className = 'memory-row';
-      const input = document.createElement('input'); input.type = 'text'; input.value = value; input.placeholder = placeholder; input.spellcheck = false;
-      input.onchange = () => save(input.value.trim());
-      input.onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); input.blur(); } };
-      row.appendChild(input);
-      if (browse) row.appendChild(button('', 'Choose folder', browse, 'icon-button', 'folder_open'));
-      const note = document.createElement('span'); note.className = 'memory-status memory-' + state; note.textContent = status[state] || '';
-      wrap.append(row, note); root.appendChild(wrap);
-    };
-    field('Global folder (this PC)', memory.globalPath, 'C:\\Users\\you\\Notes', memory.globalStatus, value => send({ type: 'saveMemory', memory: { globalPath: value } }), () => send({ type: 'pickMemoryFolder' }));
-    field('Repo folder (in each project)', memory.repoPath, '.dsh/memory', memory.repoStatus === 'missing' ? 'notYet' : memory.repoStatus, value => send({ type: 'saveMemory', memory: { repoPath: value } }));
+    rebuild(root, () => {
+      const row = settingRow('memory', { icon: 'neurology', title: 'Memory',
+        desc: 'Agents read and save notes, conventions and reusable code: global ones for every project, and each project\'s own in .dsh/memory. They update them without asking and save only what a future task could reuse.' },
+        memory.enabled, () => send({ type: 'setMemory', enabled: !memory.enabled }));
+      const detail = document.createElement('div'); detail.className = 'feature-detail memory-detail';
+      const where = document.createElement('p'); where.className = 'helper';
+      where.textContent = memory.enabled
+        ? `Global memory: ${memory.folder} · ${memory.notes === 1 ? '1 file' : memory.notes + ' files'}${memory.synced ? ' · backed up by Sync' : ''}`
+        : 'Off. Agents are not told about memory (global or project), and global notes are not kept on this PC.';
+      detail.appendChild(where);
+      if (memory.enabled) {
+        const actions = document.createElement('div'); actions.className = 'memory-actions';
+        actions.appendChild(button('Open folder', 'Open the global memory folder', () => send({ type: 'openMemoryFolder' }), 'secondary-button'));
+        detail.appendChild(actions);
+      }
+      row.appendChild(detail);
+      root.appendChild(row);
+    });
   }
 
   function renderInstructions() {
