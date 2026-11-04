@@ -5,7 +5,7 @@ import { dirname, join, resolve, sep } from 'node:path';
 /** `dsh.*` settings that travel with the config, read from and written to user settings only. */
 export const SYNCED_SETTINGS = [
   'models', 'subagents', 'nameModel', 'reviewModel', 'summaryModel', 'deciderModel', 'explorerModel', 'smartAutoRanks', 'mcpServers', 'accessibility',
-  'checkpointHint', 'keepAliveMax',
+  'checkpointHint', 'keepAliveMax', 'experimental.autoCompact', 'experimental.autoCompactTokens', 'experimental.batching',
   'features.activityRail', 'features.autoName', 'features.shareRules', 'features.editorContext', 'features.reduceMotion', 'features.reviewAgent', 'features.fileSummaries',
   'features.smartAuto',
   'updates.check', 'updates.repository', 'runtime.mirror', 'runtime.maxWorkspaceFiles', 'runtime.maxWorkspaceBytes',

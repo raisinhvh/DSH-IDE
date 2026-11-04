@@ -29,6 +29,8 @@ export interface CliTurn {
   onRateLimit?: (info: unknown) => void;
   /** Reports token usage once per Claude result event. Errors thrown here are ignored. */
   onUsage?(usage: TurnUsage): void;
+  /** Prompt size of each main-conversation request as it is made (input + cached). Errors thrown here are ignored. */
+  onContext?(tokens: number): void;
   /**
    * Claude answered but keeps the turn open for background tasks it started (their results may continue the turn).
    * Called with the tasks' descriptions when that wait starts, and with an empty list when Claude resumes. Errors thrown here are ignored.
@@ -174,6 +176,7 @@ export class ClaudeCliRuntime {
         subagentText.set(agent, [...messages.values()].join('\n'));
       };
       let contextTokens: number | undefined;
+      let lastContextRequest = '';
       const child = spawn(cliCommand(turn.account.provider), args, {
         cwd: turn.cwd, env: claudeEnv(turn), windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -299,7 +302,12 @@ export class ClaudeCliRuntime {
             const blocks = Array.isArray(message?.content) ? message.content as Record<string, unknown>[] : [];
             const parentToolId = String(event.parent_tool_use_id || message?.parent_tool_use_id || '');
             const requestUsage = parentToolId ? undefined : parseUsage(message?.usage);
-            if (requestUsage) contextTokens = requestUsage.input + requestUsage.cacheRead + requestUsage.cacheWrite;
+            if (requestUsage) {
+              contextTokens = requestUsage.input + requestUsage.cacheRead + requestUsage.cacheWrite;
+              // Claude Code repeats a request's usage on each of its content events; report each request once.
+              const requestId = String(message?.id || '');
+              if (requestId !== lastContextRequest) { lastContextRequest = requestId; try { turn.onContext?.(contextTokens); } catch { /* ignored */ } }
+            }
             for (const block of blocks) {
               if (block.type === 'text' && typeof block.text === 'string' && !streamedClaudeMessages.has(String(message?.id || ''))) {
                 if (parentToolId) { noteSubagentText(parentToolId, String(message?.id || 'message'), block.text, false); turn.onSubagent?.({ id: parentToolId, text: block.text, messageId: String(message?.id || 'message') }); }

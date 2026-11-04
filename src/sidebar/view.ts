@@ -5,7 +5,7 @@ import { RAIL_FALLBACK_ICONS } from '../runtime/naming';
 
 export interface SidebarImage { name: string; mimeType: string; data: string }
 export type ApprovalMode = 'ask' | 'auto' | 'full';
-export type SidebarPage = 'chat' | 'accounts' | 'models' | 'subagents' | 'instructions' | 'toolcalls' | 'customize' | 'accessibility' | 'sync';
+export type SidebarPage = 'chat' | 'accounts' | 'models' | 'subagents' | 'instructions' | 'toolcalls' | 'customize' | 'accessibility' | 'experimental' | 'sync';
 
 /** GitHub config sync status for the Sync page. */
 export interface SidebarSync {
@@ -65,7 +65,8 @@ export function accessibilityStyle(value: SidebarAccessibility): { vars: Record<
     classes: [value.highContrast ? 'a11y-contrast' : '', value.largeTargets ? 'a11y-targets' : '', value.underlineLinks ? 'a11y-underline' : ''].filter(Boolean),
   };
 }
-export type SidebarFeatureKey = 'activityRail' | 'autoName' | 'shareRules' | 'editorContext' | 'reduceMotion' | 'updateChecks' | 'mirror' | 'reviewAgent' | 'fileSummaries' | 'smartAuto';
+export type SidebarFeatureKey = 'activityRail' | 'autoName' | 'shareRules' | 'editorContext' | 'reduceMotion' | 'updateChecks' | 'mirror' | 'reviewAgent' | 'fileSummaries' | 'smartAuto'
+  | 'autoCompact' | 'batching';
 export type SidebarFeatures = Record<SidebarFeatureKey, boolean>;
 /** Model that writes chat titles; an empty model keeps the first-message title. */
 export interface SidebarNameModel { model?: string; effort?: string; speed?: string }
@@ -117,6 +118,7 @@ export type SidebarWebviewMessage =
   | { type: 'saveDeciderModel'; deciderModel: SidebarNameModel }
   | { type: 'saveExplorerModel'; explorerModel: SidebarNameModel }
   | { type: 'saveSmartAutoRanks'; ranks: SidebarSmartAutoRank[] }
+  | { type: 'saveAutoCompactTokens'; tokens: number }
   | { type: 'saveAccessibility'; accessibility: SidebarAccessibility }
   | { type: 'deleteAllSessions' }
   | { type: 'syncAction'; action: 'connect' | 'upload' | 'download' | 'disconnect' | 'openGist' | 'keepRemote' | 'keepLocal' }
@@ -195,7 +197,9 @@ export interface SidebarSession {
   messageCount?: number;
   contextTokens?: number;
   explorerTokens?: number;
-  resumeNotice?: 'checkpoint' | 'idle';
+  resumeNotice?: 'checkpoint' | 'idle' | 'compact';
+  /** The session before the notice can be resumed in full. */
+  resumable?: boolean;
 }
 
 /** A file an agent sent into the chat; `file` is relative to the sidebar's media base. */
@@ -246,6 +250,8 @@ export interface SidebarToolEvent {
   title: string;
   detail?: string;
   state: 'running' | 'complete' | 'error' | 'cancelled';
+  /** Calls inside one batch tool call, shown nested under it. */
+  children?: { title: string; detail?: string; state: 'running' | 'complete' | 'error' }[];
 }
 
 export interface SidebarSubagent {
@@ -305,7 +311,7 @@ export type SidebarHostMessage =
   | { type: 'modelRemoveFailed'; name: string }
   | { type: 'subagentProfilesState'; profiles: SidebarSubagentProfile[] }
   | { type: 'subagentSaved' }
-  | { type: 'customizeState'; features: SidebarFeatures; nameModel: SidebarNameModel; reviewModel: SidebarNameModel; summaryModel: SidebarNameModel; deciderModel: SidebarNameModel; explorerModel: SidebarNameModel; smartAutoRanks: SidebarSmartAutoRank[]; accessibility: SidebarAccessibility }
+  | { type: 'customizeState'; features: SidebarFeatures; nameModel: SidebarNameModel; reviewModel: SidebarNameModel; summaryModel: SidebarNameModel; deciderModel: SidebarNameModel; explorerModel: SidebarNameModel; smartAutoRanks: SidebarSmartAutoRank[]; accessibility: SidebarAccessibility; autoCompactTokens: number }
   | { type: 'jobState'; sessionId: string; job: SidebarJob | null }
   | { type: 'syncState'; sync: SidebarSync }
   | { type: 'instructionsState'; items: SidebarInstruction[] }
@@ -360,6 +366,7 @@ export interface SidebarViewState {
   deciderModel: SidebarNameModel;
   explorerModel: SidebarNameModel;
   smartAutoRanks: SidebarSmartAutoRank[];
+  autoCompactTokens: number;
   slashCommands: SidebarSlashCommand[];
   jobs: Record<string, SidebarJob>;
   accessibility: SidebarAccessibility;
@@ -371,10 +378,20 @@ export interface SidebarViewState {
   error?: string;
 }
 
-export const defaultFeatures = (): SidebarFeatures => ({ activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: true, smartAuto: false });
+export const defaultFeatures = (): SidebarFeatures => ({ activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: true, smartAuto: false, autoCompact: false, batching: false });
+
+/** Auto compaction threshold: tokens of conversation, not counting the session's system prompt and tools. */
+export const DEFAULT_COMPACT_TOKENS = 70_000;
+export const MIN_COMPACT_TOKENS = 20_000;
+export const MAX_COMPACT_TOKENS = 500_000;
+export function normalizeCompactTokens(value: unknown): number {
+  const number = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+  if (!Number.isFinite(number)) return DEFAULT_COMPACT_TOKENS;
+  return Math.min(MAX_COMPACT_TOKENS, Math.max(MIN_COMPACT_TOKENS, Math.round(number / 1000) * 1000));
+}
 
 export const initialSidebarState = (): SidebarViewState => ({
-  page: 'chat', approvalMode: 'ask', subagentProfiles: [], instructions: [], toolpacks: [], features: defaultFeatures(), nameModel: {}, reviewModel: {}, summaryModel: {}, deciderModel: {}, explorerModel: {}, smartAutoRanks: [], slashCommands: SLASH_COMMANDS.map(command => ({ ...command })), jobs: {}, accessibility: defaultAccessibility(), sync: { connected: false, auto: true }, railIcons: [...RAIL_FALLBACK_ICONS], sessions: [], models: [], providerLabel: 'No provider', accountLabel: 'No account connected',
+  page: 'chat', approvalMode: 'ask', subagentProfiles: [], instructions: [], toolpacks: [], features: defaultFeatures(), nameModel: {}, reviewModel: {}, summaryModel: {}, deciderModel: {}, explorerModel: {}, smartAutoRanks: [], autoCompactTokens: DEFAULT_COMPACT_TOKENS, slashCommands: SLASH_COMMANDS.map(command => ({ ...command })), jobs: {}, accessibility: defaultAccessibility(), sync: { connected: false, auto: true }, railIcons: [...RAIL_FALLBACK_ICONS], sessions: [], models: [], providerLabel: 'No provider', accountLabel: 'No account connected',
   accountConnected: false, accounts: [], usage: {}, dependencies: [], cursor: { connected: false, label: 'Not connected' },
   messages: {}, timeline: {}, tools: [], subagents: {}, diffs: [], runStates: {}, queues: {},
 });
@@ -417,6 +434,7 @@ export function getSidebarHtml(
         <div class="settings-separator" role="separator"></div>
         <button class="settings-item" id="customize" type="button" role="menuitem"><span class="symbol">toggle_on</span><span class="settings-item-copy"><span class="settings-item-title">Customize</span><span class="settings-item-desc">Turn features on or off</span></span></button>
         <button class="settings-item" id="accessibility" type="button" role="menuitem"><span class="symbol">accessibility_new</span><span class="settings-item-copy"><span class="settings-item-title">Accessibility</span><span class="settings-item-desc">Text size, spacing, contrast, motion</span></span></button>
+        <button class="settings-item" id="experimental" type="button" role="menuitem"><span class="symbol">science</span><span class="settings-item-copy"><span class="settings-item-title">Experimental</span><span class="settings-item-desc">Auto compaction, advanced batching</span></span></button>
         <div class="settings-separator" role="separator"></div>
         <button class="settings-item" id="sync" type="button" role="menuitem"><span class="symbol">cloud_sync</span><span class="settings-item-copy"><span class="settings-item-title">Sync</span><span class="settings-item-desc">Back up your config to GitHub</span></span></button>
       </div>
@@ -516,6 +534,11 @@ export function getSidebarHtml(
   <div class="page-heading"><button class="icon-button back" data-page="chat" title="Back to chat" aria-label="Back to chat"><span class="symbol">arrow_back</span></button><div><h1>Accessibility</h1></div></div>
   <p class="helper">Adjust how the sidebar reads and feels. Changes show immediately and are saved to your user settings.</p>
   <div id="a11y-list" class="scroll-content feature-list"></div>
+</section>
+<section id="experimental-page" class="page settings-page" hidden>
+  <div class="page-heading"><button class="icon-button back" data-page="chat" title="Back to chat" aria-label="Back to chat"><span class="symbol">arrow_back</span></button><div><h1>Experimental</h1></div></div>
+  <p class="helper">Features that are still being tried out. They may change or go away. Changes are saved to your user settings and apply from the next message.</p>
+  <div id="experimental-list" class="scroll-content feature-list"></div>
 </section>
 <section id="sync-page" class="page settings-page" hidden>
   <div class="page-heading"><button class="icon-button back" data-page="chat" title="Back to chat" aria-label="Back to chat"><span class="symbol">arrow_back</span></button><div><h1>Sync</h1></div></div>

@@ -197,6 +197,12 @@ export class CodexAppServerRuntime {
         }
       }
       if (method === 'error' && params.error && typeof params.error === 'object') lastError = errorText(params.error as Json) || lastError;
+      if (method === 'thread/tokenUsage/updated' && (!threadId || value(params, 'threadId') === threadId)) {
+        // The last request's prompt plus its reply is roughly what the next request starts from.
+        const last = (params.tokenUsage as Json | undefined)?.last as Json | undefined;
+        const tokens = Number(last?.inputTokens) + Number(last?.outputTokens);
+        if (Number.isFinite(tokens) && tokens > 0) { try { turn.onContext?.(tokens); } catch { /* ignored */ } }
+      }
       if (method === 'turn/completed') {
         const item = params.turn as Json | undefined;
         if (!turnId || item?.id === turnId) {

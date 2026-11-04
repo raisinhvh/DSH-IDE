@@ -32,25 +32,23 @@ export interface GeneratedImage { bytes: Buffer; extension: string }
 
 export const GENERATE_IMAGE_TOOL: DelegateToolInfo = {
   name: GENERATE_IMAGE,
-  description: 'Generate an image with GPT Image, using the user\'s ChatGPT (Codex) account. Give only a prompt to create a new image, '
-    + 'or also pass input images to edit them, combine them or use them as references (for example "this sprite, but ice-themed, same pixel style"). '
-    + `The PNG is saved under .dsh/images in the workspace, its path is returned, and it is shown to the user in the chat automatically, so do not also call ${SEND_MEDIA} for it. Generation can take a minute.`,
+  description: `Generate a PNG with GPT Image (the user's ChatGPT account) from a prompt, or edit, combine or restyle input images. It is saved under .dsh/images, its path returned, and shown in the chat (no ${SEND_MEDIA} needed). Can take a minute.`,
   inputSchema: {
     type: 'object',
     properties: {
-      prompt: { type: 'string', description: 'What to draw: subject, style, composition, colors, any text to render. With input images, describe the change and what to keep, and say which image is which when there are several.' },
+      prompt: { type: 'string', description: 'Subject, style, composition, colors, text. With input images: the change, what to keep, which image is which.' },
       images: { type: 'array', minItems: 1, maxItems: MAX_INPUT_IMAGES, items: { type: 'string' },
-        description: `Optional input images, relative to the working copy or absolute: PNG, JPEG or WebP, up to ${MAX_INPUT_BYTES / 1024 / 1024} MB each. Earlier generated images under .dsh/images work too.` },
-      size: { type: 'string', enum: SIZES, description: 'Requested width x height in pixels; the result may differ, so check the reported size. Default auto.' },
+        description: `PNG, JPEG or WebP up to ${MAX_INPUT_BYTES / 1024 / 1024} MB each, relative to the working copy or absolute.` },
+      size: { type: 'string', enum: SIZES, description: 'Requested size; check the reported one. Default auto.' },
       quality: { type: 'string', enum: QUALITIES, description: 'Default auto. Low is fastest.' },
-      background: { type: 'string', enum: BACKGROUNDS, description: 'Use transparent for icons, sprites and cutouts. Default auto.' },
-      name: { type: 'string', description: 'Optional short file name, without extension.' },
+      background: { type: 'string', enum: BACKGROUNDS, description: 'transparent for icons, sprites, cutouts. Default auto.' },
+      name: { type: 'string', description: 'Optional file name, no extension.' },
     },
     required: ['prompt'],
   },
 };
 
-export const IMAGE_INSTRUCTIONS = `DSH images: to create an image (art, icons, textures, mockups), or to edit or restyle existing images by passing them as input images, call ${GENERATE_IMAGE} on the dsh-delegate MCP server. It saves the file under .dsh/images in the workspace and shows it in the chat itself.`;
+export const IMAGE_INSTRUCTIONS = `DSH images: ${GENERATE_IMAGE} creates images, or edits ones passed as input images.`;
 
 /** Validated generation options, or an error message for the agent. */
 export function parseImageRequest(args: Record<string, unknown>): ImageRequest | string {

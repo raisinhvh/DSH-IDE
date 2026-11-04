@@ -11,6 +11,8 @@ export interface DelegateHandlers {
     /** Extra tools from enabled custom toolpacks. */
     tools(owner: string): DelegateToolInfo[];
     call(owner: string, tool: string, args: Record<string, unknown>): Promise<DelegateResult>;
+    /** Whether this owner's bridge offers the batch tool. */
+    batching?(owner: string): boolean;
 }
 
 /** Loopback HTTP bridge between the stdio MCP server that agents spawn and the extension host. */
@@ -51,7 +53,7 @@ export class DelegateHost {
         try { body = JSON.parse(raw) as typeof body; } catch { send(400, { error: 'bad json' }); return; }
         const owner = typeof body.owner === 'string' ? body.owner : '';
         try {
-            if (req.url === '/describe') send(200, { agents: handlers.describe(owner), tools: handlers.tools(owner) });
+            if (req.url === '/describe') send(200, { agents: handlers.describe(owner), tools: handlers.tools(owner), batching: handlers.batching?.(owner) === true });
             else if (req.url === '/call' && typeof body.tool === 'string') {
                 // Subagents can run for minutes; whitespace keeps the client's fetch from hitting its header/body timeouts.
                 res.writeHead(200, { 'content-type': 'application/json' });

@@ -17,16 +17,15 @@ export function mediaType(path: string): string { return MEDIA_TYPES[extname(pat
 
 export const SEND_MEDIA_TOOL: DelegateToolInfo = {
   name: SEND_MEDIA,
-  description: 'Show files to the user in the DSH chat: images, video and audio play inline; other files appear as a link they can open. '
-    + 'Use it to share screenshots, renders, charts, recordings or generated assets instead of only describing them. The files are copied when sent, so later changes do not affect what the user sees.',
+  description: 'Show files in the chat: images, video and audio inline, other files as a link. Files are copied when sent.',
   inputSchema: {
     type: 'object',
     properties: {
-      paths: { type: 'array', minItems: 1, maxItems: MAX_MEDIA_FILES, items: { type: 'string' }, description: 'Files to show, relative to the working copy or absolute.' },
-      caption: { type: 'string', description: 'Optional short markdown text shown above the files.' },
+      paths: { type: 'array', minItems: 1, maxItems: MAX_MEDIA_FILES, items: { type: 'string' }, description: 'Relative to the working copy, or absolute.' },
+      caption: { type: 'string', description: 'Optional markdown shown above them.' },
     },
     required: ['paths'],
   },
 };
 
-export const MEDIA_INSTRUCTIONS = `DSH media: to show the user an image, video, audio clip or other file (for example a screenshot or render you made), call ${SEND_MEDIA} on the dsh-delegate MCP server with its path. It appears in the chat.`;
+export const MEDIA_INSTRUCTIONS = `DSH media: ${SEND_MEDIA} shows a file (screenshot, render, video, audio, other) in the chat.`;

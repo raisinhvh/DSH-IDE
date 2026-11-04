@@ -627,3 +627,72 @@ test('idle Claude sessions reset only above the hint', async () => {
     if (expected) assert.match(sentPrompt, /Saved idle summary/);
   }
 });
+
+test('auto compaction starts a fresh Claude session from a summary once the conversation passes the threshold', async () => {
+  for (const [tokens, expected] of [[85000, true], [84999, false]]) {
+    // 15k of the context is the session's own overhead, so 85k is 70k of conversation.
+    const record = { id: 'one', modelName: 'Model', provider: 'claude-cli', backend: 'default', accountId: 'account', cliSessionId: 'old', name: 'Chat', contextTokens: tokens, baseTokens: 15000, lastTurnAt: Date.now() - 60_000 };
+    const { host } = preparePromptHost([record]);
+    const chat = promptChat(record);
+    chat.runtime = undefined;
+    chat.cli = {};
+    host.chats.set(record.id, chat);
+    host.loadChat = async () => chat;
+    host.oauthAccounts = { get: () => ({ id: 'account', provider: 'claude-cli' }) };
+    host.shareGlobalInstructions = async () => {};
+    host.feature = key => key === 'autoCompact';
+    host.delegateConfig = () => ({ command: 'node', args: [], env: {} });
+    host.output = { appendLine() {} };
+    const summarized = [];
+    host.runOneShot = async (choice, _cwd, prompt) => { summarized.push([choice.model, prompt]); return 'SUMMARY OF EARLIER WORK'; };
+    host.transcripts.set(record.id, [
+      { role: 'user', text: 'Build the parser' }, { role: 'assistant', text: 'Built it.', tools: ['Edit src/parser.ts'] },
+      { role: 'user', text: 'Add tests' }, { role: 'assistant', text: 'Added them.' },
+    ]);
+    let sent;
+    host.promptPooled = async (_cli, turn) => { sent = turn; turn.onContext?.(30000); return 'new'; };
+    await host.sendPrompt('continue');
+    assert.equal(sent.sessionId === undefined, expected);
+    if (expected) {
+      assert.match(sent.prompt, /SUMMARY OF EARLIER WORK/);
+      assert.match(sent.prompt, /read_chat_history/);
+      // No name model is set, so the chat's own model writes the summary, and it sees the tools each turn used.
+      assert.equal(summarized[0][0], 'Model');
+      assert.match(summarized[0][1], /\[Tools: Edit src\/parser\.ts\]/);
+      assert.equal(record.resumeNotice, 'compact');
+      assert.equal(record.previousCliSessionId, 'old');
+      assert.equal(record.contextTokens, 30000);
+      assert.equal(record.baseTokens, 30000 - Math.ceil(sent.prompt.length / 4));
+    } else {
+      assert.equal(summarized.length, 0);
+      assert.equal(record.resumeNotice, undefined);
+      assert.equal(record.baseTokens, 15000);
+    }
+    // The transcript keeps everything, including this turn.
+    assert.equal(host.transcripts.get(record.id).length, 5);
+  }
+});
+
+test('auto compaction stays off unless turned on', async () => {
+  const record = { id: 'one', modelName: 'Model', provider: 'claude-cli', backend: 'default', accountId: 'account', cliSessionId: 'old', name: 'Chat', contextTokens: 400000, baseTokens: 0, lastTurnAt: Date.now() - 60_000 };
+  const { host } = preparePromptHost([record]);
+  const chat = promptChat(record);
+  chat.runtime = undefined;
+  chat.cli = {};
+  host.chats.set(record.id, chat);
+  host.loadChat = async () => chat;
+  host.oauthAccounts = { get: () => ({ id: 'account', provider: 'claude-cli' }) };
+  host.shareGlobalInstructions = async () => {};
+  host.feature = () => false;
+  let sentSession = 'unset';
+  host.promptPooled = async (_cli, turn) => { sentSession = turn.sessionId; return 'old'; };
+  await host.sendPrompt('continue');
+  assert.equal(sentSession, 'old');
+  // A session the user resumed in full after a compaction is not compacted again.
+  host.feature = key => key === 'autoCompact';
+  record.compactPaused = true;
+  record.contextTokens = 400000;
+  sentSession = 'unset';
+  await host.sendPrompt('continue');
+  assert.equal(sentSession, 'old');
+});

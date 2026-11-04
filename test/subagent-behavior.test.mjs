@@ -84,3 +84,35 @@ test('delegation events never enter the tool bar or create a duplicate subagent 
     assert.equal(chat.segment, 2);
   }
 });
+
+test('a batch runs DSH tools and file reads in parallel and returns one combined result', async () => {
+  const { host, chat, events } = fixture('read-only');
+  Object.assign(chat, { ownerId: 'owner', running: true, turnTools: [], cancelRequested: false });
+  host.chats = new Map([['chat', chat]]);
+  host.feature = key => key === 'batching';
+  host.noteRead = () => {};
+  host.packCall = () => undefined;
+  const result = await host.handleDelegateCall('owner', 'batch', { calls: [
+    { tool: 'delegate_task', args: { agent: 'test-agent', task: 'Say hi' } },
+    { tool: 'read_file', args: { path: 'package.json', limit: 2 } },
+    { tool: 'list_locked_files' },
+    { tool: 'no_such_tool' },
+  ] });
+  assert.match(result.text, /^\[1\] delegate_task test-agent\nHi\n\n\[2\] read_file package\.json\n\(lines 1-2 of \d+\)\n\{\n  "name": "dsh-ide",\n\n\[3\] list_locked_files\nNo files are locked\.\n\n\[4\] no_such_tool \(error\)\nUnknown tool/);
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(chat.turnTools, ['delegate_task test-agent', 'read_file package.json', 'list_locked_files', 'no_such_tool']);
+  const card = events.filter(event => event.type === 'toolEvent').at(-1).event;
+  assert.equal(card.title, 'Batch');
+  assert.equal(card.state, 'complete');
+  assert.deepEqual(card.children.map(child => [child.title, child.state]), [['delegate_task', 'complete'], ['read_file', 'complete'], ['list_locked_files', 'complete'], ['no_such_tool', 'error']]);
+
+  const secret = await host.handleDelegateCall('owner', 'batch', { calls: [{ tool: 'read_file', args: { path: '.env' } }, { tool: 'search', args: { pattern: 'x', path: '../' } }] });
+  assert.match(secret.text, /\[1\] read_file \.env \(error\)\n\.env needs approval/);
+  assert.match(secret.text, /\[2\] search \.\.\/ \(error\)\n\.\.\/ needs approval/);
+
+  host.feature = () => false;
+  assert.deepEqual(await host.handleDelegateCall('owner', 'batch', { calls: [{ tool: 'list_locked_files' }] }), { text: 'Batching is turned off.', isError: true });
+  assert.match((await host.handleDelegateCall('owner', 'batch', {})).text, /^Batching is turned off/);
+  host.feature = () => true;
+  assert.deepEqual(await host.handleDelegateCall('owner', 'batch', { calls: [{ tool: 'batch' }] }), { text: 'A batch cannot contain another batch.', isError: true });
+});

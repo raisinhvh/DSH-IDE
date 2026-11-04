@@ -12,7 +12,7 @@
   state.runStates ||= {};
   state.subagentProfiles ||= [];
   state.instructions ||= [];
-  state.features ||= { activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: false, smartAuto: false };
+  state.features ||= { activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: false, smartAuto: false, autoCompact: false, batching: false };
   state.nameModel ||= {};
   state.reviewModel ||= {};
   state.summaryModel ||= {};
@@ -26,8 +26,8 @@
   state.railIcons ||= [];
   boot.remove();
   const local = vscode.getState() || {};
-  const pages = ['chat', 'accounts', 'models', 'subagents', 'instructions', 'toolcalls', 'customize', 'accessibility', 'sync'];
-  const settingsPages = ['instructions', 'models', 'subagents', 'toolcalls', 'customize', 'accessibility', 'sync'];
+  const pages = ['chat', 'accounts', 'models', 'subagents', 'instructions', 'toolcalls', 'customize', 'accessibility', 'experimental', 'sync'];
+  const settingsPages = ['instructions', 'models', 'subagents', 'toolcalls', 'customize', 'accessibility', 'experimental', 'sync'];
   let page = pages.includes(state.page) && state.page !== 'chat' ? state.page
     : pages.includes(local.page) ? local.page : 'chat';
   const closedTabs = new Set(Array.isArray(local.closedTabs) ? local.closedTabs : []);
@@ -50,7 +50,7 @@
   let slashMenuEl = null;
   let slashMatches = [];
   let slashHighlight = 0;
-  const toolGlyph = tool => tool.state === 'running' ? 'progress_activity' : tool.state === 'error' ? 'error' : tool.state === 'cancelled' ? 'stop_circle' : tool.kind === 'search' ? 'search' : tool.kind === 'shell' ? 'terminal' : tool.kind === 'read' ? 'description' : 'check_circle';
+  const toolGlyph = tool => tool.children && tool.state !== 'running' && tool.state !== 'error' ? 'stacks' : tool.state === 'running' ? 'progress_activity' : tool.state === 'error' ? 'error' : tool.state === 'cancelled' ? 'stop_circle' : tool.kind === 'search' ? 'search' : tool.kind === 'shell' ? 'terminal' : tool.kind === 'read' ? 'description' : 'check_circle';
   const toolLabel = tool => {
     const running = tool.state === 'running';
     if (tool.kind === 'read') return running ? 'Reading File' : 'File Read';
@@ -842,7 +842,8 @@
     const session = state.sessions.find(item => item.id === sessionId);
     const resume = el('resume-notice');
     resume.hidden = !session?.resumeNotice;
-    el('resume-label').textContent = session?.resumeNotice === 'checkpoint' ? 'Resumed from checkpoint' : 'Started a fresh session after idle';
+    el('resume-label').textContent = session?.resumeNotice === 'checkpoint' ? 'Resumed from checkpoint' : session?.resumeNotice === 'compact' ? 'Context compacted into a summary' : 'Started a fresh session after idle';
+    el('resume-full').hidden = !session?.resumable;
     el('resume-full').onclick = () => send({ type: 'resumeFullSession', sessionId });
   }
 
@@ -920,7 +921,7 @@
       } else if (entry.kind === 'toolbatch') {
         const tools = entry.tools;
         const expanded = expandedBatches.has(entry.id);
-        const signature = [expanded, ...tools.map(tool => [tool.id, tool.title, tool.detail, tool.state, tool.kind].join('|'))].join('\n');
+        const signature = [expanded, ...tools.map(tool => [tool.id, tool.title, tool.detail, tool.state, tool.kind, JSON.stringify(tool.children || [])].join('|'))].join('\n');
         if (node.dataset.text !== signature) {
           const opening = expanded && node.dataset.expanded !== 'true';
           node.className = 'feed-entry tool-batch';
@@ -964,6 +965,18 @@
               row.append(glyph, name);
               if (tool.detail) { const detail = document.createElement('span'); detail.className = 'tool-row-detail'; detail.textContent = tool.detail.replace(/\s+/g, ' '); row.appendChild(detail); }
               list.appendChild(row);
+              if (tool.children?.length) {
+                const nested = document.createElement('div'); nested.className = 'tool-children';
+                for (const child of tool.children) {
+                  const kind = /search/i.test(child.title) ? 'search' : /read|list|summar|history/i.test(child.title) ? 'read' : 'other';
+                  const item = document.createElement('div'); item.className = 'tool-row tool-child tool-' + child.state; item.title = child.title + (child.detail ? ': ' + child.detail : '');
+                  const label = document.createElement('span'); label.className = 'tool-row-title'; label.textContent = child.title;
+                  item.append(icon(toolGlyph({ kind, state: child.state })), label);
+                  if (child.detail) { const detail = document.createElement('span'); detail.className = 'tool-row-detail'; detail.textContent = child.detail.replace(/\s+/g, ' '); item.appendChild(detail); }
+                  nested.appendChild(item);
+                }
+                list.appendChild(nested);
+              }
             }
             node.appendChild(list);
           }
@@ -1838,6 +1851,46 @@
     });
   }
 
+  const experimentalInfo = [
+    { key: 'autoCompact', icon: 'compress', title: 'Auto compaction', desc: 'Once a chat\'s conversation passes the limit below (not counting the system prompt and tools), your next message starts a fresh session from a summary and the latest exchange. The agent can still read and search the whole chat, including which tools each turn used.' },
+    { key: 'batching', icon: 'stacks', title: 'Advanced batching', desc: 'Gives agents a batch tool: several DSH tool calls (subagents, file summaries, chat history, toolpacks) and batch-only file reads and searches run in parallel and come back as one result. Shown as one card with a row per call.' },
+  ];
+  let experimentalKey = '';
+
+  function renderExperimental() {
+    const root = el('experimental-list');
+    const key = JSON.stringify([state.features, state.autoCompactTokens]);
+    if (key === experimentalKey && root.childElementCount) return;
+    experimentalKey = key;
+    rebuild(root, () => {
+      for (const feature of experimentalInfo) {
+        const enabled = !!state.features[feature.key];
+        const row = settingRow('experimental:' + feature.key, feature, enabled, () => {
+          state.features = { ...state.features, [feature.key]: !enabled };
+          renderExperimental();
+          send({ type: 'setFeature', key: feature.key, enabled: !enabled });
+        });
+        if (feature.key === 'autoCompact' && enabled) {
+          const detail = document.createElement('div'); detail.className = 'feature-detail';
+          const label = document.createElement('label'); label.textContent = 'Compact at (thousand tokens)';
+          const input = document.createElement('input'); input.type = 'number'; input.min = '20'; input.max = '500'; input.step = '5'; input.className = 'number-input';
+          input.value = String(Math.round((state.autoCompactTokens || 70000) / 1000));
+          input.onchange = () => {
+            const tokens = Math.min(500, Math.max(20, Math.round(Number(input.value) || 70))) * 1000;
+            state.autoCompactTokens = tokens; input.value = String(tokens / 1000); experimentalKey = JSON.stringify([state.features, tokens]);
+            send({ type: 'saveAutoCompactTokens', tokens });
+          };
+          label.appendChild(input); detail.appendChild(label);
+          const help = document.createElement('p'); help.className = 'helper';
+          help.textContent = 'The summary is written by your name model, or by the chat\'s own model when none is set. Claude and Codex chats can resume the full session from the notice.';
+          detail.appendChild(help);
+          row.appendChild(detail);
+        }
+        root.appendChild(row);
+      }
+    });
+  }
+
   // Settings lists are rebuilt on every toggle, so the flip is replayed on the fresh switch, resuming
   // from the position and colors captured off the old one. Later rebuilds mid-flip pick up where it left off.
   const switchFlips = new Map();
@@ -2032,7 +2085,7 @@
   }
 
   function render() {
-    el('view-title').textContent = { chat: 'Chats', accounts: 'Accounts', models: 'Models', subagents: 'Subagents', instructions: 'Behavior', toolcalls: 'Toolpacks', customize: 'Customize', accessibility: 'Accessibility', sync: 'Sync' }[page];
+    el('view-title').textContent = { chat: 'Chats', accounts: 'Accounts', models: 'Models', subagents: 'Subagents', instructions: 'Behavior', toolcalls: 'Toolpacks', customize: 'Customize', accessibility: 'Accessibility', experimental: 'Experimental', sync: 'Sync' }[page];
     for (const name of settingsPages) el(name).classList.toggle('current', page === name);
     el('settings-toggle').setAttribute('aria-pressed', String(settingsPages.includes(page)));
     el('accounts').setAttribute('aria-pressed', String(page === 'accounts'));
@@ -2044,6 +2097,7 @@
     if (page === 'toolcalls') renderToolpacks();
     if (page === 'customize') renderCustomize();
     if (page === 'accessibility') renderAccessibility();
+    if (page === 'experimental') renderExperimental();
     if (page === 'sync') renderSync();
   }
 
@@ -2054,6 +2108,7 @@
   el('settings-toggle').onclick = () => { const menu = el('settings-menu'); const wasHidden = menu.hidden; closeMenus(); menu.hidden = !wasHidden; el('settings-toggle').setAttribute('aria-expanded', String(!menu.hidden)); };
   el('customize').onclick = () => showPage(page === 'customize' ? 'chat' : 'customize');
   el('accessibility').onclick = () => showPage(page === 'accessibility' ? 'chat' : 'accessibility');
+  el('experimental').onclick = () => showPage(page === 'experimental' ? 'chat' : 'experimental');
   el('sync').onclick = () => showPage(page === 'sync' ? 'chat' : 'sync');
   document.addEventListener('click', event => {
     if (!event.target.closest('.settings-wrap')) closeSettings();
@@ -2322,6 +2377,7 @@
         state.features = message.features || state.features; state.nameModel = message.nameModel || {}; state.reviewModel = message.reviewModel || {}; state.summaryModel = message.summaryModel || {};
         state.deciderModel = message.deciderModel || {}; state.explorerModel = message.explorerModel || {}; state.smartAutoRanks = message.smartAutoRanks || [];
         state.accessibility = message.accessibility || state.accessibility;
+        if (typeof message.autoCompactTokens === 'number') state.autoCompactTokens = message.autoCompactTokens;
         applyAccessibility(state.accessibility);
         break;
       case 'syncState': state.sync = message.sync || state.sync; break;

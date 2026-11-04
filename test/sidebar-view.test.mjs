@@ -127,3 +127,24 @@ test('changes panel toggles expanded class instead of hiding the list', () => {
   });
   assert.equal(changes.classList._expanded, true);
 });
+
+test('the Experimental page holds auto compaction and advanced batching, and the context meter is gone', async () => {
+  const html = getSidebarHtml({ cspSource: 'vscode-webview://test' }, initialSidebarState(), {
+    stylesheet: 'vscode-webview://test/sidebar.css', script: 'vscode-webview://test/sidebar.js', font: 'vscode-webview://test/icons.woff2',
+  });
+  assert.match(html, /id="experimental" type="button" role="menuitem"/);
+  assert.match(html, /id="experimental-page"/);
+  assert.match(html, /id="experimental-list"/);
+  assert.doesNotMatch(html, /context-meter/);
+  const source = readFileSync(new URL('../media/sidebar.js', import.meta.url), 'utf8');
+  assert.match(source, /key: 'autoCompact'/);
+  assert.match(source, /key: 'batching'/);
+  assert.match(source, /type: 'saveAutoCompactTokens'/);
+  assert.match(source, /tool\.children\?\.length/);
+  const { normalizeCompactTokens, DEFAULT_COMPACT_TOKENS } = await import('../dist/sidebar/view.mjs');
+  assert.equal(DEFAULT_COMPACT_TOKENS, 70000);
+  assert.equal(normalizeCompactTokens(undefined), 70000);
+  assert.equal(normalizeCompactTokens(5), 20000);
+  assert.equal(normalizeCompactTokens('91234'), 91000);
+  assert.equal(normalizeCompactTokens(9e9), 500000);
+});

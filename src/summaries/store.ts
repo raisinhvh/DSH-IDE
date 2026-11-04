@@ -24,15 +24,15 @@ export interface SummaryOptions {
 
 export const SUMMARY_TOOL = {
   name: 'read_file_summaries',
-  description: 'Read short summaries of workspace files (purpose and bare function, class and type definitions) instead of whole files. Pass paths relative to the working copy. For a file, a missing or out-of-date summary is written before the reply, which can take a few seconds. A folder (or ".") gives a brief overview: its subfolders, and each file directly in it with the first line of its summary; files never summarized show only their name. Read the file itself when you need exact code, and before editing it.',
+  description: 'Summaries of workspace files (purpose plus bare function, class and type definitions). A missing or stale summary is written first, which can take seconds. A folder (or ".") lists its subfolders and each file with its summary\'s first line.',
   inputSchema: {
     type: 'object',
-    properties: { paths: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'Files or folders, relative to the working copy.' } },
+    properties: { paths: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'Relative to the working copy.' } },
     required: ['paths'],
   },
 };
 
-export const SUMMARY_INSTRUCTIONS = 'DSH file summaries: read_file_summaries on the dsh-delegate MCP server returns short summaries of workspace files (purpose and bare definitions). Summaries are your primary way to learn the codebase. Check read_file_summaries before reading whole files, and pass several files in one call. A folder path gives only a brief one-line-per-file overview of what is directly in it; ask for the files themselves to get full summaries. Read a whole file only when it is absolutely necessary: when you are about to edit it, or when you need exact code the summary does not give. Do not read files just to explore or to understand what they do; find candidate files with search tools and check their summaries instead. Never read the same file twice unless it has changed since you read it.';
+export const SUMMARY_INSTRUCTIONS = 'DSH file summaries: read_file_summaries gives each file\'s purpose and definitions. Check it (several files per call) before reading whole files; find candidates with search first. Read a whole file only to edit it or for exact code the summary lacks, and never twice unless it changed.';
 
 const MAX_FILE_CHARS = 150_000;
 const BATCH_CHARS = 120_000;

@@ -26,7 +26,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "build": "esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/extension.js --external:vscode --external:@deepseek-ai/dsh --external:esbuild && esbuild src/toolpacks/worker.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/toolpack-worker.js && esbuild src/mcp/delegateServer.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/delegate-server.js",
-    "build:test": "esbuild src/review/hunks.ts src/review/guards.ts src/review/renames.ts src/sidebar/view.ts src/sidebar/questions.ts src/update/version.ts src/update/plan.ts src/update/extensionUpdate.ts src/toolpacks/registry.ts src/runtime/models.ts src/runtime/naming.ts src/runtime/limits.ts src/instructions/store.ts src/instructions/share.ts src/sync/configSync.ts src/slash/registry.ts src/goal/parse.ts src/goal/prompts.ts src/goal/runner.ts src/summaries/store.ts src/toolpacks/access.ts src/runtime/handoff.ts src/runtime/explorer.ts src/runtime/promptPrefix.ts src/runtime/delegation.ts src/runtime/checkpoint.ts src/runtime/keepAlive.ts src/runtime/editorContext.ts src/runtime/smartAuto.ts src/runtime/imageGen.ts src/runtime/piAi.ts --bundle --platform=node --format=esm --target=node20 --outdir=dist --out-extension:.js=.mjs && esbuild src/toolpacks/worker.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/toolpack-worker.js",
+    "build:test": "esbuild src/review/hunks.ts src/review/guards.ts src/review/renames.ts src/sidebar/view.ts src/sidebar/questions.ts src/update/version.ts src/update/plan.ts src/update/extensionUpdate.ts src/toolpacks/registry.ts src/runtime/models.ts src/runtime/naming.ts src/runtime/limits.ts src/instructions/store.ts src/instructions/share.ts src/sync/configSync.ts src/slash/registry.ts src/goal/parse.ts src/goal/prompts.ts src/goal/runner.ts src/summaries/store.ts src/toolpacks/access.ts src/runtime/handoff.ts src/runtime/batch.ts src/runtime/explorer.ts src/runtime/promptPrefix.ts src/runtime/delegation.ts src/runtime/checkpoint.ts src/runtime/keepAlive.ts src/runtime/editorContext.ts src/runtime/smartAuto.ts src/runtime/imageGen.ts src/runtime/piAi.ts --bundle --platform=node --format=esm --target=node20 --outdir=dist --out-extension:.js=.mjs && esbuild src/toolpacks/worker.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/toolpack-worker.js",
     "test": "npm run build:test && node test/run.mjs",
     "package": "npm run check && npm run build && vsce package --allow-missing-repository"
   },
@@ -158,6 +158,26 @@
           "default": "raisinhvh/DSH-IDE",
           "scope": "application",
           "description": "Public GitHub repository hosting DSH-IDE releases, in owner/repository form. Leave empty to disable DSH-IDE update checks."
+        },
+        "dsh.experimental.autoCompact": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "markdownDescription": "Experimental. When a chat's conversation passes `#dsh.experimental.autoCompactTokens#` (not counting the session's system prompt and tools), the next message starts a fresh agent session from a summary plus the latest exchange. The full transcript, including which tools each turn used, stays readable and searchable through `read_chat_history`. Claude and Codex sessions can be resumed in full from the notice."
+        },
+        "dsh.experimental.autoCompactTokens": {
+          "type": "number",
+          "default": 70000,
+          "minimum": 20000,
+          "maximum": 500000,
+          "scope": "application",
+          "description": "Experimental. Conversation size, in tokens, at which auto compaction starts a fresh session."
+        },
+        "dsh.experimental.batching": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "description": "Experimental. Gives agents a batch tool that runs several DSH tool calls (subagents, file summaries, chat history, toolpacks) plus batch-only read_file, search and list_dir in parallel, and returns one combined result."
         },
         "dsh.features.activityRail": {
           "type": "boolean",
