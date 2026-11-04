@@ -66,7 +66,7 @@ export function accessibilityStyle(value: SidebarAccessibility): { vars: Record<
   };
 }
 export type SidebarFeatureKey = 'activityRail' | 'autoName' | 'shareRules' | 'editorContext' | 'reduceMotion' | 'updateChecks' | 'mirror' | 'reviewAgent' | 'fileSummaries' | 'smartAuto'
-  | 'autoCompact' | 'batching';
+  | 'autoCompact' | 'batching' | 'trimTools';
 export type SidebarFeatures = Record<SidebarFeatureKey, boolean>;
 /** Model that writes chat titles; an empty model keeps the first-message title. */
 export interface SidebarNameModel { model?: string; effort?: string; speed?: string }
@@ -378,7 +378,7 @@ export interface SidebarViewState {
   error?: string;
 }
 
-export const defaultFeatures = (): SidebarFeatures => ({ activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: true, smartAuto: false, autoCompact: false, batching: false });
+export const defaultFeatures = (): SidebarFeatures => ({ activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: true, smartAuto: false, autoCompact: false, batching: false, trimTools: true });
 
 /** Auto compaction threshold: tokens of conversation, not counting the session's system prompt and tools. */
 export const DEFAULT_COMPACT_TOKENS = 70_000;
@@ -434,7 +434,7 @@ export function getSidebarHtml(
         <div class="settings-separator" role="separator"></div>
         <button class="settings-item" id="customize" type="button" role="menuitem"><span class="symbol">toggle_on</span><span class="settings-item-copy"><span class="settings-item-title">Customize</span><span class="settings-item-desc">Turn features on or off</span></span></button>
         <button class="settings-item" id="accessibility" type="button" role="menuitem"><span class="symbol">accessibility_new</span><span class="settings-item-copy"><span class="settings-item-title">Accessibility</span><span class="settings-item-desc">Text size, spacing, contrast, motion</span></span></button>
-        <button class="settings-item" id="experimental" type="button" role="menuitem"><span class="symbol">science</span><span class="settings-item-copy"><span class="settings-item-title">Experimental</span><span class="settings-item-desc">Auto compaction, advanced batching</span></span></button>
+        <button class="settings-item" id="experimental" type="button" role="menuitem"><span class="symbol">science</span><span class="settings-item-copy"><span class="settings-item-title">Experimental</span><span class="settings-item-desc">Compaction, batching, tool trimming</span></span></button>
         <div class="settings-separator" role="separator"></div>
         <button class="settings-item" id="sync" type="button" role="menuitem"><span class="symbol">cloud_sync</span><span class="settings-item-copy"><span class="settings-item-title">Sync</span><span class="settings-item-desc">Back up your config to GitHub</span></span></button>
       </div>

@@ -120,7 +120,7 @@ const FEATURE_SETTINGS: Record<SidebarFeatureKey, string> = {
   activityRail: 'features.activityRail', autoName: 'features.autoName', shareRules: 'features.shareRules', editorContext: 'features.editorContext',
   reduceMotion: 'features.reduceMotion', updateChecks: 'updates.check', mirror: 'runtime.mirror', reviewAgent: 'features.reviewAgent',
   fileSummaries: 'features.fileSummaries', smartAuto: 'features.smartAuto',
-  autoCompact: 'experimental.autoCompact', batching: 'experimental.batching',
+  autoCompact: 'experimental.autoCompact', batching: 'experimental.batching', trimTools: 'experimental.trimTools',
 };
 type ModelSettingKey = 'nameModel' | 'reviewModel' | 'summaryModel' | 'deciderModel' | 'explorerModel';
 type ResolvedRoute = ResolvedModel | { model: ModelEntry } | { model: ModelEntry; oauthAccount: OAuthCliAccount };
@@ -1986,7 +1986,8 @@ class ExtensionHost implements vscode.Disposable {
       record.pingsSent = (record.pingsSent || 0) + 1;
       chat.ping = (async () => {
         try {
-          await chat.cli.prompt({ account, cwd: chat.mirror.cwd, backend: record.backend,
+          // The same tool list as the chat's turns, or the ping would miss the cache it is meant to keep warm.
+          await chat.cli.prompt({ account, cwd: chat.mirror.cwd, backend: record.backend, trimTools: this.feature('trimTools'),
             system: this.agentInstructions(chat, !!this.delegateConfig(chat.ownerId)), prompt: '(keep-alive: reply with OK only)',
             sessionId: record.cliSessionId, effort: 'low', speed: record.smartAuto ? undefined : this.choiceFor(this.availableModel(record.modelName)).speed,
             delegate: this.delegateConfig(chat.ownerId), onText: () => {}, onTool: () => {},
@@ -2025,7 +2026,7 @@ class ExtensionHost implements vscode.Disposable {
   private async promptPooled(cli: OAuthCliRuntime, turn: CliTurn, cancelled: () => boolean,
     retarget?: (next: OAuthCliAccount, failed: OAuthCliAccount) => Promise<Partial<CliTurn>> | Partial<CliTurn>): Promise<string | undefined> {
     const pool = this.accountPool(turn.account);
-    let current = { ...turn, account: pool[0] };
+    let current = { ...turn, trimTools: turn.trimTools ?? this.feature('trimTools'), account: pool[0] };
     if (current.account.id !== turn.account.id) {
       if (!current.lean) await this.shareGlobalInstructions(current.account);
       current = { ...current, sessionId: undefined, ...(await retarget?.(current.account, turn.account)) };

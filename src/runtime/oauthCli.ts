@@ -27,6 +27,8 @@ export interface CliTurn {
   cacheTtl?: '5m' | '1h';
   /** Reports Claude rate limit updates. */
   onRateLimit?: (info: unknown) => void;
+  /** Drop built-in Claude and Codex tools that cannot work inside DSH or that DSH replaces (TRIMMED_CLAUDE_TOOLS, Codex goals). */
+  trimTools?: boolean;
   /** Reports token usage once per Claude result event. Errors thrown here are ignored. */
   onUsage?(usage: TurnUsage): void;
   /** Prompt size of each main-conversation request as it is made (input + cached). Errors thrown here are ignored. */
@@ -69,6 +71,25 @@ export interface TurnUsage {
   context?: number;
 }
 
+/** Native subagents, which DSH replaces with delegate_task. Always off. */
+export const NATIVE_AGENT_TOOLS = ['Agent', 'Task'];
+
+/**
+ * Claude Code tools that cannot work inside DSH or that DSH replaces. Removing them takes their definitions out of
+ * every request; names a Claude Code version does not have are ignored.
+ */
+export const TRIMMED_CLAUDE_TOOLS = [
+  // Native multi-agent work; DSH runs subagents through delegate_task.
+  'Workflow', 'SendMessage', 'ListAgents',
+  // Prompts scheduled into the session later; the claude process exits after every DSH turn, so they never fire.
+  'ScheduleWakeup', 'CronCreate', 'CronDelete', 'CronList',
+  // Worktrees would move work out of the working copy DSH reviews.
+  'EnterWorktree', 'ExitWorktree',
+  // Cards and pages that only claude.ai shows; DSH's chat cannot display them (it has send_media for files).
+  'SendUserFile', 'ReportFindings', 'ShowOnboardingRolePicker', 'ReadNotifications', 'Artifact', 'ArtifactComments', 'ArtifactData', 'DesignSync',
+  'SuggestConnectors', 'SuggestPluginInstall', 'SuggestSkills',
+];
+
 /** System text for lean one-shots, which replaces Claude Code's whole system prompt. */
 export const LEAN_SYSTEM = 'Reply with only what the request asks for. Do not use tools.';
 
@@ -110,7 +131,7 @@ export function claudeArgs(turn: CliTurn): string[] {
     '--print', ...claudeSpeedSettings(turn.speed),
     '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
     '--permission-prompt-tool', 'stdio',
-    '--disallowedTools', 'Agent,Task',
+    '--disallowedTools', [...NATIVE_AGENT_TOOLS, ...(turn.trimTools ? TRIMMED_CLAUDE_TOOLS : [])].join(','),
     '--append-system-prompt', turn.system ?? delegationInstructions(canDelegate(turn.delegate)),
     ...bridge,
     '--include-partial-messages',

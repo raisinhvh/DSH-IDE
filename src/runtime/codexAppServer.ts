@@ -38,7 +38,9 @@ export class CodexAppServerRuntime {
       '-c', 'mcp_servers.dsh-delegate.supports_parallel_tool_calls=true',
       '-c', 'mcp_servers.dsh-delegate.enabled=true',
     ] : [];
-    const child = spawn(cliCommand('codex-cli'), [...delegateArgs, '--disable', 'multi_agent', 'app-server', '--listen', 'stdio://'], {
+    // Codex goals duplicate DSH's /job runner. -c, unlike --disable, is ignored by a Codex that does not know the feature.
+    const trimArgs = turn.trimTools ? ['-c', 'features.goals=false'] : [];
+    const child = spawn(cliCommand('codex-cli'), [...delegateArgs, ...trimArgs, '--disable', 'multi_agent', 'app-server', '--listen', 'stdio://'], {
       cwd: turn.cwd, env: cliEnv(turn.account), windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.child = child;

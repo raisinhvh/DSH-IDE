@@ -196,3 +196,21 @@ test('Codex marks each agent message so text around hidden tool lookups is never
     assert.deepEqual(events, ['break', 'text:I will check.', 'break', 'text:Yes.']);
   } finally { codexItems = []; }
 });
+
+test('trimming built-in tools drops unusable Claude tools and Codex goals, and never touches core tools', async () => {
+  const claude = new OAuthCliRuntime().prompt(turn('claude-cli', { trimTools: true }));
+  const claudeLaunch = launches.at(-1);
+  const denied = claudeLaunch.args[claudeLaunch.args.indexOf('--disallowedTools') + 1].split(',');
+  for (const tool of ['Agent', 'Task', 'Workflow', 'SendMessage', 'ScheduleWakeup', 'CronCreate', 'EnterWorktree', 'Artifact', 'SendUserFile']) assert.ok(denied.includes(tool), tool);
+  for (const tool of ['Bash', 'Read', 'Edit', 'Write', 'Skill', 'ToolSearch', 'WebFetch', 'WebSearch', 'AskUserQuestion', 'TaskStop', 'Monitor', 'TodoWrite']) assert.ok(!denied.includes(tool), tool);
+  claudeLaunch.child.emit('close', 0);
+  await claude;
+
+  await new OAuthCliRuntime().prompt(turn('codex-cli', { trimTools: true }));
+  const trimmed = launches.at(-1).args;
+  assert.equal(trimmed[trimmed.indexOf('features.goals=false') - 1], '-c');
+  // --disable would fail outright on a Codex that does not know the feature.
+  assert.ok(!trimmed.includes('goals'));
+  await new OAuthCliRuntime().prompt(turn('codex-cli'));
+  assert.ok(!launches.at(-1).args.includes('features.goals=false'));
+});

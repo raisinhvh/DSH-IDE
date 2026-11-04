@@ -41,6 +41,9 @@ test('a normal Claude turn keeps the arguments it had before the refactor', () =
   ]);
   assert.deepEqual(claudeArgs(turn({ speed: 'Fast', backend: 'default' })).slice(0, 3), ['--print', '--settings', '{"fastMode":true}']);
   assert.ok(!claudeArgs(turn({ backend: 'default' })).includes('--model'));
+  const trimmed = claudeArgs(turn({ trimTools: true }));
+  assert.match(trimmed[trimmed.indexOf('--disallowedTools') + 1], /^Agent,Task,Workflow,.*Artifact/);
+  assert.ok(!claudeArgs(turn({ lean: true, trimTools: true })).includes('--disallowedTools'));
 });
 
 test('a lean turn loads no Claude Code prompt, tools, MCP servers or session', () => {

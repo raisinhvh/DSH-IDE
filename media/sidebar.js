@@ -12,7 +12,7 @@
   state.runStates ||= {};
   state.subagentProfiles ||= [];
   state.instructions ||= [];
-  state.features ||= { activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: false, smartAuto: false, autoCompact: false, batching: false };
+  state.features ||= { activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: false, smartAuto: false, autoCompact: false, batching: false, trimTools: true };
   state.nameModel ||= {};
   state.reviewModel ||= {};
   state.summaryModel ||= {};
@@ -1853,6 +1853,7 @@
 
   const experimentalInfo = [
     { key: 'autoCompact', icon: 'compress', title: 'Auto compaction', desc: 'Once a chat\'s conversation passes the limit below (not counting the system prompt and tools), your next message starts a fresh session from a summary and the latest exchange. The agent can still read and search the whole chat, including which tools each turn used.' },
+    { key: 'trimTools', icon: 'content_cut', title: 'Trim built-in tools', desc: 'Leaves out Claude Code and Codex tools that cannot work in DSH or that DSH replaces: native subagents and workflows, scheduled wake-ups, worktrees, claude.ai artifacts and cards, and Codex goals. Saves several thousand tokens on every request. Turn off to get them back.' },
     { key: 'batching', icon: 'stacks', title: 'Advanced batching', desc: 'Gives agents a batch tool: several DSH tool calls (subagents, file summaries, chat history, toolpacks) and batch-only file reads and searches run in parallel and come back as one result. Shown as one card with a row per call.' },
   ];
   let experimentalKey = '';

@@ -173,6 +173,12 @@
           "scope": "application",
           "description": "Experimental. Conversation size, in tokens, at which auto compaction starts a fresh session."
         },
+        "dsh.experimental.trimTools": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "Experimental. Leave out Claude Code and Codex built-in tools that cannot work inside DSH or that DSH replaces (native subagents and workflows, scheduled wake-ups and cron, worktrees, claude.ai artifacts and cards, Codex goals), so their definitions are not sent with every request."
+        },
         "dsh.experimental.batching": {
           "type": "boolean",
           "default": false,
