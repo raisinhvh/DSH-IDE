@@ -24,7 +24,7 @@ const SKIP_DIRS = new Set(['.git', 'node_modules', '.dsh', '.hg', '.svn', '__pyc
 export const MAX_FOREACH_RUNS = 50;
 const FOREACH_CONCURRENCY = 4;
 
-export const BATCH_INSTRUCTIONS = `DSH batch: ${BATCH_TOOL} runs several calls in one go and returns one combined result. Prefer it whenever you would make two or more calls to dsh-delegate or toolpack tools or reads, including chains: an argument "{{1.id}}" is a field of call 1's result (the call waits for it), after:[1] only orders, and forEach:"{{1.nodes}}" runs a call once per item ({{item.id}}). Inside a batch only, read_file {path, offset?, limit?}, search {pattern, path?, glob?, ignore_case?, max_results?} and list_dir {path?} read the working copy.`;
+export const BATCH_INSTRUCTIONS = `DSH batch: ${BATCH_TOOL} runs several calls in one go and returns one combined result. From the first step of a task, put any two or more file reads, searches or listings in one ${BATCH_TOOL} instead of separate native read, grep, glob or shell calls. Read a file natively only right before editing it (edit tools require that), and use the shell only to run commands. Do the same for two or more dsh-delegate or toolpack calls, including chains: an argument "{{1.id}}" is a field of call 1's result (the call waits for it), after:[1] only orders, and forEach:"{{1.nodes}}" runs a call once per item ({{item.id}}). Inside a batch only, read_file {path, offset?, limit?}, search {pattern, path?, glob?, ignore_case?, max_results?} and list_dir {path?} read the working copy.`;
 
 export const BATCH_TOOL_SCHEMA = {
   name: BATCH_TOOL,
@@ -34,6 +34,8 @@ export const BATCH_TOOL_SCHEMA = {
 - forEach: "{{N.path}}" runs the call once per item of that list (at most ${MAX_FOREACH_RUNS}); "{{item}}" or "{{item.id}}" is the current item.
 A call only refers to calls before it. When a call it depends on fails, it is skipped. Identical calls run once.`,
   annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  // Keep it out of Claude Code's tool search: a deferred batch loses to the native Read and Grep that are already loaded.
+  _meta: { 'anthropic/alwaysLoad': true },
   inputSchema: {
     type: 'object',
     properties: {

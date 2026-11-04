@@ -31,7 +31,7 @@ async function tools(): Promise<Json[]> {
         custom = Array.isArray(described.tools) ? described.tools as Json[] : [];
         batching = described.batching === true;
     } catch { /* the host may be unavailable; fall back to a generic description */ }
-    const customTools = custom.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema }));
+    const customTools = custom.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, ...(tool._meta ? { _meta: tool._meta } : {}) }));
     if (toolpacksOnly) return customTools;
     const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
     return [

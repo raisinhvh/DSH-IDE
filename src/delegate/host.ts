@@ -4,7 +4,7 @@ import type { ToolpackResult } from '../toolpacks/types';
 
 export interface DelegateAgentInfo { name: string; description?: string; mode: 'read-only' | 'edit'; model: string }
 export interface DelegateResult extends ToolpackResult { skipListChanged?: boolean }
-export interface DelegateToolInfo { name: string; description: string; inputSchema: Record<string, unknown> }
+export interface DelegateToolInfo { name: string; description: string; inputSchema: Record<string, unknown>; _meta?: Record<string, unknown> }
 
 export interface DelegateHandlers {
     describe(owner: string): DelegateAgentInfo[];

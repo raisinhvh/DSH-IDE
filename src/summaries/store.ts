@@ -30,6 +30,8 @@ export const SUMMARY_TOOL = {
     properties: { paths: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'Relative to the working copy.' } },
     required: ['paths'],
   },
+  // Keep it out of Claude Code's tool search: a deferred tool loses to the native Read that is already loaded.
+  _meta: { 'anthropic/alwaysLoad': true },
 };
 
 export const SUMMARY_INSTRUCTIONS = 'DSH file summaries: read_file_summaries gives each file\'s purpose and definitions. Check it (several files per call) before reading whole files; find candidates with search first. Read a whole file only to edit it or for exact code the summary lacks, and never twice unless it changed.';

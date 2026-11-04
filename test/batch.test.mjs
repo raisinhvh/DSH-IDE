@@ -3,9 +3,10 @@ import { strict as assert } from 'node:assert';
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { batchValue, callDependencies, callLabel, executeBatch, fairShares, formatBatchResult, globPattern, isBatchTool, MAX_BATCH_CHARS, parseBatchCalls, resolvePlaceholders, runBatchFileTool, uniqueBatchCalls } from '../dist/runtime/batch.mjs';
+import { BATCH_TOOL_SCHEMA, batchValue, callDependencies, callLabel, executeBatch, fairShares, formatBatchResult, globPattern, isBatchTool, MAX_BATCH_CHARS, parseBatchCalls, resolvePlaceholders, runBatchFileTool, uniqueBatchCalls } from '../dist/runtime/batch.mjs';
 import { chatHistoryReply, formatMessages, handoffSummaryPrompt, toolLine } from '../dist/runtime/handoff.mjs';
 import { buildPartsHandoff, parsePartsReply, partsPrompt, partWindows } from '../dist/runtime/transcriptParts.mjs';
+import { SUMMARY_TOOL } from '../dist/summaries/store.mjs';
 
 test('batch calls are validated, unqualified and may not nest', () => {
   assert.deepEqual(parseBatchCalls({ calls: [{ tool: 'mcp__dsh-delegate__read_file', args: { path: 'a' } }, { tool: 'list_subagents' }] }),
@@ -191,4 +192,9 @@ test('transcript parts are split where the model says, within the window', () =>
   const handoff = buildPartsHandoff('chat', history.slice(0, 4), [{ from: 0, to: 2, title: 'Start', summary: 'Did a thing.' }]);
   assert.match(handoff, /\.dsh\/transcripts\/chat\//);
   assert.match(handoff, /- part-01\.md \(messages 1-2\), Start: Did a thing\./);
+});
+
+test('batch and file summaries are never deferred behind Claude Code tool search', () => {
+  assert.equal(BATCH_TOOL_SCHEMA._meta['anthropic/alwaysLoad'], true);
+  assert.equal(SUMMARY_TOOL._meta['anthropic/alwaysLoad'], true);
 });
