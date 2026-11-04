@@ -40,6 +40,7 @@ import { FileSummaries, readToolPath, SUMMARY_INSTRUCTIONS, SUMMARY_TOOL } from 
 import { shouldKeepAlive } from './runtime/keepAlive';
 import { Checkpoint, checkpointHandoff, parseCheckpoint } from './runtime/checkpoint';
 import { buildHandoff, CHAT_HISTORY_TOOL, chatHistoryReply, ChatMessage, handoffSummaryPrompt, KEEP_WITH_TOOL, MAX_TURN_TOOLS, toolLine } from './runtime/handoff';
+import { findGit, GIT_DOWNLOAD_PAGE, installGit } from './runtime/git';
 import { globalMemoryRoot, isMemoryPath, memoryInstructions, memorySyncNeeded, repoMemoryPath, syncGlobalMemory } from './runtime/memory';
 import { BATCH_INSTRUCTIONS, BatchCall, BatchOutcome, callLabel, formatBatchResult, isBatchFileTool, isBatchTool, parseBatchCalls, runBatchFileTool } from './runtime/batch';
 import { describePackTools, LOAD_TOOLPACK, loadToolpackTool, packCommands, RUN_TOOLPACK_TOOL, runToolpackTool } from './toolpacks/access';
@@ -101,6 +102,7 @@ const MODEL_CHOICES_KEY = 'dsh.ide.modelChoices.v1';
 const APPROVAL_KEY = 'dsh.ide.approvalMode.v1';
 const TRANSCRIPTS_KEY = 'dsh.ide.transcripts.v1';
 const TIMELINES_KEY = 'dsh.ide.timelines.v1';
+const SYNC_OFFER_KEY = 'dsh.ide.syncOffer.v1';
 type SavedTimeline = { timeline: SidebarTimelineItem[]; subagents: Record<string, SidebarSubagent> };
 const PROVIDER_USAGE_URLS = new Map([
   ['codex-cli', 'https://chatgpt.com/settings/usage?tab=overview'],
@@ -281,7 +283,14 @@ class ExtensionHost implements vscode.Disposable {
       }, 300);
     }, vscode.Uri.joinPath(context.globalStorageUri, 'media'));
     this.sync = new ConfigSync(context, {
-      roots: () => ({ ...this.instructionRoots(), toolpacks: join(context.globalStorageUri.fsPath, 'toolpacks') }),
+      roots: () => ({ ...this.instructionRoots(), toolpacks: join(context.globalStorageUri.fsPath, 'toolpacks'), memory: this.memorySettings().global }),
+      git: () => this.gitPath(),
+      adoptMemoryRoot: async () => {
+        const folder = join(homedir(), 'DSH Memory');
+        await vscode.workspace.getConfiguration('dsh').update('memory.globalPath', folder, vscode.ConfigurationTarget.Global);
+        this.refreshMemory();
+        return folder;
+      },
       accounts: () => [...this.oauthAccounts.list(), ...this.accounts.list()].map(({ id, provider, label }) => ({ id, provider, label })),
       toolpacks: this.toolpacks,
       log: line => this.output.appendLine(line),
@@ -326,7 +335,7 @@ class ExtensionHost implements vscode.Disposable {
     // Toolpacks must be loaded before a startup sync can install or remove them.
     // Models saved before they moved to settings must be in settings to sync.
     void this.models.migrate().catch(error => this.output.appendLine(`Could not move saved models to settings: ${String(error)}`));
-    this.ensureNode().then(async () => { await this.refreshDependencies(); await this.toolpacks.start(); this.sync.start(); }).catch(error => {
+    this.ensureNode().then(async () => { await this.refreshDependencies(); await this.toolpacks.start(); this.sync.start(); void this.offerSync(); }).catch(error => {
       this.output.appendLine(`Dependency setup failed: ${String(error)}`);
       void vscode.window.showErrorMessage(`DSH setup failed: ${error instanceof Error ? error.message : String(error)}`);
     });
@@ -1410,12 +1419,12 @@ class ExtensionHost implements vscode.Disposable {
   }
 
   private async syncAction(action: Extract<SidebarWebviewMessage, { type: 'syncAction' }>['action']): Promise<void> {
-    if (action === 'connect') await this.sync.connect();
+    if (action === 'connect') await this.connectSync();
     else if (action === 'upload') await this.sync.uploadNow();
     else if (action === 'download') await this.sync.downloadNow();
     else if (action === 'disconnect') await this.sync.disconnect();
     else if (action === 'keepRemote' || action === 'keepLocal') await this.sync.resolve(action === 'keepLocal' ? 'local' : 'remote');
-    else if (action === 'openGist' && this.sync.gistUrl?.startsWith('https://gist.github.com/')) await vscode.env.openExternal(vscode.Uri.parse(this.sync.gistUrl));
+    else if (action === 'openRepo' && this.sync.repoUrl?.startsWith('https://github.com/')) await vscode.env.openExternal(vscode.Uri.parse(this.sync.repoUrl));
   }
 
   private async refreshInstructions(): Promise<void> {
@@ -2088,6 +2097,60 @@ class ExtensionHost implements vscode.Disposable {
     ].filter(Boolean).join('\n');
   }
 
+  /** A working git: dsh.runtime.gitPath, VS Code's git.path, PATH, the usual install folders, or the copy DSH installed. */
+  private async gitPath(): Promise<string | undefined> {
+    const configured = vscode.workspace.getConfiguration('git').get<unknown>('path');
+    const vscodeGit = Array.isArray(configured) ? configured.filter((item): item is string => typeof item === 'string') : typeof configured === 'string' ? [configured] : [];
+    return findGit(this.context.globalStorageUri.fsPath, [vscode.workspace.getConfiguration('dsh').get<string>('runtime.gitPath'), ...vscodeGit]);
+  }
+
+  /** Git for sync, offering to install it when it is missing. Undefined when the user declines or it cannot be installed. */
+  private async ensureGit(): Promise<string | undefined> {
+    const found = await this.gitPath();
+    if (found) return found;
+    if (process.platform !== 'win32') {
+      const choice = await vscode.window.showWarningMessage('Git is needed to sync with GitHub, and it is not installed.', {
+        modal: true, detail: 'Install Git with your package manager (or from git-scm.com), then choose Connect on the Sync page again.',
+      }, 'Open download page');
+      if (choice === 'Open download page') await vscode.env.openExternal(vscode.Uri.parse(GIT_DOWNLOAD_PAGE));
+      return undefined;
+    }
+    const choice = await vscode.window.showWarningMessage('Git is needed to sync with GitHub, and it is not installed. Install it now?', {
+      modal: true, detail: 'DSH downloads MinGit, the portable build of Git for Windows, checks its SHA-256 against the official release, and keeps it in DSH\'s own storage. Nothing else on your PC changes.',
+    }, 'Install Git');
+    if (choice !== 'Install Git') return undefined;
+    try {
+      const git = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Installing Git for DSH sync…' },
+        () => installGit(this.context.globalStorageUri.fsPath));
+      this.output.appendLine(`Installed Git for sync at ${git}.`);
+      return git;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.output.appendLine(`Installing Git failed: ${message}`);
+      const next = await vscode.window.showErrorMessage(`Could not install Git: ${message}`, 'Open download page');
+      if (next === 'Open download page') await vscode.env.openExternal(vscode.Uri.parse(GIT_DOWNLOAD_PAGE));
+      return undefined;
+    }
+  }
+
+  /** Connect from the popup or the Sync page: Git first (installing it if needed), then GitHub. */
+  private async connectSync(): Promise<void> {
+    if (!await this.ensureGit()) return;
+    await this.sync.connect();
+    if (this.sync.connected) await this.context.globalState.update(SYNC_OFFER_KEY, 'connected');
+  }
+
+  /** Asks once (and again a week after "Not now") whether to sync settings and memory through GitHub. */
+  private async offerSync(): Promise<void> {
+    const offer = this.context.globalState.get<string | number>(SYNC_OFFER_KEY);
+    if (this.sync.connected || offer === 'never' || offer === 'connected' || (typeof offer === 'number' && Date.now() < offer)) return;
+    if (!vscode.workspace.isTrusted) return;
+    const choice = await vscode.window.showInformationMessage('Sync memories and settings to GitHub for work across multiple computers?', 'Sync with GitHub', 'Not now', 'Don\'t ask again');
+    if (choice === 'Sync with GitHub') await this.connectSync();
+    else if (choice === 'Don\'t ask again') await this.context.globalState.update(SYNC_OFFER_KEY, 'never');
+    else await this.context.globalState.update(SYNC_OFFER_KEY, Date.now() + 7 * 24 * 60 * 60_000);
+  }
+
   /** The global memory folder on this PC and the repo vault's path in the workspace. */
   private memorySettings(): { global?: string; repo?: string } {
     const config = vscode.workspace.getConfiguration?.('dsh');
@@ -2100,6 +2163,8 @@ class ExtensionHost implements vscode.Disposable {
       const result = await syncGlobalMemory(this.memorySettings().global, chat.mirror.cwd);
       if (result.skipped) this.output.appendLine(`Global memory not synced: ${result.skipped}.`);
       const changed = [...result.saved, ...result.conflicts];
+      // Notes agents saved reach GitHub a few seconds later, as one commit.
+      if (changed.length) this.sync.schedule();
       if (after && changed.length) {
         const conflicts = result.conflicts.length ? `; kept both versions of ${result.conflicts.length} edited elsewhere` : '';
         this.sidebar.postMessage({ type: 'toolEvent', sessionId: chat.record.id, entryId: `tool:${chat.turnEntryId}:memory`, event: {

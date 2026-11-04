@@ -2090,10 +2090,10 @@
     const note = (text, className = 'sync-note') => { const line = document.createElement('p'); line.className = className; line.textContent = text; return line; };
     rebuild(root, () => {
       const status = sync.connected
-        ? settingRow('sync:status', { icon: 'cloud_done', title: 'Connected as ' + (sync.account || 'GitHub'), desc: sync.lastSync ? 'Last synced ' + new Date(sync.lastSync).toLocaleString() : 'Not synced yet' })
-        : settingRow('sync:status', { icon: 'cloud_off', title: 'Not connected', desc: 'Sign in with GitHub. If your account already has a DSH config from another PC, you can download it.' });
+        ? settingRow('sync:status', { icon: 'cloud_done', title: 'Connected as ' + (sync.account || 'GitHub'), desc: (sync.repo ? 'Private repository ' + sync.repo + '. ' : '') + (sync.lastSync ? 'Last synced ' + new Date(sync.lastSync).toLocaleString() : 'Not synced yet') })
+        : settingRow('sync:status', { icon: 'cloud_off', title: 'Not connected', desc: 'Sign in with GitHub. DSH keeps your config in a private dsh-sync repository. If another PC already set it up, both configs are combined and you choose for anything that differs.' });
       status.appendChild(sync.connected
-        ? actions([['Upload now', 'Upload this PC\'s config to GitHub', 'upload'], ['Download', 'Replace this PC\'s config with the GitHub copy', 'download'], ['Open gist', 'Open the config gist on GitHub', 'openGist', 'text-button'], ['Disconnect', 'Stop syncing on this PC (the gist stays on GitHub)', 'disconnect', 'text-button']])
+        ? actions([['Upload now', 'Upload this PC\'s config to GitHub', 'upload'], ['Download', 'Replace this PC\'s config with the GitHub copy', 'download'], ['Open repository', 'Open the dsh-sync repository on GitHub', 'openRepo', 'text-button'], ['Disconnect', 'Stop syncing on this PC (the repository stays on GitHub)', 'disconnect', 'text-button']])
         : actions([['Connect GitHub', 'Sign in with GitHub and start syncing', 'connect', 'primary-button']]));
       if (sync.busy) status.appendChild(note(syncBusy[sync.busy] || 'Working…'));
       if (sync.error) status.appendChild(note(sync.error, 'sync-note sync-error'));

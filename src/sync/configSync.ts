@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
+import { conflictName } from '../runtime/memory';
 
 /** `dsh.*` settings that travel with the config, read from and written to user settings only. */
 export const SYNCED_SETTINGS = [
@@ -12,18 +13,19 @@ export const SYNCED_SETTINGS = [
 ] as const;
 
 /** `dsh.*` settings that stay on each PC because they hold paths to programs installed on it. */
-export const LOCAL_SETTINGS = ['runtime.nodePath', 'runtime.cursorAgentPath', 'runtime.codexPath', 'runtime.claudePath', 'memory.globalPath'] as const;
+export const LOCAL_SETTINGS = ['runtime.nodePath', 'runtime.cursorAgentPath', 'runtime.codexPath', 'runtime.claudePath', 'runtime.gitPath', 'memory.globalPath'] as const;
 
 export const GIST_FILE = 'dsh-config.json';
 export const GIST_DESCRIPTION = 'DSH-IDE config (synced by DSH-IDE; API keys and MCP secrets are not included)';
 
-export interface SyncRoots { dshHome: string; agentsHome: string; toolpacks: string }
+/** `memory` is the global memory folder on this PC, when one is set. */
+export interface SyncRoots { dshHome: string; agentsHome: string; toolpacks: string; memory?: string }
 export interface SyncFile { data: string; encoding?: 'base64' }
 export interface ConfigBundle {
   format: 'dsh-config';
   version: 1;
   settings: Record<string, unknown>;
-  /** Keyed by `dsh/AGENTS.md`, `dsh/skills/...` or `agents/skills/...`. */
+  /** Keyed by `dsh/AGENTS.md`, `dsh/skills/...`, `agents/skills/...` or `memory/...`. */
   files: Record<string, SyncFile>;
   toolpacks: Record<string, ToolpackBundle>;
 }
@@ -35,6 +37,11 @@ const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_TOTAL_BYTES = 20 * 1024 * 1024;
 const MAX_FILES = 2000;
 const MAX_DEPTH = 8;
+/** Memory is notes, scripts and images, so it may be larger and deeper than rules and skills. */
+const MAX_MEMORY_FILE_BYTES = 10 * 1024 * 1024;
+const MAX_MEMORY_BYTES = 50 * 1024 * 1024;
+const MAX_MEMORY_FILES = 5000;
+const MAX_MEMORY_DEPTH = 16;
 const SKIPPED_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.venv', 'venv', '__pycache__']);
 const PACK_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 /** Same rule as TOOLPACK_SYNC_FILE: a plain .json name directly in the pack's data folder. */
@@ -65,6 +72,10 @@ export function serializeBundle(bundle: ConfigBundle): string {
 export function parseBundle(text: string): ConfigBundle {
   let value: unknown;
   try { value = JSON.parse(text); } catch { throw new Error('The GitHub config is not valid JSON.'); }
+  return validateBundle(value);
+}
+
+export function validateBundle(value: unknown): ConfigBundle {
   const bundle = value as Partial<ConfigBundle> | null;
   if (!bundle || bundle.format !== 'dsh-config') throw new Error('The GitHub config is not a DSH config.');
   if (bundle.version !== 1) throw new Error(`The GitHub config uses version ${String(bundle.version)}; update DSH-IDE to read it.`);
@@ -72,7 +83,7 @@ export function parseBundle(text: string): ConfigBundle {
   if (!record(bundle.settings) || !record(bundle.files) || !record(bundle.toolpacks)) throw new Error('The GitHub config is incomplete.');
   for (const [path, file] of Object.entries(bundle.files)) {
     if (!record(file) || typeof file.data !== 'string' || (file.encoding !== undefined && file.encoding !== 'base64')) throw new Error(`The GitHub config has an invalid file: ${path}`);
-    syncPath({ dshHome: '/d', agentsHome: '/a', toolpacks: '/t' }, path);
+    syncPath({ dshHome: '/d', agentsHome: '/a', toolpacks: '/t', memory: '/m' }, path);
   }
   for (const [id, pack] of Object.entries(bundle.toolpacks)) {
     if (!PACK_ID.test(id) || !record(pack) || typeof pack.source !== 'string' || typeof pack.enabled !== 'boolean') throw new Error(`The GitHub config has an invalid toolpack: ${id}`);
@@ -90,12 +101,22 @@ export function parseBundle(text: string): ConfigBundle {
  */
 export function mergeBundles(base: ConfigBundle, local: ConfigBundle, remote: ConfigBundle, prefer: 'local' | 'remote' = 'remote'): { bundle: ConfigBundle; conflicts: string[] } {
   const conflicts: string[] = [];
-  const merge = <T>(label: (key: string) => string, b: Record<string, T>, l: Record<string, T>, r: Record<string, T>): Record<string, T> => {
+  const noteConflicts: string[] = [];
+  // A memory note both PCs changed is not a conflict to settle: the GitHub version stays and this PC's is kept beside it.
+  const keepBothNotes = (files: Record<string, SyncFile>): Record<string, SyncFile> => {
+    for (const key of noteConflicts) if (Object.hasOwn(local.files, key)) files[conflictName(key)] = local.files[key];
+    for (const key of noteConflicts) if (Object.hasOwn(remote.files, key)) files[key] = remote.files[key]; else delete files[key];
+    return files;
+  };
+  const merge = <T>(label: (key: string) => string, b: Record<string, T>, l: Record<string, T>, r: Record<string, T>, notes = false): Record<string, T> => {
     const merged: Record<string, T> = {};
     for (const key of [...new Set([...Object.keys(b), ...Object.keys(l), ...Object.keys(r)])].sort()) {
       const [was, mine, theirs] = [b, l, r].map(side => Object.hasOwn(side, key) ? stableJson(side[key]) : undefined);
       let pick = was === theirs && mine !== theirs ? l : r;
-      if (was !== mine && was !== theirs && mine !== theirs) { conflicts.push(label(key)); pick = prefer === 'local' ? l : r; }
+      if (was !== mine && was !== theirs && mine !== theirs) {
+        if (notes && key.startsWith('memory/')) { noteConflicts.push(key); continue; }
+        conflicts.push(label(key)); pick = prefer === 'local' ? l : r;
+      }
       if (Object.hasOwn(pick, key)) merged[key] = pick[key];
     }
     return merged;
@@ -104,7 +125,7 @@ export function mergeBundles(base: ConfigBundle, local: ConfigBundle, remote: Co
     bundle: {
       format: 'dsh-config', version: 1,
       settings: merge(key => `setting dsh.${key}`, base.settings, local.settings, remote.settings),
-      files: merge(key => key.replace(/^dsh\//, '~/.dsh/').replace(/^agents\//, '~/.agents/'), base.files, local.files, remote.files),
+      files: keepBothNotes(merge(key => key.replace(/^dsh\//, '~/.dsh/').replace(/^agents\//, '~/.agents/'), base.files, local.files, remote.files, true)),
       toolpacks: merge(key => `toolpack ${key}`, base.toolpacks, local.toolpacks, remote.toolpacks),
     },
     conflicts,
@@ -115,6 +136,13 @@ export function mergeBundles(base: ConfigBundle, local: ConfigBundle, remote: Co
 export function syncPath(roots: SyncRoots, path: string): string {
   const parts = path.split('/');
   const bad = (): never => { throw new Error(`Refusing to sync unexpected path: ${path}`); };
+  if (parts[0] === 'memory') {
+    if (!roots.memory || parts.length < 2) bad();
+    for (const part of parts.slice(1)) if (!part || part.startsWith('.') || /[\\:*?"<>|\0]/.test(part)) bad();
+    const file = resolve(roots.memory!, ...parts.slice(1));
+    if (!file.startsWith(resolve(roots.memory!) + sep)) bad();
+    return file;
+  }
   const root = parts[0] === 'dsh' ? roots.dshHome : parts[0] === 'agents' ? roots.agentsHome : bad();
   const isRules = parts[0] === 'dsh' && parts.length === 2 && parts[1] === 'AGENTS.md';
   if (!isRules && (parts[1] !== 'skills' || parts.length < 4)) bad();
@@ -126,12 +154,12 @@ export function syncPath(roots: SyncRoots, path: string): string {
   return file;
 }
 
-function encode(buffer: Buffer): SyncFile {
+export function encode(buffer: Buffer): SyncFile {
   const text = buffer.toString('utf8');
   return Buffer.from(text, 'utf8').equals(buffer) ? { data: text } : { data: buffer.toString('base64'), encoding: 'base64' };
 }
 
-const decode = (file: SyncFile): Buffer => file.encoding === 'base64' ? Buffer.from(file.data, 'base64') : Buffer.from(file.data, 'utf8');
+export const decode = (file: SyncFile): Buffer => file.encoding === 'base64' ? Buffer.from(file.data, 'base64') : Buffer.from(file.data, 'utf8');
 
 /** Global rules and skills on this PC, keyed like `ConfigBundle.files`. */
 export async function collectFiles(roots: SyncRoots): Promise<Record<string, SyncFile>> {
@@ -161,6 +189,32 @@ export async function collectFiles(roots: SyncRoots): Promise<Record<string, Syn
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   await walk(join(roots.dshHome, 'skills'), 'dsh/skills', 0);
   await walk(join(roots.agentsHome, 'skills'), 'agents/skills', 0);
+  if (roots.memory) Object.assign(files, await collectMemory(roots.memory));
+  return files;
+}
+
+/** The global memory folder, keyed `memory/<path>`. Hidden entries (.obsidian, .trash, .git) and symlinks are left out. */
+async function collectMemory(root: string): Promise<Record<string, SyncFile>> {
+  const files: Record<string, SyncFile> = {};
+  let count = 0;
+  let bytes = 0;
+  const walk = async (directory: string, path: string, depth: number): Promise<void> => {
+    let entries;
+    try { entries = await fs.readdir(directory, { withFileTypes: true }); }
+    catch { return; }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.isSymbolicLink() || entry.name.startsWith('.') || entry.name === 'node_modules' || /[\\:*?"<>|]/.test(entry.name)) continue;
+      const full = join(directory, entry.name);
+      if (entry.isDirectory()) { if (depth < MAX_MEMORY_DEPTH) await walk(full, `${path}/${entry.name}`, depth + 1); continue; }
+      if (!entry.isFile()) continue;
+      const buffer = await fs.readFile(full);
+      if (buffer.length > MAX_MEMORY_FILE_BYTES) throw new Error(`Memory file ${path.slice('memory/'.length)}/${entry.name} is larger than 10 MB, so it cannot be synced.`);
+      bytes += buffer.length;
+      if (++count > MAX_MEMORY_FILES || bytes > MAX_MEMORY_BYTES) throw new Error('Global memory is too large to sync (limit 5000 files or 50 MB).');
+      files[`${path}/${entry.name}`] = encode(buffer);
+    }
+  };
+  await walk(root, 'memory', 0);
   return files;
 }
 
@@ -172,8 +226,8 @@ export async function applyFiles(roots: SyncRoots, files: Record<string, SyncFil
     if (Object.hasOwn(files, path)) continue;
     const file = syncPath(roots, path);
     await fs.rm(file, { force: true });
-    // Prune folders the deletion emptied, stopping at the skills root.
-    const stop = resolve(path.startsWith('dsh/') ? roots.dshHome : roots.agentsHome, 'skills');
+    // Prune folders the deletion emptied, stopping at the skills or memory root.
+    const stop = path.startsWith('memory/') ? resolve(roots.memory!) : resolve(path.startsWith('dsh/') ? roots.dshHome : roots.agentsHome, 'skills');
     for (let folder = dirname(file); folder.startsWith(stop + sep); folder = dirname(folder)) {
       try { await fs.rmdir(folder); } catch { break; }
     }
@@ -411,4 +465,118 @@ export async function writeConfigGist(token: string, id: string | undefined, bun
   if (id && response.status === 404) return undefined;
   if (!response.ok) throw await failure(response, 'gist upload');
   return info(await response.json() as Record<string, unknown>);
+}
+
+/** The private repository that holds the synced config, one per GitHub account. */
+export const SYNC_REPO = 'dsh-sync';
+const MARKER = 'dsh-sync.json';
+const SETTING_KEY = /^[A-Za-z][A-Za-z0-9.]{0,80}$/;
+const README = `# DSH-IDE sync
+
+DSH-IDE keeps your config here so all your computers share it. API keys, account sign-ins and MCP secret values are never stored here.
+
+- \`settings/\`: one file per \`dsh.*\` setting
+- \`dsh/\` and \`agents/\`: global rules and skills
+- \`toolpacks/\`: toolpacks you uploaded, with their settings and on/off state
+- \`memory/\`: your global memory (notes, conventions and scripts)
+
+Every sync is a commit, so the history shows what changed and when. Edits made here directly reach DSH on its next sync.
+`;
+
+const json = (value: unknown): Buffer => Buffer.from(JSON.stringify(JSON.parse(stableJson(value)), null, 2) + '\n');
+
+/** The repository's files for a config: what a sync commits. */
+export function bundleToTree(bundle: ConfigBundle): Map<string, Buffer> {
+  const tree = new Map<string, Buffer>([[MARKER, json({ format: 'dsh-sync', version: 1 })], ['README.md', Buffer.from(README)]]);
+  for (const [key, value] of Object.entries(bundle.settings)) tree.set(`settings/${key}.json`, json(value));
+  for (const [path, file] of Object.entries(bundle.files)) tree.set(path, decode(file));
+  for (const [id, pack] of Object.entries(bundle.toolpacks)) {
+    tree.set(`toolpacks/${id}/source.ts`, Buffer.from(pack.source));
+    tree.set(`toolpacks/${id}/pack.json`, json({ enabled: pack.enabled, ...(pack.settings ? { settings: pack.settings } : {}) }));
+  }
+  return tree;
+}
+
+/** Reads a config back from the repository's files. Undefined for an empty repository; files DSH does not know are ignored. */
+export function treeToBundle(tree: Map<string, Buffer>): ConfigBundle | undefined {
+  const marker = tree.get(MARKER);
+  if (!marker) {
+    if (!tree.size) return undefined;
+    throw new Error(`The ${SYNC_REPO} repository was not made by DSH-IDE (it has no ${MARKER}).`);
+  }
+  let format: { format?: unknown; version?: unknown };
+  try { format = JSON.parse(marker.toString('utf8')); } catch { throw new Error(`${MARKER} in the sync repository is not valid JSON.`); }
+  if (format.format !== 'dsh-sync') throw new Error(`${MARKER} in the sync repository is not a DSH sync marker.`);
+  if (format.version !== 1) throw new Error(`The sync repository uses version ${String(format.version)}; update DSH-IDE to read it.`);
+  const bundle: ConfigBundle = { format: 'dsh-config', version: 1, settings: {}, files: {}, toolpacks: {} };
+  const packs = new Map<string, { source?: string; meta?: Record<string, unknown> }>();
+  const parse = (path: string, data: Buffer): unknown => {
+    try { return JSON.parse(data.toString('utf8')); } catch { throw new Error(`${path} in the sync repository is not valid JSON.`); }
+  };
+  for (const [path, data] of tree) {
+    const parts = path.split('/');
+    if (parts[0] === 'settings' && parts.length === 2 && parts[1].endsWith('.json')) {
+      const key = parts[1].slice(0, -'.json'.length);
+      if (SETTING_KEY.test(key)) bundle.settings[key] = parse(path, data);
+    } else if (parts[0] === 'dsh' || parts[0] === 'agents' || parts[0] === 'memory') {
+      // Hidden files added on GitHub directly (an .obsidian folder, say) are skipped, as DSH skips them locally.
+      if (parts.slice(1).some(part => part.startsWith('.'))) continue;
+      bundle.files[path] = encode(data);
+    } else if (parts[0] === 'toolpacks' && parts.length === 3 && (parts[2] === 'source.ts' || parts[2] === 'pack.json')) {
+      const pack = packs.get(parts[1]) || {};
+      if (parts[2] === 'source.ts') pack.source = data.toString('utf8');
+      else pack.meta = parse(path, data) as Record<string, unknown>;
+      packs.set(parts[1], pack);
+    }
+  }
+  for (const [id, pack] of packs) {
+    if (pack.source === undefined) continue;
+    const settings = pack.meta?.settings;
+    bundle.toolpacks[id] = { enabled: pack.meta?.enabled !== false, source: pack.source, ...(settings !== undefined ? { settings: settings as ToolpackBundle['settings'] } : {}) };
+  }
+  return validateBundle(bundle);
+}
+
+/** A commit message naming what changed between two configs. */
+export function describeChanges(before: ConfigBundle | undefined, after: ConfigBundle, from: string): string {
+  const empty: ConfigBundle = { format: 'dsh-config', version: 1, settings: {}, files: {}, toolpacks: {} };
+  const was = before ?? empty;
+  const changed = (label: (key: string) => string, b: Record<string, unknown>, a: Record<string, unknown>): string[] =>
+    [...new Set([...Object.keys(b), ...Object.keys(a)])].sort().filter(key => stableJson(b[key]) !== stableJson(a[key])).map(label);
+  const items = [
+    ...changed(key => `dsh.${key}`, was.settings, after.settings),
+    ...changed(key => key, was.files, after.files),
+    ...changed(key => `toolpack ${key}`, was.toolpacks, after.toolpacks),
+  ];
+  const shown = items.slice(0, 3).join(', ');
+  const summary = !items.length ? 'No changes' : items.length > 3 ? `${shown} and ${items.length - 3} more` : shown;
+  return `Sync from ${from}: ${summary}`;
+}
+
+export interface RepoInfo { fullName: string; url: string; cloneUrl: string }
+
+const repoInfo = (repo: Record<string, unknown>): RepoInfo => {
+  if (repo.private !== true) throw new Error(`${String(repo.full_name)} is public. The sync repository must be private, so DSH will not use it.`);
+  const cloneUrl = new URL(String(repo.clone_url));
+  if (cloneUrl.protocol !== 'https:' || cloneUrl.hostname !== 'github.com') throw new Error('Unexpected sync repository address.');
+  return { fullName: String(repo.full_name), url: String(repo.html_url), cloneUrl: cloneUrl.href };
+};
+
+/** The signed-in user's sync repository, if it exists. */
+export async function findSyncRepo(token: string, owner: string, fetchImpl: Fetch = fetch): Promise<RepoInfo | undefined> {
+  const response = await github(token, `/repos/${encodeURIComponent(owner)}/${SYNC_REPO}`, {}, fetchImpl);
+  if (response.status === 404) return undefined;
+  if (!response.ok) throw await failure(response, 'repository lookup');
+  return repoInfo(await response.json() as Record<string, unknown>);
+}
+
+/** Creates the private sync repository under the signed-in user. */
+export async function createSyncRepo(token: string, fetchImpl: Fetch = fetch): Promise<RepoInfo> {
+  const body = JSON.stringify({
+    name: SYNC_REPO, private: true, has_issues: false, has_projects: false, has_wiki: false, auto_init: false,
+    description: 'DSH-IDE settings, rules, skills, toolpacks and memory, synced between computers',
+  });
+  const response = await github(token, '/user/repos', { method: 'POST', body }, fetchImpl);
+  if (!response.ok) throw await failure(response, 'repository creation');
+  return repoInfo(await response.json() as Record<string, unknown>);
 }

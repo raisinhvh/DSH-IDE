@@ -13,7 +13,7 @@ const DOWNLOAD_TIMEOUT = 120_000;
 const PROCESS_TIMEOUT = 180_000;
 const PROVIDERS = new Set(['codex-cli', 'claude-cli', 'cursor-acp']);
 
-function run(executable: string, args: string[], timeout = 15_000, env = process.env): Promise<{ code: number; stdout: string; stderr: string }> {
+export function run(executable: string, args: string[], timeout = 15_000, env = process.env): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { windowsHide: true, shell: false, env, stdio: ['pipe', 'pipe', 'pipe'] });
     child.stdin.end();
@@ -46,7 +46,7 @@ function prependPath(directory: string): void {
   if (current.split(';').some(part => part.replace(/[\\/]+$/, '').toLowerCase() === directory.replace(/[\\/]+$/, '').toLowerCase())) return;
   process.env[key] = `${directory}${current ? `;${current}` : ''}`;
 }
-async function download(url: string, destination: string, maxBytes = DOWNLOAD_LIMIT): Promise<void> {
+export async function download(url: string, destination: string, maxBytes = DOWNLOAD_LIMIT): Promise<void> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT);
   try {

@@ -11,7 +11,9 @@ export type SidebarPage = 'chat' | 'accounts' | 'models' | 'subagents' | 'instru
 export interface SidebarSync {
   connected: boolean;
   account?: string;
-  gistUrl?: string;
+  /** The private dsh-sync repository: owner/name and its GitHub page. */
+  repo?: string;
+  repoUrl?: string;
   auto: boolean;
   lastSync?: number;
   busy?: 'connecting' | 'uploading' | 'downloading' | 'checking';
@@ -123,7 +125,7 @@ export type SidebarWebviewMessage =
   | { type: 'pickMemoryFolder' }
   | { type: 'saveAccessibility'; accessibility: SidebarAccessibility }
   | { type: 'deleteAllSessions' }
-  | { type: 'syncAction'; action: 'connect' | 'upload' | 'download' | 'disconnect' | 'openGist' | 'keepRemote' | 'keepLocal' }
+  | { type: 'syncAction'; action: 'connect' | 'upload' | 'download' | 'disconnect' | 'openRepo' | 'keepRemote' | 'keepLocal' }
   | { type: 'setSyncAuto'; enabled: boolean }
   | { type: 'manageAccounts' }
   | { type: 'refreshAccounts' }
@@ -549,7 +551,7 @@ export function getSidebarHtml(
 </section>
 <section id="sync-page" class="page settings-page" hidden>
   <div class="page-heading"><button class="icon-button back" data-page="chat" title="Back to chat" aria-label="Back to chat"><span class="symbol">arrow_back</span></button><div><h1>Sync</h1></div></div>
-  <p class="helper">Keep your global rules, skills, toolpacks, models, subagents, MCP servers and Customize and Accessibility choices in a secret GitHub gist, so other PCs can use them. API keys, account sign-ins and MCP env and header values stay on this PC.</p>
+  <p class="helper">Keep your global rules, skills, toolpacks, models, subagents, MCP servers and Customize and Accessibility choices and your global memory in a private GitHub repository (dsh-sync), so your other PCs share them. Every sync is a commit, so the history shows what changed. Git is needed; DSH offers to install it. API keys, account sign-ins and MCP env and header values stay on this PC.</p>
   <div id="sync-list" class="scroll-content feature-list"></div>
 </section>
 <script nonce="${nonce}" type="application/json" id="boot-state">${boot}</script>
