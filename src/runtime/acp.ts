@@ -199,6 +199,16 @@ export class AcpRuntime implements vscode.Disposable {
     catch { void this.stop(); }
   }
 
+  /**
+   * Stops the running prompt so the session can take another one, without the deadline that stops the runtime on a
+   * user cancel: ACP has no way to add a message to a running prompt. False when no prompt is running.
+   */
+  public interrupt(sessionId: string): boolean {
+    if (![...this.pending.values()].some(pending => pending.method === 'session/prompt' && pending.sessionId === sessionId)) return false;
+    try { this.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } }); return true; }
+    catch { return false; }
+  }
+
   public async closeSession(sessionId: string): Promise<void> {
     if (this.kind === 'cursor') return;
     await this.request('session/close', { sessionId }, 10000);

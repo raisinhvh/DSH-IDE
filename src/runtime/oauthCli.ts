@@ -155,8 +155,12 @@ export class ClaudeCliRuntime {
   private child?: ChildProcessWithoutNullStreams;
   private cancelled = false;
   private cancelTurn?: () => void;
+  private sayTurn?: (text: string) => boolean;
 
   cancel(): void { this.cancelled = true; this.cancelTurn?.(); }
+
+  /** Adds a user message to the running turn; Claude Code reads it before its next request. False when no turn is running. */
+  say(text: string): boolean { return this.sayTurn?.(text) ?? false; }
 
   async prompt(turn: CliTurn): Promise<string | undefined> {
     if (this.child) throw new Error('An account turn is already running.');
@@ -208,9 +212,15 @@ export class ClaudeCliRuntime {
         clearTimeout(idleTimer);
         this.child = undefined;
         this.cancelTurn = undefined;
+        this.sayTurn = undefined;
         if (error) reject(error); else resolve(sessionId);
       };
       this.cancelTurn = () => { terminateProcessTree(child); finish(); };
+      this.sayTurn = text => {
+        if (done || this.cancelled || turnOver || child.stdin.writableEnded || child.stdin.destroyed) return false;
+        child.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text }] } }) + '\n');
+        return true;
+      };
       const emit = (value: string): void => {
         if (!value) return;
         if (value.startsWith(emitted)) { turn.onText(value.slice(emitted.length)); emitted = value; }
@@ -399,6 +409,8 @@ export class OAuthCliRuntime extends ClaudeCliRuntime {
   private readonly codexRuntime = new CodexAppServerRuntime();
 
   override cancel(): void { super.cancel(); this.codexRuntime.cancel(); }
+
+  override say(text: string): boolean { return super.say(text) || this.codexRuntime.say(text); }
 
   override prompt(turn: CliTurn): Promise<string | undefined> {
     return turn.account.provider === 'codex-cli' ? this.codexRuntime.prompt(turn) : super.prompt(turn);

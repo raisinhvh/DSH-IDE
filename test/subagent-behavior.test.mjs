@@ -30,7 +30,7 @@ function fixture(mode = 'edit') {
     childRuns: new Set(), sidebar: { postMessage: event => events.push(event) },
     subagentProfiles: () => [{ name: 'test-agent', model: 'test-model', mode }],
     availableModel: () => ({ name: 'test-model', enabled: true, backend: 'test', provider: 'deepseek-official' }),
-    resolveRoute: async () => ({ model: {} }), releaseRuntime: async () => {}, mcpServers: () => [], summariesOn: () => false,
+    resolveRoute: async () => ({ model: {} }), releaseRuntime: async () => {}, mcpServers: () => [], summariesOn: () => false, autoCompactAt: () => undefined,
   });
   const chat = {
     record: { id: 'chat', modelName: 'test-model' }, turnEntryId: 'turn', mirror: { cwd: process.cwd() },
@@ -69,6 +69,37 @@ test('explicit files enable editing only for edit profiles and release their loc
     assert.deepEqual(getRun().locks, mode === 'edit' ? ['src/file.ts'] : []);
     assert.equal(chat.locks.size, 0);
   }
+});
+
+test('an ACP subagent past the compaction threshold is stopped, checkpoints and finishes in a fresh session', async () => {
+  const { host, chat } = fixture('read-only');
+  host.autoCompactAt = () => 1000;
+  host.output = { appendLine: () => {} };
+  const prompts = [];
+  const sessions = [];
+  let interrupted = 0;
+  host.ensureRuntime = async () => ({ key: 'runtime', runtime: {
+    newSession: async () => { sessions.push(`session-${sessions.length + 1}`); return sessions.at(-1); },
+    closeSession: async () => {},
+    interrupt: () => { interrupted++; return true; },
+    prompt: async (id, prompt) => {
+      prompts.push({ id, prompt });
+      const child = [...host.childRuns][0];
+      const say = text => child.onUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
+      if (prompts.length === 1) {
+        child.onUpdate({ sessionUpdate: 'usage_update', used: 500 });
+        say('Step 1 done.');
+        child.onUpdate({ sessionUpdate: 'usage_update', used: 2000 });
+      } else if (prompts.length === 2) say('CHECKPOINT\n- Done: step 1\n- Next: step 2');
+      else say('All steps done.');
+    },
+  } });
+  const result = await host.runSubagent(chat, { agent: 'test-agent', task: 'Do two steps' });
+  assert.equal(interrupted, 1);
+  assert.deepEqual(prompts.map(item => item.id), ['session-1', 'session-1', 'session-2']);
+  assert.match(prompts[1].prompt, /^DSH stopped your last step[\s\S]*CHECKPOINT/);
+  assert.match(prompts[2].prompt, /Do two steps[\s\S]*- Next: step 2/);
+  assert.equal(result.text, 'All steps done.');
 });
 
 test('delegation events never enter the tool bar or create a duplicate subagent card', () => {

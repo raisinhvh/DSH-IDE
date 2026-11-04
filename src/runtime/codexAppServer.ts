@@ -15,6 +15,7 @@ const windowsSandboxReady = new Set<string>();
 export class CodexAppServerRuntime {
   private child?: ChildProcessWithoutNullStreams;
   private interrupt?: () => void;
+  private steer?: (text: string) => boolean;
   private cancelled = false;
 
   cancel(): void {
@@ -22,6 +23,9 @@ export class CodexAppServerRuntime {
     if (this.interrupt) this.interrupt();
     else if (this.child) terminateProcessTree(this.child);
   }
+
+  /** Adds a user message to the running turn with turn/steer. False when no turn is running. */
+  say(text: string): boolean { return this.steer?.(text) ?? false; }
 
   async prompt(turn: CliTurn): Promise<string | undefined> {
     if (this.child) throw new Error('A Codex turn is already running.');
@@ -280,11 +284,19 @@ export class CodexAppServerRuntime {
         ...(serviceTierForTurn ? { serviceTierForTurn } : {}) });
       turnId = value((response.turn || {}) as Json, 'id');
       if (this.cancelled) this.interrupt();
+      const steeredThread = threadId;
+      this.steer = text => {
+        if (completed || this.cancelled || !turnId) return false;
+        // A turn that ends before the message arrives rejects it; the caller then just sees the turn end.
+        void request('turn/steer', { threadId: steeredThread, expectedTurnId: turnId, input: [{ type: 'text', text, text_elements: [] }] }).catch(() => undefined);
+        return true;
+      };
       await turnDone;
       return threadId;
     } finally {
       clearCancellation?.();
       this.interrupt = undefined;
+      this.steer = undefined;
       this.child = undefined;
       terminateProcessTree(child);
     }

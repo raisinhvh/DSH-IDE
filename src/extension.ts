@@ -39,6 +39,8 @@ import { MirrorChange, mirrorPathExcluded, WorkspaceMirror } from './runtime/sha
 import { FileSummaries, readToolPath, SUMMARY_INSTRUCTIONS, SUMMARY_TOOL } from './summaries/store';
 import { shouldKeepAlive } from './runtime/keepAlive';
 import { Checkpoint, checkpointHandoff, parseCheckpoint } from './runtime/checkpoint';
+import { chatCompactRequest, compactStep, CompactWatch, CONTINUE_AFTER_CHECKPOINT, MAX_SUBAGENT_SEGMENTS, sendCompactRequest, subagentCheckpoint, subagentCompactRequest, subagentResumeTask, takeFollowUp, TurnChannel } from './runtime/midTurnCompact';
+import { trimSessionImages } from './runtime/imageTrim';
 import { buildHandoff, CHAT_HISTORY_TOOL, chatHistoryReply, ChatMessage, handoffSummaryPrompt, KEEP_WITH_TOOL, MAX_TURN_TOOLS, toolLine } from './runtime/handoff';
 import { buildPartsHandoff, parsePartsReply, partsDir, partsPrompt, partWindows, TranscriptPart, unsummarizedPart, writeTranscriptParts } from './runtime/transcriptParts';
 import { findGit, GIT_DOWNLOAD_PAGE, installGit } from './runtime/git';
@@ -205,6 +207,8 @@ interface Chat {
   measureBase?: number;
   handoffPending: boolean;
   pendingCheckpoint?: Checkpoint;
+  /** Mid-turn compaction of the running turn: set when it may ask the agent to checkpoint. */
+  compactWatch?: CompactWatch;
   ping?: Promise<void>;
   /** Instructions and editor context last sent into this agent session, so unchanged text is not repeated. */
   sent?: { session: string; instructions: string; context: string };
@@ -1836,7 +1840,9 @@ class ExtensionHost implements vscode.Disposable {
           : await this.handoffText(record, history, bridged, chat.mirror.cwd, record.resumeNotice === 'compact' ? record.modelName : undefined)
         : '';
       if (chat.cancelRequested) return;
-      if (chat.handoffPending && record.checkpoint && record.provider === 'claude-cli' && record.previousCliSessionId) record.resumeNotice = 'checkpoint';
+      // The summary is written; the label must not read "Compacting context…" for the rest of the turn.
+      if (chat.handoffPending) this.postRun(record.id, 'thinking', 'Thinking…');
+      if (chat.handoffPending && record.checkpoint) record.resumeNotice = 'checkpoint';
       // The feed marks where the new session starts; the note scrolls away with the conversation.
       if (chat.handoffPending && record.resumeNotice) {
         const notice = RESUME_NOTES[record.resumeNotice];
@@ -1891,11 +1897,20 @@ class ExtensionHost implements vscode.Disposable {
       // The first context report of a fresh session, less this prompt, is the session's fixed overhead.
       const freshBackend = oauth ? !record.cliSessionId : !!this.freshSessions?.delete(this.rid(record));
       chat.measureBase = freshBackend ? Math.ceil(fullPrompt.length / 4) : undefined;
+      // A job step must end on its own, so jobs keep compacting between turns only.
+      chat.compactWatch = compactAt && bridged && !chat.jobActive ? { threshold: compactAt } : undefined;
       if (oauth) {
         const account = this.oauthAccounts.get(record.accountId);
         if (!account) throw new Error('The selected OAuth account is missing. Connect it again.');
         await this.shareGlobalInstructions(account);
         if (chat.cancelRequested) return;
+        // Dropping old images re-caches the conversation from the first one, so it only happens once the cache has expired anyway.
+        const cacheLife = (record.shortCache ? 5 : 60) * 60_000;
+        if (record.provider === 'claude-cli' && record.cliSessionId && lastActivity && Date.now() - lastActivity > cacheLife) {
+          const removed = await trimSessionImages(account.directory, record.cliSessionId)
+            .catch(error => { this.output.appendLine(`Trimming old images failed: ${error instanceof Error ? error.message : String(error)}`); return 0; });
+          if (removed) this.output.appendLine(`Removed ${removed} old image${removed === 1 ? '' : 's'} from "${record.name}" while its prompt cache was cold.`);
+        }
         record.cliSessionId = await this.promptPooled(chat.cli, { account, cwd: chat.mirror.cwd, backend: record.backend, system: prefix?.system ?? instructions,
           prompt: fullPrompt, sessionId: record.cliSessionId, effort: record.effort, readOnly: this.jobReadOnly(chat), fullAccess: this.approvalMode === 'full' && !this.jobReadOnly(chat),
           speed: record.smartAuto ? undefined : this.choiceFor(this.availableModel(record.modelName)).speed,
@@ -1942,7 +1957,11 @@ class ExtensionHost implements vscode.Disposable {
         await this.saveSession(record);
       } else {
         if (!chat.runtime) throw new Error('This chat has no running agent. Use "DSH: Restart Runtime" and try again.');
-        try { await chat.runtime.prompt(this.rid(record), fullPrompt, imageAttachments); }
+        try {
+          await chat.runtime.prompt(this.rid(record), fullPrompt, imageAttachments);
+          // Mid-turn compaction stopped the prompt to ask for a checkpoint; the request is this turn's next prompt.
+          for (let ask = takeFollowUp(chat.compactWatch); ask && !chat.cancelRequested; ask = takeFollowUp(chat.compactWatch)) await chat.runtime.prompt(this.rid(record), ask);
+        }
         finally { const accountId = record.accountId; if (accountId) setTimeout(() => this.refreshUsage(true, accountId), 1500); }
       }
       const sentTo = oauth ? record.cliSessionId : session;
@@ -1955,6 +1974,9 @@ class ExtensionHost implements vscode.Disposable {
       for (const task of [...chat.background.values()]) if (!task.done && task.afterTurn === 'cancel') { chat.background.delete(task.id); task.run?.cancel(); }
       if (chat.turnReply.trim() || chat.turnTools.length) this.transcripts.get(record.id)?.push({ role: 'assistant', text: chat.turnReply.trim(), ...(chat.turnTools.length ? { tools: chat.turnTools } : {}) });
       chat.turnTools = [];
+      // A checkpoint DSH asked for mid-turn continues the task right away instead of waiting for the user's next message.
+      const continueTask = completed && !!chat.pendingCheckpoint && chat.compactWatch?.askedAt !== undefined;
+      chat.compactWatch = undefined;
       if (completed) {
         if (record.provider !== 'claude-cli') record.lastTurnAt = Date.now();
         if (chat.pendingCheckpoint) {
@@ -1982,7 +2004,9 @@ class ExtensionHost implements vscode.Disposable {
       options.onFinish?.(reply, cancelled);
       const next = chat.jobActive ? undefined : chat.queue.shift();
       if (next) this.postQueue(chat);
+      // A queued message carries the checkpoint handoff itself; background results join the continued turn.
       if (next && this.chats.get(record.id) === chat) void this.guarded(() => this.sendPrompt(next.prompt, undefined, next.images, record.id));
+      else if (!next && continueTask && this.chats.get(record.id) === chat) void this.guarded(() => this.sendPrompt(CONTINUE_AFTER_CHECKPOINT, undefined, [], record.id, 'queue', { internal: true }));
       else if (!next) this.backgroundSettled(chat);
     }
   }
@@ -2255,6 +2279,18 @@ class ExtensionHost implements vscode.Disposable {
       record.baseTokens = Math.max(0, tokens - chat.measureBase);
       chat.measureBase = undefined;
     }
+    const watch = chat.running ? chat.compactWatch : undefined;
+    const step = watch && compactStep(watch, tokens - (record.baseTokens || 0));
+    if (!watch || !step) return;
+    const runtime = isOAuthProvider(record.provider) ? undefined : chat.runtime;
+    const turn: TurnChannel = runtime ? { interrupt: () => runtime.interrupt(this.rid(record)) } : chat.cli;
+    if (!sendCompactRequest(watch, turn, chatCompactRequest(tokens, step === 'urge'))) {
+      // The turn is already ending; the next message compacts between turns as before.
+      if (step === 'ask') watch.askedAt = undefined;
+      return;
+    }
+    this.output.appendLine(`Mid-turn compaction: asked "${record.name}" to checkpoint at about ${Math.round(tokens / 1000)}k tokens${step === 'urge' ? ' (again)' : ''}.`);
+    this.postRun(record.id, 'tool', 'Compacting context…');
   }
 
   /** One line per tool call of the running turn, kept with the turn's reply in the transcript. */
@@ -2652,6 +2688,7 @@ class ExtensionHost implements vscode.Disposable {
     if (tool === 'checkpoint') {
       try {
         chat.pendingCheckpoint = parseCheckpoint(args);
+        if (chat.compactWatch?.askedAt !== undefined) return { text: 'Checkpoint saved. End your turn now with one short line; DSH continues the task in a fresh session automatically.' };
         return { text: 'Checkpoint saved; it takes effect after this turn.' };
       } catch (error) {
         return { text: error instanceof Error ? error.message : String(error), isError: true };
@@ -2862,11 +2899,12 @@ class ExtensionHost implements vscode.Disposable {
     const memory = memoryInstructions(chat.mirror.cwd, this.memorySettings().enabled);
     const explorer = name === 'explorer' && readOnly;
     const explorerNote = explorer ? 'Answer in at most about 300 words. Include file paths with line numbers for every claim.\n\n' : '';
-    const body = `${memory ? `${memory}\n\n` : ''}${summaries}Task:\n${explorerNote}${task}\n\nWhen you finish, reply with a concise final report of at most 300 words unless the task asks for more: findings, files changed, and anything the requester must still do.`;
     const intro = `You are a subagent working in a shared working copy on behalf of another agent. ${instructions}`;
     // Claude and Codex already get the delegation note as system text.
-    const prompt = `${intro}\n\n${delegationInstructions(false)}\n\n${body}`;
-    const cliPrompt = `${intro}\n\n${body}`;
+    const promptFor = (text: string, systemDelegation: boolean): string => `${intro}\n\n${systemDelegation ? '' : `${delegationInstructions(false)}\n\n`}${memory ? `${memory}\n\n` : ''}${summaries}Task:\n${explorerNote}${text}\n\n`
+      + 'When you finish, reply with a concise final report of at most 300 words unless the task asks for more: findings, files changed, and anything the requester must still do.';
+    // Where the reply of the session that finished the task starts; earlier sessions ended in checkpoints.
+    let reportStart = 0;
     // Text after a tool call or a new model message starts a new paragraph instead of running on.
     let gap = false;
     const onText = (raw: string): void => {
@@ -2883,33 +2921,51 @@ class ExtensionHost implements vscode.Disposable {
     try {
       const route = await this.resolveRoute(model);
       const effort = profile.effort || undefined;
+      // Mid-turn compaction: past the threshold a subagent replies with a checkpoint and goes on in a fresh session from it.
+      const compactAt = this.autoCompactAt();
+      let watch: CompactWatch | undefined;
+      let turn: TurnChannel | undefined;
+      // The first context report of a session is its fixed overhead plus the opening prompt.
+      let base: number | undefined;
+      let askedFrom = -1;
+      const onContext = (tokens: number): void => {
+        if (!watch || !turn || !Number.isFinite(tokens) || tokens <= 0) return;
+        if (base === undefined) { base = tokens; return; }
+        const step = compactStep(watch, tokens - base);
+        if (!step) return;
+        if (!sendCompactRequest(watch, turn, subagentCompactRequest(tokens, step === 'urge'))) { if (step === 'ask') watch.askedAt = undefined; return; }
+        if (askedFrom < 0) askedFrom = reply.length;
+        this.output.appendLine(`Mid-turn compaction: asked subagent "${name}" to checkpoint at about ${Math.round(tokens / 1000)}k tokens${step === 'urge' ? ' (again)' : ''}.`);
+      };
+      let runSession: (sessionTask: string) => Promise<void>;
       if ('oauthAccount' in route) {
+        const account = route.oauthAccount;
         const cli = new OAuthCliRuntime();
         run.cancel = () => { cancelled = true; cli.cancel(); };
-        await this.shareGlobalInstructions(route.oauthAccount);
+        await this.shareGlobalInstructions(account);
         if (cancelled) throw new Error('Cancelled.');
-        await this.promptPooled(cli, { account: route.oauthAccount, cwd: chat.mirror.cwd, backend, effort, speed, readOnly, fullAccess: this.approvalMode === 'full',
-          cacheTtl: explorer && route.oauthAccount.provider === 'claude-cli' ? '5m' : undefined,
-          onUsage: usage => {
-            this.logUsage(chat.record.id, explorer ? 'explorer' : 'subagent', entry.name, usage);
-            if (explorer) {
-              const total = usage.total;
-              chat.record.explorerTokens = (chat.record.explorerTokens || 0) + total.input + total.cacheRead + total.cacheWrite + total.output;
-              this.refreshSessions();
-              void this.saveSession(chat.record).catch(error => this.output.appendLine(`Saving explorer usage failed: ${String(error)}`));
-            }
-          },
-          delegate: profile.tools === false ? undefined : this.delegateConfig(owner, true), prompt: cliPrompt, onText, onTool, onMessageBreak: () => { gap = true; }, onApproval: (description, info) => this.decideApproval(chat, { owner, label: profile.name, readOnly }, description, info) },
-        () => cancelled, (next, failed) => { post({ text: `Account switch: ${failed.label} hit its usage limit; continuing on ${next.label}`, messageId: `account:${next.id}`, role: 'tool' }); gap = true; return {}; });
+        turn = cli;
+        runSession = async sessionTask => {
+          await this.promptPooled(cli, { account, cwd: chat.mirror.cwd, backend, effort, speed, readOnly, fullAccess: this.approvalMode === 'full',
+            cacheTtl: explorer && account.provider === 'claude-cli' ? '5m' : undefined,
+            onContext,
+            onUsage: usage => {
+              this.logUsage(chat.record.id, explorer ? 'explorer' : 'subagent', entry.name, usage);
+              if (explorer) {
+                const total = usage.total;
+                chat.record.explorerTokens = (chat.record.explorerTokens || 0) + total.input + total.cacheRead + total.cacheWrite + total.output;
+                this.refreshSessions();
+                void this.saveSession(chat.record).catch(error => this.output.appendLine(`Saving explorer usage failed: ${String(error)}`));
+              }
+            },
+            delegate: profile.tools === false ? undefined : this.delegateConfig(owner, true), prompt: promptFor(sessionTask, true), onText, onTool, onMessageBreak: () => { gap = true; }, onApproval: (description, info) => this.decideApproval(chat, { owner, label: profile.name, readOnly }, description, info) },
+          () => cancelled, (next, failed) => { post({ text: `Account switch: ${failed.label} hit its usage limit; continuing on ${next.label}`, messageId: `account:${next.id}`, role: 'tool' }); gap = true; return {}; });
+        };
       } else {
         const slot = await this.ensureRuntime(route, chat.mirror.cwd, owner);
         if (!slot) throw new Error('No runtime is available for this subagent model.');
         run.runtimeKey = slot.key;
-        run.cancel = () => { cancelled = true; void slot.runtime.stop(); };
-        if (cancelled) throw new Error('Cancelled.');
-        const sessionId = await slot.runtime.newSession(chat.mirror.cwd, this.mcpServers(profile.tools === false ? undefined : owner, true));
-        run.sessionId = sessionId;
-        run.cancel = () => { cancelled = true; slot.runtime.cancel(sessionId); };
+        const cursor = route.model.provider === 'cursor-acp';
         const toolTexts = new Set<string>();
         run.onUpdate = update => {
           const kind = String(update.sessionUpdate || '');
@@ -2919,27 +2975,52 @@ class ExtensionHost implements vscode.Disposable {
           } else if (kind === 'tool_call' && typeof update.toolCallId === 'string' && !toolTexts.has(update.toolCallId)) {
             toolTexts.add(update.toolCallId);
             onTool(update.toolCallId, String(update.title || 'Tool'), undefined, 'running');
-          }
+          } else if (kind === 'usage_update' && typeof update.used === 'number') onContext(update.used);
           if (kind.startsWith('tool_call') && String(update.kind || '').toLowerCase() === 'read' && Array.isArray(update.locations)) {
             this.noteRead(chat.mirror.cwd, (update.locations as Record<string, unknown>[]).find(item => typeof item.path === 'string')?.path);
           }
         };
-        try {
-          if (route.model.provider === 'cursor-acp') {
-            await this.refreshCursorModels(slot.runtime, sessionId);
-            if (backend !== 'auto' || slot.runtime.models(sessionId).some(option => option.value === 'auto')) await slot.runtime.setModel(sessionId, backend);
-          }
-          if (effort) await slot.runtime.setConfigOption(sessionId, 'reasoning_effort', effort);
+        runSession = async sessionTask => {
+          run.cancel = () => { cancelled = true; void slot.runtime.stop(); };
           if (cancelled) throw new Error('Cancelled.');
-          await slot.runtime.prompt(sessionId, prompt);
-        } finally {
-          if (cancelled) await slot.runtime.stop();
-          else await slot.runtime.closeSession(sessionId).catch(() => undefined);
-        }
+          const sessionId = await slot.runtime.newSession(chat.mirror.cwd, this.mcpServers(profile.tools === false ? undefined : owner, true));
+          run.sessionId = sessionId;
+          run.cancel = () => { cancelled = true; slot.runtime.cancel(sessionId); };
+          turn = { interrupt: () => slot.runtime.interrupt(sessionId) };
+          try {
+            if (cursor) {
+              await this.refreshCursorModels(slot.runtime, sessionId);
+              if (backend !== 'auto' || slot.runtime.models(sessionId).some(option => option.value === 'auto')) await slot.runtime.setModel(sessionId, backend);
+            }
+            if (effort) await slot.runtime.setConfigOption(sessionId, 'reasoning_effort', effort);
+            if (cancelled) throw new Error('Cancelled.');
+            await slot.runtime.prompt(sessionId, promptFor(sessionTask, false));
+            // Mid-turn compaction stopped the prompt to ask for a checkpoint; the request is the session's next prompt.
+            for (let ask = takeFollowUp(watch); ask && !cancelled; ask = takeFollowUp(watch)) await slot.runtime.prompt(sessionId, ask);
+          } finally {
+            turn = undefined;
+            if (cancelled) await slot.runtime.stop();
+            else await slot.runtime.closeSession(sessionId).catch(() => undefined);
+          }
+        };
+      }
+      let sessionTask = task;
+      for (let segment = 1; ; segment++) {
+        watch = compactAt && segment < MAX_SUBAGENT_SEGMENTS ? { threshold: compactAt } : undefined;
+        base = undefined;
+        askedFrom = -1;
+        reportStart = reply.length;
+        await runSession(sessionTask);
+        // No checkpoint means the session finished the task (or stopped for another reason) before it saw the request.
+        const checkpoint = askedFrom >= 0 && !cancelled ? subagentCheckpoint(reply.slice(askedFrom)) : undefined;
+        if (!checkpoint) break;
+        post({ text: `Context compacted; continuing in a fresh session (part ${segment + 1})`, messageId: `compact:${segment}`, role: 'tool' });
+        gap = true;
+        sessionTask = subagentResumeTask(task, checkpoint, segment);
       }
       if (cancelled) throw new Error('Cancelled.');
       post({ state: 'complete' });
-      let result = reply.trim() || '(The subagent finished without a written report.)';
+      let result = reply.slice(reportStart).trim() || '(The subagent finished without a written report.)';
       if (run.changed.size) {
         result += `\n\n---\nFiles changed by this subagent: ${[...run.changed].join(', ')}`;
         if (run.outOfScope.size) result += `\nWARNING: edits outside its locked paths (${files.join(', ') || 'none'}): ${[...run.outOfScope].join(', ')}`;

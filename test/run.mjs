@@ -41,6 +41,8 @@ await import('./outline.test.mjs');
 await import('./editor-context.test.mjs');
 
 await import('./checkpoint.test.mjs');
+await import('./mid-turn-compact.test.mjs');
+await import('./image-trim.test.mjs');
 await import('./keep-alive.test.mjs');
 
 await import('./explorer.test.mjs');
