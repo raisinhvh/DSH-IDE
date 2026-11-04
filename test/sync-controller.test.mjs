@@ -41,7 +41,8 @@ async function world(t) {
   execFileSync('git', ['init', '-q', '--bare', remote]);
   const home = join(base, 'home');
   await mkdir(home);
-  await writeFile(join(home, '.gitconfig'), `[url "${resolve(remote)}"]\n\tinsteadOf = https://github.com/me/dsh-sync.git\n[init]\n\tdefaultBranch = main\n`);
+  // Forward slashes: git config reads backslashes in a Windows path as escapes.
+  await writeFile(join(home, '.gitconfig'), `[url "${resolve(remote).replace(/\\/g, '/')}"]\n\tinsteadOf = https://github.com/me/dsh-sync.git\n[init]\n\tdefaultBranch = main\n`);
   const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, fetch: globalThis.fetch };
   process.env.HOME = home;
   delete process.env.XDG_CONFIG_HOME;
