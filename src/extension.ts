@@ -104,6 +104,12 @@ const TRANSCRIPTS_KEY = 'dsh.ide.transcripts.v1';
 const TIMELINES_KEY = 'dsh.ide.timelines.v1';
 const SYNC_OFFER_KEY = 'dsh.ide.syncOffer.v1';
 type SavedTimeline = { timeline: SidebarTimelineItem[]; subagents: Record<string, SidebarSubagent> };
+/** Feed notes for the turn that starts a chat's new agent session. */
+const RESUME_NOTES = {
+  checkpoint: { icon: 'history', text: 'Resumed from checkpoint' },
+  compact: { icon: 'compress', text: 'Context compacted into a summary' },
+  idle: { icon: 'schedule', text: 'Started a fresh session after idle' },
+} as const;
 const PROVIDER_USAGE_URLS = new Map([
   ['codex-cli', 'https://chatgpt.com/settings/usage?tab=overview'],
   ['claude-cli', 'https://claude.ai/settings/usage'],
@@ -676,7 +682,7 @@ class ExtensionHost implements vscode.Disposable {
   private refreshSessions(): void {
     this.sidebar.postMessage({
       type: 'sessionState',
-      sessions: this.sessions().map(item => ({ id: item.id, name: item.name, icon: item.icon, updatedAt: item.updatedAt, contextTokens: item.contextTokens, explorerTokens: item.explorerTokens, resumeNotice: item.resumeNotice })),
+      sessions: this.sessions().map(item => ({ id: item.id, name: item.name, icon: item.icon, updatedAt: item.updatedAt, contextTokens: item.contextTokens, explorerTokens: item.explorerTokens })),
       activeSessionId: this.active?.id || this.context.workspaceState.get<string>(ACTIVE_SESSION_KEY),
     });
   }
@@ -1831,6 +1837,11 @@ class ExtensionHost implements vscode.Disposable {
         : '';
       if (chat.cancelRequested) return;
       if (chat.handoffPending && record.checkpoint && record.provider === 'claude-cli' && record.previousCliSessionId) record.resumeNotice = 'checkpoint';
+      // The feed marks where the new session starts; the note scrolls away with the conversation.
+      if (chat.handoffPending && record.resumeNotice) {
+        const notice = RESUME_NOTES[record.resumeNotice];
+        this.sidebar.postMessage({ type: 'noteMessage', sessionId: record.id, entryId: `resume:${turnEntryId}`, icon: notice.icon, text: notice.text });
+      }
       chat.handoffPending = false;
       record.idleHandoff = undefined;
       this.refreshSessions();

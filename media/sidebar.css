@@ -658,9 +658,6 @@ body.a11y-targets .usage-legend-row { min-height: calc(34px * var(--text-scale, 
 body.a11y-targets .account-tab { min-height: calc(34px * var(--text-scale, 1)); }
 body.a11y-targets .usage-toggle { min-height: calc(34px * var(--text-scale, 1)); }
 
-.resume-notice { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: auto; margin: 4px 11px; color: var(--muted); }
-.resume-notice[hidden] { display: none; }
-
 .explorer-row .feature-detail { margin: 0; padding: 0; border: 0; }
 
 .memory-settings { padding: 8px 10px 0; }

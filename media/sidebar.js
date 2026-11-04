@@ -837,14 +837,6 @@
     play(root, [{ opacity: 1 }, { opacity: 0 }], { duration: 200, easing: 'ease-in', fill: 'forwards' }, () => root.remove());
   }
 
-  function renderContext() {
-    const sessionId = state.activeSessionId || '';
-    const session = state.sessions.find(item => item.id === sessionId);
-    const resume = el('resume-notice');
-    resume.hidden = !session?.resumeNotice;
-    el('resume-label').textContent = session?.resumeNotice === 'checkpoint' ? 'Resumed from checkpoint' : session?.resumeNotice === 'compact' ? 'Context compacted into a summary' : 'Started a fresh session after idle';
-  }
-
   function renderFeed() {
     const feed = el('feed');
     const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
@@ -2112,7 +2104,7 @@
     for (const name of settingsPages) el(name).classList.toggle('current', page === name);
     el('settings-toggle').setAttribute('aria-pressed', String(settingsPages.includes(page)));
     el('accounts').setAttribute('aria-pressed', String(page === 'accounts'));
-    renderNotice(); renderPicker(); renderApproval(); renderSessions(); renderContext(); renderFeed(); renderUsageButton();
+    renderNotice(); renderPicker(); renderApproval(); renderSessions(); renderFeed(); renderUsageButton();
     if (page === 'accounts') renderAccounts();
     if (page === 'subagents') renderSubagents();
     if (page === 'instructions') { renderMemory(); renderInstructions(); }
