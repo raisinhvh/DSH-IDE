@@ -1167,13 +1167,11 @@
     const row = keyed(document.createElement('div'), 'account:' + account.id); row.className = 'account-card';
     const head = document.createElement('div'); head.className = 'account-card-head';
     const main = document.createElement('div'); main.className = 'row-main';
-    const title = document.createElement('div'); title.className = 'row-title'; title.append(document.createTextNode(account.label));
-    if (account.isDefault) { const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = 'Default'; title.appendChild(badge); }
-    main.appendChild(title);
+    const title = document.createElement('div'); title.className = 'row-title'; title.textContent = account.label; main.appendChild(title);
     if (account.email) { const email = document.createElement('div'); email.className = 'row-subtitle'; email.textContent = account.email; main.appendChild(email); }
-    const subtitle = document.createElement('div'); subtitle.className = 'row-subtitle'; subtitle.textContent = account.authType === 'oauth' ? 'Browser sign-in' : 'API key'; main.appendChild(subtitle); head.appendChild(main);
+    if (account.authType !== 'oauth') { const subtitle = document.createElement('div'); subtitle.className = 'row-subtitle'; subtitle.textContent = 'API key'; main.appendChild(subtitle); }
+    head.appendChild(main);
     const actions = document.createElement('div'); actions.className = 'row-actions';
-    if (!account.isDefault) actions.appendChild(button('', 'Make default', () => send({ type: 'setDefaultAccount', provider: account.provider, accountId: account.id }), 'icon-button', 'star'));
     actions.appendChild(button('', pendingAccountRemoval === account.id ? 'Confirm removal' : 'Remove account', () => {
       if (pendingAccountRemoval === account.id) { pendingAccountRemoval = ''; send({ type: 'removeAccount', accountId: account.id }); }
       else { pendingAccountRemoval = account.id; renderAccounts(); }
@@ -1186,16 +1184,14 @@
     else {
       const metrics = document.createElement('div'); if (usage.loading) metrics.className = 'usage-loading';
       (usage.metrics || []).forEach((metric, index) => {
-        const line = document.createElement('div'); line.className = 'usage-row'; const label = document.createElement('span'); label.textContent = metric.label; const value = document.createElement('span');
+        const line = document.createElement('div'); line.className = 'usage-row'; const label = document.createElement('span'); label.textContent = metric.label; const value = document.createElement('span'); value.className = 'usage-value';
         const numeric = typeof metric.usedPercent === 'number' && Number.isFinite(metric.usedPercent); const reset = numeric ? resetIn(metric.resetsAt) : '';
         value.textContent = numeric ? Math.round(metric.usedPercent) + '%' : metric.value;
-        if (reset) { const time = document.createElement('span'); time.className = 'usage-reset'; time.textContent = reset; time.style.color = resetColor(metric.resetsAt); time.title = metric.label + ' resets in ' + reset; value.appendChild(time); }
+        if (reset) { const time = document.createElement('span'); time.className = 'usage-reset'; time.textContent = reset; time.title = metric.label + ' resets in ' + reset; label.appendChild(time); }
         line.append(label, value); metrics.appendChild(line);
         if (numeric) { const track = document.createElement('div'); track.className = 'usage-track'; const key = account.id + ':' + index + ':' + metric.label; const fill = usageFill(metric.usedPercent, account.provider, previous.get(key)); fill.dataset.usageKey = key; track.appendChild(fill); metrics.appendChild(track); }
       }); block.appendChild(metrics);
-      if (!(usage.metrics || []).length && (usage.status === 'unavailable' || usage.status === 'error')) { const note = document.createElement('div'); note.className = 'usage-note' + (usage.status === 'error' ? ' usage-error' : ''); note.textContent = usage.detail || (usage.status === 'error' ? 'Usage unavailable' : 'Usage not available'); block.appendChild(note); const fix = usageFix(account, usage.fix); if (fix) block.appendChild(fix); }
-      if (usage.fetchedAt) { const note = document.createElement('div'); note.className = 'usage-note'; const mins = Math.max(0, Math.floor((Date.now() - usage.fetchedAt) / 60000)); note.textContent = 'Updated ' + (mins < 1 ? 'just now' : mins + 'm ago'); block.appendChild(note); }
-    }
+      if (!(usage.metrics || []).length && (usage.status === 'unavailable' || usage.status === 'error')) { const note = document.createElement('div'); note.className = 'usage-note' + (usage.status === 'error' ? ' usage-error' : ''); note.textContent = usage.detail || (usage.status === 'error' ? 'Usage unavailable' : 'Usage not available'); block.appendChild(note); const fix = usageFix(account, usage.fix); if (fix) block.appendChild(fix); }    }
     return block;
   }
   // Cursor has one CLI sign-in instead of stored accounts; usage is keyed by its model account id.
@@ -1222,7 +1218,7 @@
       if (group.provider !== 'legacy') heading.appendChild(button('', 'View ' + providerNames[group.provider] + ' usage in your browser', () => send({ type: 'viewProviderUsage', provider: group.provider }), 'icon-button', 'open_in_new')); section.appendChild(heading);
       if (group.provider === 'cursor-acp') {
         const card = document.createElement('div'); card.className = 'account-card'; const line = document.createElement('div'); line.className = 'row-title'; line.textContent = state.cursor.connected ? state.cursor.label || 'Cursor account' : state.cursor.busy ? 'Complete sign-in in your browser…' : 'No Cursor account connected'; card.appendChild(line);
-        if (state.cursor.connected) { const sub = document.createElement('div'); sub.className = 'row-subtitle'; sub.textContent = 'Browser sign-in'; card.append(sub, usageBlock(cursorUsageAccount(), previous)); } section.appendChild(card);
+        if (state.cursor.connected) { card.appendChild(usageBlock(cursorUsageAccount(), previous)); } section.appendChild(card);
         for (const account of accounts) section.appendChild(accountRow(account, previous));
         const footer = document.createElement('div'); footer.className = 'group-footer'; const action = button(state.cursor.connected ? 'Disconnect' : state.cursor.busy ? 'Connecting…' : 'Connect Cursor', state.cursor.connected ? 'Disconnect Cursor' : 'Sign in with Cursor', () => send({ type: state.cursor.connected ? 'cursorLogout' : 'cursorLogin' }), 'secondary-button'); action.disabled = !!state.cursor.busy; footer.appendChild(action); footer.appendChild(button('Refresh', 'Refresh Cursor account status', () => send({ type: 'refreshAccounts' }), 'text-button')); if (state.cursor.authUrl) footer.appendChild(button('Open sign-in page', 'Open Cursor sign-in page', () => send({ type: 'openAuthUrl', url: state.cursor.authUrl }), 'text-button')); section.appendChild(footer);
       } else {

@@ -617,9 +617,9 @@ body.a11y-targets .composer-side #approval { width: calc(34px * var(--text-scale
 .account-card { margin: 8px; padding: 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--quiet-surface); }
 .account-card-head { display: flex; gap: 7px; align-items: flex-start; }
 .usage-block { margin-top: 9px; }
-.usage-row { display: flex; justify-content: space-between; gap: 8px; margin: 6px 0 4px; font-size: calc(11px * var(--text-scale, 1)); }
-.usage-row span:last-child { color: var(--muted); text-align: right; }
-.usage-row .usage-reset { display: inline-block; min-width: 7ch; margin-left: 8px; font-variant-numeric: tabular-nums; }
+.usage-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 6px 0 4px; font-size: calc(11px * var(--text-scale, 1)); }
+.usage-row .usage-value { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.usage-row .usage-reset { margin-left: 6px; color: var(--muted); font-size: calc(10px * var(--text-scale, 1)); font-variant-numeric: tabular-nums; }
 .usage-fix { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 2px 0; font-size: calc(11px * var(--text-scale, 1)); }
 .usage-fix .symbol { font-size: calc(14px * var(--text-scale, 1)); }
 .usage-fix:disabled { opacity: .6; text-decoration: none; cursor: default; }
