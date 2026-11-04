@@ -2106,7 +2106,7 @@
         root.appendChild(conflict);
       }
       if (sync.connected) {
-        root.appendChild(settingRow('sync:auto', { icon: 'sync', title: 'Sync automatically', desc: 'Uploads a few seconds after you change synced config, and picks up changes from your other PCs at startup. If both sides changed, DSH asks first.' }, !!sync.auto, () => {
+        root.appendChild(settingRow('sync:auto', { icon: 'sync', title: 'Sync automatically', desc: 'Commits a few seconds after you change synced config or memory, and picks up changes from your other PCs at startup, on focus and every two minutes. If the same item changed on both, DSH asks first; memory notes keep both versions.' }, !!sync.auto, () => {
           state.sync = { ...sync, auto: !sync.auto };
           renderSync();
           send({ type: 'setSyncAuto', enabled: !sync.auto });

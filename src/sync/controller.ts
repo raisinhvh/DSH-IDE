@@ -283,7 +283,7 @@ export class ConfigSync implements vscode.Disposable {
         let combined = mergeBundles(EMPTY, local.bundle, remote);
         if (combined.conflicts.length) {
           const items = combined.conflicts;
-          const choice = await vscode.window.showWarningMessage(`Your GitHub sync already has DSH config from another computer, and ${items.length} item${items.length === 1 ? '' : 's'} differ from this PC.`, {
+          const choice = await vscode.window.showWarningMessage(`Your GitHub sync already has DSH config from another computer, and ${items.length === 1 ? '1 item differs' : `${items.length} items differ`} from this PC.`, {
             modal: true,
             detail: `Different on each: ${items.slice(0, 6).join(', ')}${items.length > 6 ? ` and ${items.length - 6} more` : ''}. Everything else from both, including all memory notes, is combined. Choose which version of these to keep.`,
           }, 'Keep GitHub copy', 'Keep this PC');
