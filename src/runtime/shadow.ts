@@ -12,6 +12,7 @@ export interface MirrorChange {
   proposed?: string;
 }
 
+const DSH_CONTENT_DIRS = ['skills', 'memory'];
 const excluded = new Set(['.git', 'node_modules', '.venv', 'venv', 'dist', 'build', '.next', '.turbo', '.npm-cache']);
 const skippedFile = (name: string): boolean => name === '.env' || name.startsWith('.env.') || name.endsWith('.key') || name.endsWith('.pem') ||
   /\.tmp\.\d+\.[0-9a-f]+$/i.test(name);
@@ -22,7 +23,8 @@ export function mirrorPathExcluded(relPath: string): boolean {
   const segments = normalized.split('/').filter(Boolean);
   for (let index = 0; index < segments.length; index += 1) {
     const part = segments[index];
-    if (part === '.dsh' && segments[index + 1] !== 'skills') return true;
+    // Under .dsh only skills and the repo's memory vault are workspace content; the rest (including the global memory copy) is DSH's own.
+    if (part === '.dsh' && !DSH_CONTENT_DIRS.includes(segments[index + 1])) return true;
     if (excluded.has(part) || skippedFile(part)) return true;
   }
   return false;
@@ -209,8 +211,10 @@ export class WorkspaceMirror implements vscode.Disposable {
         const full = join(directory, entry.name);
         if (entry.isDirectory()) {
           if (entry.name === '.dsh') {
-            const skills = join(full, 'skills');
-            try { if ((await fs.lstat(skills)).isDirectory()) await walk(skills); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+            for (const name of DSH_CONTENT_DIRS) {
+              const inner = join(full, name);
+              try { if ((await fs.lstat(inner)).isDirectory()) await walk(inner); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+            }
             continue;
           }
           if (excluded.has(entry.name) || skippedFile(entry.name)) continue;

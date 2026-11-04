@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { appendFile, copyFile, mkdir, writeFile, readFile, rm, stat } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
@@ -40,6 +40,7 @@ import { FileSummaries, readToolPath, SUMMARY_INSTRUCTIONS, SUMMARY_TOOL } from 
 import { shouldKeepAlive } from './runtime/keepAlive';
 import { Checkpoint, checkpointHandoff, parseCheckpoint } from './runtime/checkpoint';
 import { buildHandoff, CHAT_HISTORY_TOOL, chatHistoryReply, ChatMessage, handoffSummaryPrompt, KEEP_WITH_TOOL, MAX_TURN_TOOLS, toolLine } from './runtime/handoff';
+import { globalMemoryRoot, isMemoryPath, memoryInstructions, memorySyncNeeded, repoMemoryPath, syncGlobalMemory } from './runtime/memory';
 import { BATCH_INSTRUCTIONS, BatchCall, BatchOutcome, callLabel, formatBatchResult, isBatchFileTool, isBatchTool, parseBatchCalls, runBatchFileTool } from './runtime/batch';
 import { describePackTools, LOAD_TOOLPACK, loadToolpackTool, packCommands, RUN_TOOLPACK_TOOL, runToolpackTool } from './toolpacks/access';
 import { DshSidebarProvider, SidebarWebviewMessage } from './sidebar/provider';
@@ -302,6 +303,7 @@ class ExtensionHost implements vscode.Disposable {
       vscode.workspace.onDidChangeConfiguration(event => {
         if (event.affectsConfiguration('dsh.models')) this.refreshModels();
         if (event.affectsConfiguration('dsh.subagents')) this.refreshSubagents();
+        if (event.affectsConfiguration('dsh.memory')) this.refreshMemory();
         if (['dsh.features', 'dsh.experimental', 'dsh.nameModel', 'dsh.reviewModel', 'dsh.summaryModel', 'dsh.deciderModel', 'dsh.explorerModel', 'dsh.smartAutoRanks', 'dsh.updates.check', 'dsh.accessibility'].some(key => event.affectsConfiguration(key))) this.refreshCustomize();
         if (['dsh.models', 'dsh.features.smartAuto', 'dsh.deciderModel', 'dsh.smartAutoRanks'].some(key => event.affectsConfiguration(key))) void this.guarded(() => this.dropSmartAuto());
         if (SYNCED_SETTINGS.some(key => event.affectsConfiguration(`dsh.${key}`))) this.sync.schedule();
@@ -1767,6 +1769,7 @@ class ExtensionHost implements vscode.Disposable {
     try {
       await this.saveSession(record);
       await chat.mirror.beginTurn();
+      if (memorySyncNeeded(this.memorySettings().global, chat.mirror.cwd)) await this.syncMemory(chat);
       if (chat.cancelRequested) return;
       if (auto) {
         await this.smartAutoPick(chat, prompt, turnEntryId);
@@ -1952,6 +1955,7 @@ class ExtensionHost implements vscode.Disposable {
       const scanStarted = Date.now();
       const scanLabel = setTimeout(() => this.postRun(record.id, 'tool', 'Checking changes…'), 500);
       await chat.mirror.endTurn().catch(error => this.output.appendLine(`Mirror scan failed: ${String(error)}`));
+      if (memorySyncNeeded(this.memorySettings().global, chat.mirror.cwd)) await this.syncMemory(chat, true);
       clearTimeout(scanLabel);
       if (Date.now() - scanStarted > 5_000) this.output.appendLine(`End-of-turn change scan took ${((Date.now() - scanStarted) / 1000).toFixed(1)} s.`);
       chat.running = false;
@@ -2075,12 +2079,71 @@ class ExtensionHost implements vscode.Disposable {
       : 'Edits stay in this working copy until the user reviews them.';
     return [
       `DSH IDE, workspace ${this.root().name}. ${scope}`,
+      memoryInstructions(chat.mirror.cwd, this.memorySettings().repo),
       delegationInstructions(bridged, { explorer: this.delegationProfiles().some(profile => profile.name === 'explorer') }),
       bridged && this.feature('batching') ? BATCH_INSTRUCTIONS : '',
       bridged && this.summariesOn() ? SUMMARY_INSTRUCTIONS : '',
       bridged ? MEDIA_INSTRUCTIONS : '',
       bridged && this.oauthAccounts.list('codex-cli').length ? IMAGE_INSTRUCTIONS : '',
     ].filter(Boolean).join('\n');
+  }
+
+  /** The global memory folder on this PC and the repo vault's path in the workspace. */
+  private memorySettings(): { global?: string; repo?: string } {
+    const config = vscode.workspace.getConfiguration?.('dsh');
+    return { global: globalMemoryRoot(config?.get<unknown>('memory.globalPath')), repo: repoMemoryPath(config ? config.get<unknown>('memory.repoPath', '.dsh/memory') : '.dsh/memory') };
+  }
+
+  /** Brings the global memory folder into the chat's working copy, or (after a turn) saves the agent's notes back to it. */
+  private async syncMemory(chat: Chat, after = false): Promise<void> {
+    try {
+      const result = await syncGlobalMemory(this.memorySettings().global, chat.mirror.cwd);
+      if (result.skipped) this.output.appendLine(`Global memory not synced: ${result.skipped}.`);
+      const changed = [...result.saved, ...result.conflicts];
+      if (after && changed.length) {
+        const conflicts = result.conflicts.length ? `; kept both versions of ${result.conflicts.length} edited elsewhere` : '';
+        this.sidebar.postMessage({ type: 'toolEvent', sessionId: chat.record.id, entryId: `tool:${chat.turnEntryId}:memory`, event: {
+          id: `memory-${chat.turnEntryId}`, kind: 'other', title: 'Memory saved', detail: `${changed.length} note${changed.length === 1 ? '' : 's'}: ${result.saved.slice(0, 5).join(', ')}${result.saved.length > 5 ? ', …' : ''}${conflicts}`, state: 'complete',
+        } });
+      }
+    } catch (error) {
+      this.output.appendLine(`Global memory sync failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private refreshMemory(): void {
+    const config = vscode.workspace.getConfiguration('dsh');
+    const globalPath = String(config.get<unknown>('memory.globalPath') ?? '');
+    const repoPath = String(config.get<unknown>('memory.repoPath', '.dsh/memory') ?? '');
+    const global = globalMemoryRoot(globalPath), repo = repoMemoryPath(repoPath);
+    const folder = (path: string): boolean => { try { return statSync(path).isDirectory(); } catch { return false; } };
+    let root: string | undefined;
+    try { root = this.root().uri.fsPath; } catch { root = undefined; }
+    this.sidebar.postMessage({ type: 'memoryState', memory: {
+      globalPath, repoPath,
+      globalStatus: !globalPath.trim() ? 'off' : !global ? 'invalid' : folder(global) ? 'found' : 'missing',
+      repoStatus: !repoPath.trim() ? 'off' : !repo ? 'invalid' : root && folder(join(root, repo)) ? 'found' : 'missing',
+    } });
+  }
+
+  private async saveMemorySettings(value: { globalPath?: string; repoPath?: string }): Promise<void> {
+    const config = vscode.workspace.getConfiguration('dsh');
+    if (typeof value.globalPath === 'string') {
+      const path = value.globalPath.trim();
+      if (path && !globalMemoryRoot(path)) throw new Error('The global memory folder must be a full path, like C:\\Users\\you\\Notes or ~/Notes.');
+      await config.update('memory.globalPath', path, vscode.ConfigurationTarget.Global);
+    }
+    if (typeof value.repoPath === 'string') {
+      const path = value.repoPath.trim();
+      if (path && !repoMemoryPath(path)) throw new Error('The repo memory folder must be a path inside the project, like .dsh/memory or docs/notes.');
+      await config.update('memory.repoPath', path, vscode.ConfigurationTarget.Global);
+    }
+    this.refreshMemory();
+  }
+
+  private async pickMemoryFolder(): Promise<void> {
+    const picked = await vscode.window.showOpenDialog({ canSelectFolders: true, canSelectFiles: false, canSelectMany: false, openLabel: 'Use as global memory' });
+    if (picked?.[0]) await this.saveMemorySettings({ globalPath: picked[0].fsPath });
   }
 
   /** Tokens of conversation (beyond the session's fixed overhead) at which a chat is compacted, or undefined when off. */
@@ -2708,9 +2771,10 @@ class ExtensionHost implements vscode.Disposable {
       ? 'You are a READ-ONLY subagent. Do not modify, create or delete any files.'
       : `You may edit ONLY these paths: ${files.join(', ')}. Do not touch anything else; other agents are working in parallel.`;
     const summaries = profile.tools !== false && this.summariesOn() ? `${SUMMARY_INSTRUCTIONS}\n\n` : '';
+    const memory = memoryInstructions(chat.mirror.cwd, this.memorySettings().repo);
     const explorer = name === 'explorer' && readOnly;
     const explorerNote = explorer ? 'Answer in at most about 300 words. Include file paths with line numbers for every claim.\n\n' : '';
-    const body = `${summaries}Task:\n${explorerNote}${task}\n\nWhen you finish, reply with a concise final report of at most 300 words unless the task asks for more: findings, files changed, and anything the requester must still do.`;
+    const body = `${memory ? `${memory}\n\n` : ''}${summaries}Task:\n${explorerNote}${task}\n\nWhen you finish, reply with a concise final report of at most 300 words unless the task asks for more: findings, files changed, and anything the requester must still do.`;
     const intro = `You are a subagent working in a shared working copy on behalf of another agent. ${instructions}`;
     // Claude and Codex already get the delegation note as system text.
     const prompt = `${intro}\n\n${delegationInstructions(false)}\n\n${body}`;
@@ -3117,6 +3181,12 @@ class ExtensionHost implements vscode.Disposable {
       const path = this.relPath(chat, info.input);
       const conflict = path ? this.lockConflict(chat, path, actor.owner) : undefined;
       if (conflict) return `"${path}" is locked by subagent "${conflict.label}" until it finishes. Edit other files or wait.`;
+      // Memory vaults are part of every agent's permissions, like any file in the project.
+      if (path && isMemoryPath(path, this.memorySettings().repo)) return true;
+      // Outside the working copy nothing reviews the edit, so only full access skips asking.
+      if (!path && this.rawToolPath(info.input)) {
+        return this.approvalMode === 'full' || this.askInChat(chat.record.id, actor.owner === PARENT.owner ? 'Edit outside the project' : `Subagent "${actor.label}" wants to edit outside the project`, description, background);
+      }
       if (info.autoAllowEdits) return true;
     }
     if (this.approvalMode === 'full' || (this.approvalMode === 'auto' && !isRiskyAction(description))) return true;
@@ -3128,8 +3198,12 @@ class ExtensionHost implements vscode.Disposable {
     return run?.background ? run : undefined;
   }
 
+  private rawToolPath(input: Record<string, unknown>): string | undefined {
+    return [input.file_path, input.notebook_path, input.path].find((value): value is string => typeof value === 'string' && !!value);
+  }
+
   private relPath(chat: Chat, input: Record<string, unknown>): string | undefined {
-    const raw = [input.file_path, input.notebook_path, input.path].find((value): value is string => typeof value === 'string' && !!value);
+    const raw = this.rawToolPath(input);
     if (!raw) return undefined;
     const rel = (isAbsolute(raw) ? relative(chat.mirror.cwd, raw) : raw).replaceAll('\\', '/').replace(/^\.\//, '');
     return rel.startsWith('..') ? undefined : rel;
@@ -3176,7 +3250,7 @@ class ExtensionHost implements vscode.Disposable {
         case 'checkDependencies': await this.refreshDependencies(); break;
         case 'installProvider': await this.installProvider(message.provider); break;
         case 'pageChanged': this.sidebar.setPage(message.page); if (message.page === 'accounts') this.refreshUsage(); if (message.page === 'instructions') await this.refreshInstructions(); break;
-        case 'ready': this.sidebar.postMessage({ type: 'usageState', usage: this.usage.snapshot() }); this.refreshUsage(); if (this.active) { this.restoreJob(this.active); this.postJob(this.active); } await this.refreshInstructions(); this.postToolpacks(); this.sidebar.postMessage({ type: 'approvalState', mode: this.approvalMode }); this.refreshCustomize(); this.sync.post(); this.refreshSubagents(); this.refreshModels(); this.refreshSessions(); await this.refreshAccount(); await this.refreshAccounts(); break;
+        case 'ready': this.sidebar.postMessage({ type: 'usageState', usage: this.usage.snapshot() }); this.refreshUsage(); if (this.active) { this.restoreJob(this.active); this.postJob(this.active); } await this.refreshInstructions(); this.postToolpacks(); this.sidebar.postMessage({ type: 'approvalState', mode: this.approvalMode }); this.refreshCustomize(); this.refreshMemory(); this.sync.post(); this.refreshSubagents(); this.refreshModels(); this.refreshSessions(); await this.refreshAccount(); await this.refreshAccounts(); break;
         case 'sendPrompt': {
           const slash = parseSlash(message.prompt);
           if (slash?.name === 'job') await this.startJob(slash.args, message.images);
@@ -3199,6 +3273,8 @@ class ExtensionHost implements vscode.Disposable {
         case 'saveDeciderModel': await this.saveModelSetting('deciderModel', message.deciderModel); break;
         case 'saveExplorerModel': await this.saveModelSetting('explorerModel', message.explorerModel); break;
         case 'saveSmartAutoRanks': await this.saveSmartAutoRanks(message.ranks); break;
+        case 'saveMemory': await this.saveMemorySettings(message.memory); break;
+        case 'pickMemoryFolder': await this.pickMemoryFolder(); break;
         case 'saveAutoCompactTokens':
           await vscode.workspace.getConfiguration('dsh').update('experimental.autoCompactTokens', normalizeCompactTokens(message.tokens), vscode.ConfigurationTarget.Global);
           this.refreshCustomize();

@@ -119,6 +119,8 @@ export type SidebarWebviewMessage =
   | { type: 'saveExplorerModel'; explorerModel: SidebarNameModel }
   | { type: 'saveSmartAutoRanks'; ranks: SidebarSmartAutoRank[] }
   | { type: 'saveAutoCompactTokens'; tokens: number }
+  | { type: 'saveMemory'; memory: { globalPath?: string; repoPath?: string } }
+  | { type: 'pickMemoryFolder' }
   | { type: 'saveAccessibility'; accessibility: SidebarAccessibility }
   | { type: 'deleteAllSessions' }
   | { type: 'syncAction'; action: 'connect' | 'upload' | 'download' | 'disconnect' | 'openGist' | 'keepRemote' | 'keepLocal' }
@@ -244,6 +246,9 @@ export interface CursorAccountState {
   error?: string;
 }
 
+/** Memory folders as set, and whether each was found. */
+export interface SidebarMemory { globalPath: string; repoPath: string; globalStatus: 'off' | 'invalid' | 'found' | 'missing'; repoStatus: 'off' | 'invalid' | 'found' | 'missing' }
+
 export interface SidebarToolEvent {
   id: string;
   kind: 'read' | 'search' | 'shell' | 'edit' | 'subagent' | 'other';
@@ -311,6 +316,7 @@ export type SidebarHostMessage =
   | { type: 'modelRemoveFailed'; name: string }
   | { type: 'subagentProfilesState'; profiles: SidebarSubagentProfile[] }
   | { type: 'subagentSaved' }
+  | { type: 'memoryState'; memory: SidebarMemory }
   | { type: 'customizeState'; features: SidebarFeatures; nameModel: SidebarNameModel; reviewModel: SidebarNameModel; summaryModel: SidebarNameModel; deciderModel: SidebarNameModel; explorerModel: SidebarNameModel; smartAutoRanks: SidebarSmartAutoRank[]; accessibility: SidebarAccessibility; autoCompactTokens: number }
   | { type: 'jobState'; sessionId: string; job: SidebarJob | null }
   | { type: 'syncState'; sync: SidebarSync }
@@ -505,6 +511,7 @@ export function getSidebarHtml(
 <section id="instructions-page" class="page settings-page" hidden>
   <div class="page-heading"><button class="icon-button back" data-page="chat" title="Back to chat" aria-label="Back to chat"><span class="symbol">arrow_back</span></button><div><h1>Behavior</h1></div></div>
   <p class="helper">Rules are standing instructions the agent always follows. Skills are reusable playbooks it loads when they match the task. Rules and skills saved for all workspaces are also shared with Claude and Codex when that option is on in Customize.</p>
+  <div id="memory-settings" class="memory-settings"></div>
   <div class="settings-toolbar toolbar-pair"><button id="add-rule" class="secondary-button" type="button"><span class="symbol small">add</span> Add rule</button><button id="add-skill" class="secondary-button" type="button"><span class="symbol small">add</span> Add skill</button></div>
   <div id="instruction-list" class="scroll-content"></div>
   <form id="instruction-form" class="inline-form" hidden>

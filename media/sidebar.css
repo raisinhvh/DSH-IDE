@@ -662,3 +662,13 @@ body.a11y-targets .usage-toggle { min-height: calc(34px * var(--text-scale, 1));
 .resume-notice[hidden] { display: none; }
 
 .explorer-row .feature-detail { margin: 0; padding: 0; border: 0; }
+
+.memory-settings { padding: 0 10px 4px; }
+.memory-settings .instruction-group { padding-left: 0; padding-right: 0; }
+.memory-settings .helper { margin: 2px 0 6px; }
+.memory-field { display: block; margin-top: 8px; font-weight: 600; }
+.memory-row { display: flex; gap: 4px; align-items: center; margin-top: 4px; }
+.memory-row input { flex: 1 1 auto; min-width: 0; padding: 4px 6px; border: 1px solid var(--vscode-input-border, var(--line)); border-radius: 4px; background: var(--vscode-input-background, var(--input)); color: var(--vscode-input-foreground, inherit); font-weight: 400; }
+.memory-status { display: block; margin-top: 3px; color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); font-weight: 400; }
+.memory-status.memory-found { color: var(--vscode-testing-iconPassed, var(--muted)); }
+.memory-status.memory-invalid, .memory-status.memory-missing { color: var(--vscode-testing-iconFailed, var(--muted)); }

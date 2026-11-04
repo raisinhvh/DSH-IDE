@@ -5,14 +5,14 @@ import { dirname, join, resolve, sep } from 'node:path';
 /** `dsh.*` settings that travel with the config, read from and written to user settings only. */
 export const SYNCED_SETTINGS = [
   'models', 'subagents', 'nameModel', 'reviewModel', 'summaryModel', 'deciderModel', 'explorerModel', 'smartAutoRanks', 'mcpServers', 'accessibility',
-  'checkpointHint', 'keepAliveMax', 'experimental.autoCompact', 'experimental.autoCompactTokens', 'experimental.batching', 'experimental.trimTools',
+  'checkpointHint', 'keepAliveMax', 'experimental.autoCompact', 'experimental.autoCompactTokens', 'experimental.batching', 'experimental.trimTools', 'memory.repoPath',
   'features.activityRail', 'features.autoName', 'features.shareRules', 'features.editorContext', 'features.reduceMotion', 'features.reviewAgent', 'features.fileSummaries',
   'features.smartAuto',
   'updates.check', 'updates.repository', 'runtime.mirror', 'runtime.maxWorkspaceFiles', 'runtime.maxWorkspaceBytes',
 ] as const;
 
 /** `dsh.*` settings that stay on each PC because they hold paths to programs installed on it. */
-export const LOCAL_SETTINGS = ['runtime.nodePath', 'runtime.cursorAgentPath', 'runtime.codexPath', 'runtime.claudePath'] as const;
+export const LOCAL_SETTINGS = ['runtime.nodePath', 'runtime.cursorAgentPath', 'runtime.codexPath', 'runtime.claudePath', 'memory.globalPath'] as const;
 
 export const GIST_FILE = 'dsh-config.json';
 export const GIST_DESCRIPTION = 'DSH-IDE config (synced by DSH-IDE; API keys and MCP secrets are not included)';

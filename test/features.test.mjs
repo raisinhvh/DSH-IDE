@@ -158,3 +158,31 @@ test('deleting a chat removes its record, transcript, mirror and selects the nex
     assert.deepEqual(store.get('dsh.ide.sessions.v1').map(item => item.id), ['two']);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('memory folders are always allowed, and edits outside the project are never approved silently', async () => {
+  const host = Object.create(ExtensionHost.prototype);
+  const asked = [];
+  Object.assign(host, { childRuns: new Set(), askInChat: async (_id, title) => { asked.push(title); return false; } });
+  const chat = { record: { id: 'chat' }, cancelRequested: false, locks: new Map(), mirror: { cwd: '/copy' } };
+  const parent = { owner: 'parent', label: '', readOnly: false };
+  const edit = path => ({ tool: 'Edit', input: { file_path: path } });
+  for (const mode of ['ask', 'auto']) {
+    host.approvalMode = mode;
+    assert.equal(await host.decideApproval(chat, parent, 'Edit', edit('/copy/.dsh/global-memory/tools/rig.md')), true, mode);
+    assert.equal(await host.decideApproval(chat, parent, 'Edit', edit('.dsh/memory/notes.md')), true, mode);
+  }
+  // Read-only subagents and read-only job phases still may not write memory.
+  assert.match(await host.decideApproval(chat, { owner: 'sub', label: 'explorer', readOnly: true }, 'Edit', edit('.dsh/memory/notes.md')), /read-only/);
+  chat.record.job = { phase: 'verify' };
+  assert.match(await host.decideApproval(chat, parent, 'Edit', edit('.dsh/memory/notes.md')), /read-only phase/);
+  chat.record.job = undefined;
+  // Outside the working copy nothing reviews the edit: auto mode and Claude's auto-allow hint ask anyway; full access does not.
+  host.approvalMode = 'auto';
+  assert.equal(await host.decideApproval(chat, parent, 'Edit', { ...edit('/elsewhere/a.md'), autoAllowEdits: true }), false);
+  assert.deepEqual(asked, ['Edit outside the project']);
+  host.approvalMode = 'full';
+  assert.equal(await host.decideApproval(chat, parent, 'Edit', edit('/elsewhere/a.md')), true);
+  // Ordinary project edits keep their existing behavior.
+  host.approvalMode = 'auto';
+  assert.equal(await host.decideApproval(chat, parent, 'Edit', { ...edit('src/a.ts'), autoAllowEdits: true }), true);
+});

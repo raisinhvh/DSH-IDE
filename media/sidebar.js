@@ -1376,6 +1376,36 @@
     });
   }
 
+  /** Memory folders at the top of Behavior. Inputs save on change; a field being typed in is not rebuilt. */
+  let memoryKey = '';
+  function renderMemory() {
+    const root = el('memory-settings');
+    const memory = state.memory || { globalPath: '', repoPath: '.dsh/memory', globalStatus: 'off', repoStatus: 'missing' };
+    const key = JSON.stringify(memory);
+    if (key === memoryKey && root.childElementCount) return;
+    if (root.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
+    memoryKey = key;
+    root.textContent = '';
+    const heading = document.createElement('div'); heading.className = 'instruction-group'; heading.textContent = 'Memory';
+    const help = document.createElement('p'); help.className = 'helper';
+    help.textContent = 'Folders of notes, conventions and scripts. Agents find the global one at .dsh/global-memory/ in every project and the repo one in place, and can read and update both without asking. Notes they save to the global copy are written back to your folder after each turn.';
+    root.append(heading, help);
+    const status = { found: 'Found', missing: 'Folder not found', invalid: 'Not a valid path', off: 'Off', notYet: 'Not created yet; agents create it when they save a project note' };
+    const field = (label, value, placeholder, state, save, browse) => {
+      const wrap = document.createElement('label'); wrap.className = 'memory-field'; wrap.textContent = label;
+      const row = document.createElement('div'); row.className = 'memory-row';
+      const input = document.createElement('input'); input.type = 'text'; input.value = value; input.placeholder = placeholder; input.spellcheck = false;
+      input.onchange = () => save(input.value.trim());
+      input.onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); input.blur(); } };
+      row.appendChild(input);
+      if (browse) row.appendChild(button('', 'Choose folder', browse, 'icon-button', 'folder_open'));
+      const note = document.createElement('span'); note.className = 'memory-status memory-' + state; note.textContent = status[state] || '';
+      wrap.append(row, note); root.appendChild(wrap);
+    };
+    field('Global folder (this PC)', memory.globalPath, 'C:\\Users\\you\\Notes', memory.globalStatus, value => send({ type: 'saveMemory', memory: { globalPath: value } }), () => send({ type: 'pickMemoryFolder' }));
+    field('Repo folder (in each project)', memory.repoPath, '.dsh/memory', memory.repoStatus === 'missing' ? 'notYet' : memory.repoStatus, value => send({ type: 'saveMemory', memory: { repoPath: value } }));
+  }
+
   function renderInstructions() {
     const root = el('instruction-list');
     const items = state.instructions || [];
@@ -2093,7 +2123,7 @@
     renderNotice(); renderPicker(); renderApproval(); renderSessions(); renderContext(); renderFeed(); renderUsageButton();
     if (page === 'accounts') renderAccounts();
     if (page === 'subagents') renderSubagents();
-    if (page === 'instructions') renderInstructions();
+    if (page === 'instructions') { renderMemory(); renderInstructions(); }
     if (page === 'models') { renderModels(); if (!el('model-form').hidden) updateModelSources(); }
     if (page === 'toolcalls') renderToolpacks();
     if (page === 'customize') renderCustomize();
@@ -2382,6 +2412,7 @@
         applyAccessibility(state.accessibility);
         break;
       case 'syncState': state.sync = message.sync || state.sync; break;
+      case 'memoryState': state.memory = message.memory; if (page === 'instructions') renderMemory(); break;
       case 'instructionContent': {
         const form = el('instruction-form');
         if (!form.hidden && form.dataset.id === message.id) { const content = el('instruction-content'); content.value = message.content; content.disabled = false; content.focus(); }
