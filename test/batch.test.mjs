@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { BATCH_TOOL_SCHEMA, batchValue, callDependencies, callLabel, executeBatch, fairShares, formatBatchResult, globPattern, isBatchTool, MAX_BATCH_CHARS, parseBatchCalls, resolvePlaceholders, runBatchFileTool, uniqueBatchCalls } from '../dist/runtime/batch.mjs';
+import { join, sep } from 'node:path';
+import { BATCH_TOOL_SCHEMA, batchValue, callDependencies, callLabel, executeBatch, fairShares, formatBatchResult, globPattern, isBatchTool, MAX_BATCH_CHARS, outsideWorkingCopy, parseBatchCalls, resolvePlaceholders, runBatchFileTool, searchRegex, uniqueBatchCalls } from '../dist/runtime/batch.mjs';
 import { chatHistoryReply, formatMessages, handoffSummaryPrompt, toolLine } from '../dist/runtime/handoff.mjs';
 import { buildPartsHandoff, parsePartsReply, partsPrompt, partWindows } from '../dist/runtime/transcriptParts.mjs';
 import { SUMMARY_TOOL } from '../dist/summaries/store.mjs';
@@ -127,6 +127,13 @@ test('globs match basenames or slash paths', () => {
   assert.ok(!globPattern('src/*.ts').test('src/a/b.ts'));
 });
 
+test('search patterns accept inline flags', () => {
+  assert.equal(searchRegex('(?i)abc').flags, 'i');
+  assert.equal(searchRegex('(?i)abc').source, 'abc');
+  assert.equal(searchRegex('(?ms)a.b', true).flags, 'ims');
+  assert.equal(searchRegex('needle').flags, '');
+});
+
 test('batch file tools read, search and list inside the working copy only', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-batch-'));
   const outside = await mkdtemp(join(tmpdir(), 'dsh-outside-'));
@@ -151,6 +158,19 @@ test('batch file tools read, search and list inside the working copy only', asyn
     }
     assert.match((await runBatchFileTool(root, 'read_file', { path: 'missing.ts' })).text, /does not exist/);
     assert.match((await runBatchFileTool(root, 'search', { pattern: '(' })).text, /Invalid pattern/);
+    assert.equal((await runBatchFileTool(root, 'search', { pattern: '(?i)TWO NEEDLE' })).text, 'src/a.ts:2: two needle');
+
+    // Outside paths read once the caller allows them, and are shown absolute.
+    assert.equal(await outsideWorkingCopy(root, 'src/a.ts'), false);
+    for (const path of ['../x', join(outside, 'secret.txt')]) assert.equal(await outsideWorkingCopy(root, path), true, path);
+    assert.equal((await runBatchFileTool(root, 'read_file', { path: join(outside, 'secret.txt') }, { outside: true })).text, 'secret');
+    assert.equal((await runBatchFileTool(root, 'search', { pattern: 'sec', path: outside }, { outside: true })).text, `${join(outside, 'secret.txt').split(sep).join('/')}:1: secret`);
+
+    // Images come back as image content, not text.
+    await writeFile(join(root, 'shot.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2]));
+    const image = await runBatchFileTool(root, 'read_file', { path: 'shot.png' });
+    assert.match(image.text, /^shot\.png \(image, 0 KB\)$/);
+    assert.deepEqual(image.content, [{ type: 'image', data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2]).toString('base64'), mimeType: 'image/png' }]);
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });

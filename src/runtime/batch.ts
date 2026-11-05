@@ -1,5 +1,5 @@
 import { lstat, readdir, readFile, realpath, stat } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { ToolpackContent } from '../toolpacks/types';
 
 /**
@@ -24,11 +24,11 @@ const SKIP_DIRS = new Set(['.git', 'node_modules', '.dsh', '.hg', '.svn', '__pyc
 export const MAX_FOREACH_RUNS = 50;
 const FOREACH_CONCURRENCY = 4;
 
-export const BATCH_INSTRUCTIONS = `DSH batch: ${BATCH_TOOL} runs several calls in one go and returns one combined result. From the first step of a task, put any two or more file reads, searches or listings in one ${BATCH_TOOL} instead of separate native read, grep, glob or shell calls. Read a file natively only right before editing it (edit tools require that), and use the shell only to run commands. Do the same for two or more dsh-delegate or toolpack calls, including chains: an argument "{{1.id}}" is a field of call 1's result (the call waits for it), after:[1] only orders, and forEach:"{{1.nodes}}" runs a call once per item ({{item.id}}). Inside a batch only, read_file {path, offset?, limit?}, search {pattern, path?, glob?, ignore_case?, max_results?} and list_dir {path?} read the working copy.`;
+export const BATCH_INSTRUCTIONS = `DSH batch: ${BATCH_TOOL} runs several calls in one go and returns one combined result. From the first step of a task, put any two or more file reads, searches or listings in one ${BATCH_TOOL} instead of separate native read, grep, glob or shell calls. Read a file natively only right before editing it (edit tools require that), and use the shell only to run commands. Do the same for two or more dsh-delegate or toolpack calls, including chains: an argument "{{1.id}}" is a field of call 1's result (the call waits for it), after:[1] only orders, and forEach:"{{1.nodes}}" runs a call once per item ({{item.id}}). Inside a batch only, read_file {path, offset?, limit?}, search {pattern, path?, glob?, ignore_case?, max_results?} and list_dir {path?} read the working copy; paths outside it need the user's approval unless DSH has full access, and read_file returns png, jpg and webp files as images.`;
 
 export const BATCH_TOOL_SCHEMA = {
   name: BATCH_TOOL,
-  description: `Run up to ${MAX_BATCH_CALLS} calls; one combined result, one entry per call in order. A call may name any other dsh-delegate tool (toolpack tools included), or a batch-only file tool: read_file {path, offset? (first line, 1-based), limit? (lines, default ${DEFAULT_READ_LINES})}, search {pattern (JS regex), path?, glob? (e.g. "*.ts"), ignore_case?, max_results? (default 100)}, list_dir {path?}. Paths are relative to the working copy. Calls run in parallel unless they depend on earlier ones:
+  description: `Run up to ${MAX_BATCH_CALLS} calls; one combined result, one entry per call in order. A call may name any other dsh-delegate tool (toolpack tools included), or a batch-only file tool: read_file {path, offset? (first line, 1-based), limit? (lines, default ${DEFAULT_READ_LINES})}, search {pattern (JS regex), path?, glob? (e.g. "*.ts"), ignore_case?, max_results? (default 100)}, list_dir {path?}. Paths are relative to the working copy; paths outside it ask the user first unless DSH has full access. read_file returns png, jpg and webp files as images. Calls run in parallel unless they depend on earlier ones:
 - "{{N.path}}" in any argument string is part of call N's JSON result, e.g. "{{1.id}}", "{{1.nodes[0].id}}", "{{1.nodes[*].id}}" (a list). As the whole string it keeps its type; inside a longer string it becomes text. "{{N}}" is the whole result, or its text when it is not JSON.
 - after: [N, ...] waits for those calls without using their results (e.g. a write, then a read).
 - forEach: "{{N.path}}" runs the call once per item of that list (at most ${MAX_FOREACH_RUNS}); "{{item}}" or "{{item.id}}" is the current item.
@@ -361,19 +361,57 @@ export function fairShares(sizes: number[], budget: number): number[] {
   return limits;
 }
 
-/** Resolves a working-copy path and refuses anything outside it, including through symlinks. */
-export async function insidePath(cwd: string, path: unknown): Promise<string> {
+const leavesRoot = (rel: string): boolean => rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+
+function absolutePath(cwd: string, path: unknown): { value: string; absolute: string } {
   const value = typeof path === 'string' && path.trim() ? path.trim() : '.';
-  const absolute = isAbsolute(value) ? resolve(value) : resolve(cwd, value);
-  const rel = relative(cwd, absolute);
-  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error(`${value} is outside the working copy.`);
-  const [root, real] = await Promise.all([realpath(cwd), realpath(absolute)]);
-  const realRel = relative(root, real);
-  if (realRel === '..' || realRel.startsWith(`..${sep}`) || isAbsolute(realRel)) throw new Error(`${value} is outside the working copy.`);
+  return { value, absolute: isAbsolute(value) ? resolve(value) : resolve(cwd, value) };
+}
+
+/** Whether a path leaves the working copy, directly or through a symlink. A path that does not exist is judged by its text. */
+export async function outsideWorkingCopy(cwd: string, path: unknown): Promise<boolean> {
+  const { absolute } = absolutePath(cwd, path);
+  if (leavesRoot(relative(cwd, absolute))) return true;
+  try {
+    const [root, real] = await Promise.all([realpath(cwd), realpath(absolute)]);
+    return leavesRoot(relative(root, real));
+  } catch {
+    return false;
+  }
+}
+
+/** Resolves a path; unless `outside` allows it, refuses anything outside the working copy, including through symlinks. */
+export async function insidePath(cwd: string, path: unknown, outside = false): Promise<string> {
+  const { value, absolute } = absolutePath(cwd, path);
+  if (!outside && await outsideWorkingCopy(cwd, value)) throw new Error(`${value} is outside the working copy.`);
   return absolute;
 }
 
-const display = (cwd: string, absolute: string): string => relative(cwd, absolute).split(sep).join('/') || '.';
+/** A path as results show it: relative inside the working copy, absolute outside it. */
+const display = (cwd: string, absolute: string): string => {
+  const rel = relative(cwd, absolute);
+  return (leavesRoot(rel) ? absolute : rel).split(sep).join('/') || '.';
+};
+
+/** Options for the batch file tools; `outside` lets them read beyond the working copy. */
+export interface BatchFileOptions { outside?: boolean }
+
+const IMAGE_TYPES: Record<string, Extract<ToolpackContent, { type: 'image' }>['mimeType']> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+};
+/** Images past this size are refused; the API rejects base64 images near 5 MB. */
+const MAX_IMAGE_BYTES = 3_750_000;
+
+/** The inline flags a pattern such as "(?i)foo" starts with become RegExp flags, since JS has no inline flags. */
+export function searchRegex(source: string, ignoreCase = false): RegExp {
+  const inline = source.match(/^\(\?([imsu]+)\)/);
+  const flags = new Set(inline ? inline[1].split('') : []);
+  if (ignoreCase) flags.add('i');
+  return new RegExp(inline ? source.slice(inline[0].length) : source, [...flags].join(''));
+}
 
 function looksBinary(buffer: Buffer): boolean {
   return buffer.subarray(0, 8000).includes(0);
@@ -397,10 +435,16 @@ export function globPattern(glob: string): RegExp {
   return new RegExp(`^${out}$`);
 }
 
-async function readFileTool(cwd: string, args: Record<string, unknown>): Promise<BatchOutcome> {
-  const file = await insidePath(cwd, args.path);
+async function readFileTool(cwd: string, args: Record<string, unknown>, options: BatchFileOptions): Promise<BatchOutcome> {
+  const file = await insidePath(cwd, args.path, options.outside);
   const info = await stat(file);
   if (info.isDirectory()) return { text: `${display(cwd, file)} is a directory; use list_dir.`, isError: true };
+  const mimeType = IMAGE_TYPES[extname(file).toLowerCase()];
+  if (mimeType) {
+    if (info.size > MAX_IMAGE_BYTES) return { text: `${display(cwd, file)} is a ${Math.round(info.size / 1024)} KB image; images over ${Math.round(MAX_IMAGE_BYTES / 1024)} KB can't be shown.`, isError: true };
+    const data = (await readFile(file)).toString('base64');
+    return { text: `${display(cwd, file)} (image, ${Math.round(info.size / 1024)} KB)`, content: [{ type: 'image', data, mimeType }] };
+  }
   if (info.size > MAX_FILE_BYTES) return { text: `${display(cwd, file)} is ${info.size} bytes; read it with offset and limit through your own tools.`, isError: true };
   const buffer = await readFile(file);
   if (looksBinary(buffer)) return { text: `${display(cwd, file)} is a binary file.`, isError: true };
@@ -413,15 +457,15 @@ async function readFileTool(cwd: string, args: Record<string, unknown>): Promise
   return { text: `${range ? `${range.trim()}\n` : ''}${picked.join('\n')}` };
 }
 
-async function searchTool(cwd: string, args: Record<string, unknown>): Promise<BatchOutcome> {
+async function searchTool(cwd: string, args: Record<string, unknown>, options: BatchFileOptions): Promise<BatchOutcome> {
   const source = typeof args.pattern === 'string' ? args.pattern : '';
   if (!source) return { text: 'pattern is required.', isError: true };
   let regex: RegExp;
-  try { regex = new RegExp(source, args.ignore_case === true ? 'i' : ''); } catch (error) { return { text: `Invalid pattern: ${error instanceof Error ? error.message : String(error)}`, isError: true }; }
+  try { regex = searchRegex(source, args.ignore_case === true); } catch (error) { return { text: `Invalid pattern: ${error instanceof Error ? error.message : String(error)}`, isError: true }; }
   const glob = typeof args.glob === 'string' && args.glob.trim() ? args.glob.trim() : undefined;
   const globRegex = glob ? globPattern(glob) : undefined;
   const max = Math.max(1, Math.min(Math.floor(Number(args.max_results) || 100), 500));
-  const start = await insidePath(cwd, args.path);
+  const start = await insidePath(cwd, args.path, options.outside);
   const hits: string[] = [];
   let scanned = 0;
   let truncated = false;
@@ -457,19 +501,19 @@ async function searchTool(cwd: string, args: Record<string, unknown>): Promise<B
   return { text: `${hits.join('\n')}${truncated ? `\n[stopped at ${hits.length} matches; narrow path or glob]` : ''}` };
 }
 
-async function listDirTool(cwd: string, args: Record<string, unknown>): Promise<BatchOutcome> {
-  const dir = await insidePath(cwd, args.path);
+async function listDirTool(cwd: string, args: Record<string, unknown>, options: BatchFileOptions): Promise<BatchOutcome> {
+  const dir = await insidePath(cwd, args.path, options.outside);
   const entries = await readdir(dir, { withFileTypes: true });
   const names = entries.map(entry => entry.isDirectory() ? `${entry.name}/` : entry.name).sort();
   const shown = names.slice(0, MAX_LIST_ENTRIES);
   return { text: `${shown.join('\n') || '(empty)'}${names.length > shown.length ? `\n[${names.length - shown.length} more entries]` : ''}` };
 }
 
-export async function runBatchFileTool(cwd: string, tool: BatchFileTool, args: Record<string, unknown>): Promise<BatchOutcome> {
+export async function runBatchFileTool(cwd: string, tool: BatchFileTool, args: Record<string, unknown>, options: BatchFileOptions = {}): Promise<BatchOutcome> {
   try {
-    if (tool === 'read_file') return await readFileTool(cwd, args);
-    if (tool === 'search') return await searchTool(cwd, args);
-    return await listDirTool(cwd, args);
+    if (tool === 'read_file') return await readFileTool(cwd, args, options);
+    if (tool === 'search') return await searchTool(cwd, args, options);
+    return await listDirTool(cwd, args, options);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException)?.code;
     return { text: code === 'ENOENT' ? `${String(args.path ?? '.')} does not exist.` : error instanceof Error ? error.message : String(error), isError: true };

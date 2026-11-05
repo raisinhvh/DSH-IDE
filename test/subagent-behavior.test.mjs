@@ -116,6 +116,28 @@ test('delegation events never enter the tool bar or create a duplicate subagent 
   }
 });
 
+test('cancelling a subagent reports its reply so far and the tools it ran', async () => {
+  const { host, chat } = fixture('read-only');
+  let release;
+  host.ensureRuntime = async () => ({ key: 'runtime', runtime: {
+    newSession: async () => 'session', closeSession: async () => {}, cancel: () => release(), stop: async () => {},
+    prompt: async () => {
+      const child = [...host.childRuns][0];
+      child.onUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Built the base part.' } });
+      child.onUpdate({ sessionUpdate: 'tool_call', toolCallId: 'one', title: 'roblox_execute' });
+      await new Promise(resolve => { release = resolve; });
+    },
+  } });
+  const entry = { id: 'task-1', label: 'test-agent', afterTurn: 'resume', done: false };
+  chat.background = new Map([[entry.id, entry]]);
+  entry.finished = host.runSubagentCore(chat, host.subagentProfiles()[0], 'Build it', [], run => { entry.run = run; })
+    .then(result => { entry.done = true; entry.result = result; });
+  while (!release) await new Promise(resolve => setTimeout(resolve, 5));
+  const report = await host.cancelSubagent(chat, { id: 'task-1' });
+  assert.match(report.text, /^Cancelled background subagent task-1 \(test-agent\)\.\n\nThe subagent was cancelled\.\n\nIts reply so far:\nBuilt the base part\.\n\nTools it ran:\n- roblox_execute$/);
+  assert.equal(chat.background.size, 0);
+});
+
 test('a batch runs DSH tools and file reads in parallel and returns one combined result', async () => {
   const { host, chat, events } = fixture('read-only');
   Object.assign(chat, { ownerId: 'owner', running: true, turnTools: [], cancelRequested: false });
@@ -137,9 +159,22 @@ test('a batch runs DSH tools and file reads in parallel and returns one combined
   assert.equal(card.state, 'complete');
   assert.deepEqual(card.children.map(child => [child.title, child.state]), [['delegate_task', 'complete'], ['read_file', 'complete'], ['list_locked_files', 'complete'], ['no_such_tool', 'error']]);
 
-  const secret = await host.handleDelegateCall('owner', 'batch', { calls: [{ tool: 'read_file', args: { path: '.env' } }, { tool: 'search', args: { pattern: 'x', path: '../' } }] });
+  // Outside paths are asked about once, up front; inside ones that look sensitive are still refused.
+  const asked = [];
+  host.askInChat = async (sessionId, title, detail) => { asked.push({ title, detail }); return false; };
+  const secret = await host.handleDelegateCall('owner', 'batch', { calls: [{ tool: 'read_file', args: { path: '.env' } }, { tool: 'search', args: { pattern: 'x', path: '../' } }, { tool: 'list_dir', args: { path: '..' } }] });
   assert.match(secret.text, /\[1\] read_file \.env \(error\)\n\.env needs approval/);
-  assert.match(secret.text, /\[2\] search \.\.\/ \(error\)\n\.\.\/ needs approval/);
+  assert.match(secret.text, /\[2\] search \.\.\/ \(error\)\n\.\.\/ is outside the project and the user declined/);
+  assert.match(secret.text, /\[3\] list_dir \.\. \(error\)\n\.\. is outside the project and the user declined/);
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0].title, 'Read outside the project');
+  assert.equal(asked[0].detail.split('\n').length, 2);
+  host.askInChat = async () => true;
+  assert.doesNotMatch((await host.handleDelegateCall('owner', 'batch', { calls: [{ tool: 'list_dir', args: { path: '..' } }] })).text, /error/);
+  host.askInChat = async () => { throw new Error('full access never asks'); };
+  host.approvalMode = 'full';
+  assert.doesNotMatch((await host.handleDelegateCall('owner', 'batch', { calls: [{ tool: 'list_dir', args: { path: '..' } }] })).text, /error/);
+  host.approvalMode = undefined;
 
   host.feature = () => false;
   assert.deepEqual(await host.handleDelegateCall('owner', 'batch', { calls: [{ tool: 'list_locked_files' }] }), { text: 'Batching is turned off.', isError: true });

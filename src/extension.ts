@@ -45,7 +45,7 @@ import { buildHandoff, CHAT_HISTORY_TOOL, chatHistoryReply, ChatMessage, handoff
 import { buildPartsHandoff, parsePartsReply, partsDir, partsPrompt, partWindows, TranscriptPart, unsummarizedPart, writeTranscriptParts } from './runtime/transcriptParts';
 import { findGit, GIT_DOWNLOAD_PAGE, installGit } from './runtime/git';
 import { globalMemoryFolder, isMemoryPath, memoryInstructions, memorySyncNeeded, syncGlobalMemory } from './runtime/memory';
-import { BATCH_INSTRUCTIONS, BatchCall, BatchOutcome, callLabel, executeBatch, formatBatchResult, isBatchFileTool, isBatchTool, parseBatchCalls, runBatchFileTool, uniqueBatchCalls } from './runtime/batch';
+import { BATCH_INSTRUCTIONS, BatchCall, BatchOutcome, callLabel, executeBatch, formatBatchResult, isBatchFileTool, isBatchTool, outsideWorkingCopy, parseBatchCalls, runBatchFileTool, uniqueBatchCalls } from './runtime/batch';
 import { describePackTools, LOAD_TOOLPACK, loadToolpackTool, packCommands, RUN_TOOLPACK_TOOL, runToolpackTool } from './toolpacks/access';
 import { DshSidebarProvider, SidebarWebviewMessage } from './sidebar/provider';
 import { ApprovalMode, CursorAccountState, SidebarAccessibility, SidebarFeatureKey, SidebarFeatures, SidebarImage, SidebarJob, SidebarNameModel, SidebarQuestion, SidebarSmartAutoRank, SidebarTimelineItem, SidebarSubagent, defaultFeatures, normalizeAccessibility, normalizeCompactTokens } from './sidebar/view';
@@ -2340,14 +2340,32 @@ class ExtensionHost implements vscode.Disposable {
     };
     for (const call of calls) this.logTool(chat, call.tool, callLabel(call).slice(call.tool.length).trim() || undefined);
     post();
+    const cwd = chat.mirror.cwd;
+    // Outside the working copy the user decides per path, unless DSH has full access. Paths written out in the batch are asked about together, up front.
+    const outsideAnswers = new Map<string, Promise<boolean>>();
+    const askOutside = (paths: string[]): Promise<boolean> => this.askInChat(chat.record.id, 'Read outside the project', `The batch wants to read:\n${paths.join('\n')}`);
+    if (this.approvalMode !== 'full') {
+      const written = calls.filter(call => isBatchFileTool(call.tool) && !call.forEach && typeof call.args.path === 'string' && !/\{\{/.test(call.args.path)).map(call => call.args.path as string);
+      const outside = [...new Set((await Promise.all(written.map(async path => await outsideWorkingCopy(cwd, path) ? resolvePath(cwd, path.trim()) : ''))).filter(Boolean))];
+      if (outside.length) {
+        const answer = askOutside(outside);
+        for (const path of outside) outsideAnswers.set(path, answer);
+      }
+    }
     // Calls arrive here with their placeholders filled in; forEach calls arrive once per item.
     const runCall = async (call: BatchCall): Promise<BatchOutcome> => {
       if (!isBatchFileTool(call.tool)) return this.handleDelegateCall(chat.ownerId, call.tool, call.args);
       const path = typeof call.args.path === 'string' ? call.args.path : '';
-      // Paths that need approval elsewhere (.env, .ssh, credentials, outside the copy) are not read silently here.
-      if (this.approvalMode !== 'full' && path && isRiskyAction(path)) return { text: `${path} needs approval; read it with your own tools.`, isError: true };
-      if (call.tool === 'read_file') this.noteRead(chat.mirror.cwd, path);
-      return runBatchFileTool(chat.mirror.cwd, call.tool, call.args);
+      const outside = !!path && await outsideWorkingCopy(cwd, path);
+      if (outside && this.approvalMode !== 'full') {
+        const absolute = resolvePath(cwd, path.trim());
+        if (!outsideAnswers.has(absolute)) outsideAnswers.set(absolute, askOutside([absolute]));
+        if (!await outsideAnswers.get(absolute)) return { text: `${path} is outside the project and the user declined.`, isError: true };
+      }
+      // Inside the copy, paths that need approval elsewhere (.env, .ssh, credentials) are not read silently here.
+      if (!outside && this.approvalMode !== 'full' && path && isRiskyAction(path)) return { text: `${path} needs approval; read it with your own tools.`, isError: true };
+      if (call.tool === 'read_file' && !outside) this.noteRead(cwd, path);
+      return runBatchFileTool(cwd, call.tool, call.args, { outside });
     };
     const outcomes = await executeBatch(calls, runCall, (index, outcome) => {
       children[index].state = outcome.isError ? 'error' : 'complete';
@@ -2753,13 +2771,19 @@ class ExtensionHost implements vscode.Disposable {
     return { text: [report, running.length ? `Still running: ${running.join(', ')}.` : '', unknown.length ? `Unknown ids: ${unknown.join(', ')}.` : ''].filter(Boolean).join('\n\n') || 'Nothing finished yet.' };
   }
 
-  private cancelSubagent(chat: Chat, args: Record<string, unknown>): DelegateResult {
+  /** Stops a background subagent and reports what it did so far, waiting briefly for it to wind down. */
+  private async cancelSubagent(chat: Chat, args: Record<string, unknown>): Promise<DelegateResult> {
     const id = typeof args.id === 'string' ? args.id.trim() : '';
     const task = chat.background.get(id);
     if (!task) return { text: `No background subagent with id "${id}".`, isError: true };
     chat.background.delete(id);
+    const heading = task.done ? `Background subagent ${id} (${task.label}) had already finished.` : `Cancelled background subagent ${id} (${task.label}).`;
     task.run?.cancel();
-    return { text: `Cancelled background subagent ${id} (${task.label}).` };
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([task.finished, new Promise<void>(resolve => { timer = setTimeout(resolve, 5_000); })]);
+    clearTimeout(timer);
+    const report = task.done ? task.result?.text || '(no report)' : 'It had not stopped after 5 seconds, so there is no report of its work.';
+    return { text: `${heading}\n\n${report}` };
   }
 
   /** Called when a background subagent finishes: once every "resume" task of an idle chat is done, their results start a new turn. */
@@ -2912,9 +2936,15 @@ class ExtensionHost implements vscode.Disposable {
       if (raw.trim()) gap = false;
       reply += text; post({ text, messageId: 'reply' });
     };
+    // The latest tool calls, reported if the subagent is cancelled or fails.
+    const toolLog: string[] = [];
+    let toolCount = 0;
     const onTool = (id: string, title: string, detail: string | undefined, state: 'running' | 'complete' | 'error'): void => {
       if (state !== 'running') return;
       gap = true;
+      toolCount += 1;
+      toolLog.push(`- ${title}${detail ? `: ${detail.replace(/\s+/g, ' ').slice(0, 150)}` : ''}`);
+      if (toolLog.length > 30) toolLog.shift();
       post({ text: `${title}${detail ? `: ${detail.slice(0, 300)}` : ''}`, messageId: `tool:${id}`, role: 'tool' });
       this.noteRead(chat.mirror.cwd, readToolPath(title, detail));
     };
@@ -3032,6 +3062,10 @@ class ExtensionHost implements vscode.Disposable {
       post({ state: cancelled ? 'cancelled' : 'error' });
       const message = error instanceof Error ? error.message : String(error);
       let result = cancelled ? 'The subagent was cancelled.' : `Subagent "${name}" failed: ${message}`;
+      // What it did before stopping, so the requester need not redo or guess at it.
+      const partial = reply.slice(reportStart).trim();
+      if (partial) result += `\n\nIts reply so far:\n${partial.length > 1500 ? `…${partial.slice(-1500)}` : partial}`;
+      if (toolLog.length) result += `\n\nTools it ran${toolCount > toolLog.length ? ` (last ${toolLog.length} of ${toolCount})` : ''}:\n${toolLog.join('\n')}`;
       if (run.changed.size) result += `\n\n---\nFiles changed by this subagent: ${[...run.changed].join(', ')}`;
       return { text: result, isError: true };
     } finally {

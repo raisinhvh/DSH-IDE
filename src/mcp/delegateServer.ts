@@ -47,6 +47,8 @@ async function tools(): Promise<Json[]> {
             description: `Run a task on a configured subagent (possibly another model) in the same working copy. Waits for its answer unless background is true. Without files it is read-only; files lets an edit profile change only those paths (trailing "/" for a folder), locked to it until it finishes.\nProfiles:\n${agents || '(none configured)'}`,
             // Claude Code only runs MCP tools concurrently when they are marked read-only. Edit subagents are still confined to their locked paths.
             annotations: readOnly,
+            // Keep it out of Claude Code's tool search: deferred, its params stay hidden and the first call guesses them ("subagent" for agent).
+            _meta: { 'anthropic/alwaysLoad': true },
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -63,6 +65,8 @@ async function tools(): Promise<Json[]> {
             name: WAIT_SUBAGENTS,
             description: 'Wait for background subagents and return their reports (each only once).',
             annotations: readOnly,
+            // Loaded with delegate_task, so a background task can always be collected.
+            _meta: { 'anthropic/alwaysLoad': true },
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -74,7 +78,7 @@ async function tools(): Promise<Json[]> {
         },
         {
             name: CANCEL_SUBAGENT,
-            description: 'Stop a background subagent.',
+            description: 'Stop a background subagent and return what it did so far.',
             annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
             inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         },
