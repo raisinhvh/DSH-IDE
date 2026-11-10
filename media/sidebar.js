@@ -1661,16 +1661,22 @@
   function renderVoice() {
     const voice = el('voice');
     voice.hidden = !state.voiceAvailable || !state.features.voice;
-    if (voice.hidden && voiceMode !== 'off') stopVoice();
+    if (voice.hidden && voiceMode !== 'off') stopVoice(true);
     voice.classList.toggle('listening', voiceMode === 'listening');
-    voice.classList.toggle('starting', voiceMode === 'starting');
+    voice.classList.toggle('starting', voiceMode === 'starting' || voiceMode === 'finishing');
     voice.setAttribute('aria-pressed', String(voiceMode !== 'off'));
     const label = voiceMode === 'off' ? 'Start voice input' : 'Stop voice input';
-    voice.title = voiceMode === 'off' ? 'Voice input' : 'Listening. Click to stop.'; voice.setAttribute('aria-label', label);
+    const titles = { off: 'Voice input', starting: 'Starting voice input…', listening: 'Listening. Click to stop.', finishing: 'Finishing… Click to stop now.' };
+    voice.title = titles[voiceMode]; voice.setAttribute('aria-label', label);
   }
 
-  function stopVoice() {
+  /** While listening, the first stop lets the last phrase finish transcribing; any other stop ends at once. */
+  function stopVoice(hard) {
     if (voiceMode === 'off') return;
+    if (!hard && voiceMode === 'listening') {
+      voiceMode = 'finishing'; renderVoice(); send({ type: 'voiceStop' });
+      return;
+    }
     voiceMode = 'off'; clearVoiceDraft(); renderVoice(); send({ type: 'voiceStop' });
   }
 
@@ -2497,7 +2503,7 @@
         break;
       case 'syncState': state.sync = message.sync || state.sync; break;
       case 'voiceState':
-        if (message.listening) { if (voiceMode !== 'off') voiceMode = 'listening'; }
+        if (message.listening) { if (voiceMode === 'starting') voiceMode = 'listening'; }
         else { voiceMode = 'off'; clearVoiceDraft(); }
         if (message.error) state.error = message.error;
         renderVoice(); renderNotice();

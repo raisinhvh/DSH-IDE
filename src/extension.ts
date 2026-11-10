@@ -48,7 +48,8 @@ import { globalMemoryFolder, isMemoryPath, memoryInstructions, memorySyncNeeded,
 import { BATCH_INSTRUCTIONS, BatchCall, BatchOutcome, callLabel, executeBatch, formatBatchResult, isBatchFileTool, isBatchTool, outsideWorkingCopy, parseBatchCalls, runBatchFileTool, uniqueBatchCalls } from './runtime/batch';
 import { describePackTools, LOAD_TOOLPACK, loadToolpackTool, packCommands, RUN_TOOLPACK_TOOL, runToolpackTool } from './toolpacks/access';
 import { DshSidebarProvider, SidebarWebviewMessage } from './sidebar/provider';
-import { Dictation, normalizeVoiceCommands, VOICE_PRIVACY_ERROR, VoiceCommand } from './voice/dictation';
+import { Dictation, normalizeVoiceCommands, VoiceCommand } from './voice/dictation';
+import { installedWhisper, installWhisper, WHISPER_DOWNLOAD_BYTES, WhisperEngine } from './voice/whisperInstall';
 import { ApprovalMode, CursorAccountState, SidebarAccessibility, SidebarFeatureKey, SidebarFeatures, SidebarImage, SidebarJob, SidebarNameModel, SidebarQuestion, SidebarSmartAutoRank, SidebarTimelineItem, SidebarSubagent, defaultFeatures, normalizeAccessibility, normalizeCompactTokens } from './sidebar/view';
 import { deciderPrompt, MAX_NOTE, MAX_RANKS, normalizeRanks, parseDecision, rankLabel, SMART_AUTO, SmartAutoRank } from './runtime/smartAuto';
 
@@ -241,6 +242,9 @@ class ExtensionHost implements vscode.Disposable {
   private readonly status: vscode.StatusBarItem;
   private readonly runtimes = new Map<string, AcpRuntime>();
   private dictation?: Dictation;
+  private whisperInstall?: Promise<WhisperEngine>;
+  /** Bumped by every voice start and stop, so a start that finishes downloading late knows it was cancelled. */
+  private voiceSession = 0;
   private readonly chats = new Map<string, Chat>();
   private readonly chatLoads = new Map<string, Promise<Chat>>();
   private readonly promptStarts = new Map<string, Promise<void>>();
@@ -2473,12 +2477,52 @@ class ExtensionHost implements vscode.Disposable {
     return normalizeVoiceCommands(vscode.workspace.getConfiguration('dsh').get<unknown>('voice.commands'));
   }
 
+  /** Downloads local Whisper once, with a progress notification; shared by overlapping starts. */
+  private whisperEngine(): Promise<WhisperEngine> {
+    const root = join(this.context.globalStorageUri.fsPath, 'whisper');
+    const installed = installedWhisper(root);
+    if (installed) return Promise.resolve(installed);
+    this.whisperInstall ??= Promise.resolve(vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      title: `Downloading local Whisper for voice input (${Math.round(WHISPER_DOWNLOAD_BYTES / 1_000_000)} MB, one time)`,
+    }, async progress => {
+      let reported = 0;
+      return installWhisper(root, fraction => {
+        const percent = Math.floor(fraction * 100);
+        if (percent > reported) {
+          progress.report({ increment: percent - reported, message: `${percent}%` });
+          reported = percent;
+        }
+      });
+    })).finally(() => { this.whisperInstall = undefined; });
+    return this.whisperInstall;
+  }
+
+  /** Stops dictation, or cancels a start that is still downloading Whisper. */
+  private stopVoice(): void {
+    this.voiceSession++;
+    if (this.dictation) this.dictation.stop();
+    else void this.sidebar.postMessage({ type: 'voiceState', listening: false });
+  }
+
   /** Starts dictation into the composer; a newer start replaces a running one. */
-  private startVoice(): void {
+  private async startVoice(): Promise<void> {
+    const session = ++this.voiceSession;
     const previous = this.dictation;
     this.dictation = undefined;
     previous?.stop();
-    const dictation = new Dictation(this.voiceCommands(), {
+    previous?.stop();
+    let engine: WhisperEngine;
+    try {
+      engine = await this.whisperEngine();
+    } catch (error) {
+      const message = `Could not download local Whisper: ${error instanceof Error ? error.message : String(error)}`;
+      this.output.appendLine(`Voice input stopped: ${message}`);
+      if (session === this.voiceSession) void this.sidebar.postMessage({ type: 'voiceState', listening: false, error: message });
+      return;
+    }
+    if (session !== this.voiceSession) return;
+    const dictation = new Dictation(this.voiceCommands(), engine, {
       onListening: () => { if (this.dictation === dictation) void this.sidebar.postMessage({ type: 'voiceState', listening: true }); },
       onHypothesis: text => { if (this.dictation === dictation) void this.sidebar.postMessage({ type: 'voiceHypothesis', text }); },
       onResult: parts => { if (this.dictation === dictation) void this.sidebar.postMessage({ type: 'voiceResult', parts }); },
@@ -2487,15 +2531,10 @@ class ExtensionHost implements vscode.Disposable {
         this.dictation = undefined;
         if (error) this.output.appendLine(`Voice input stopped: ${error}`);
         void this.sidebar.postMessage({ type: 'voiceState', listening: false, error });
-        if (error === VOICE_PRIVACY_ERROR) {
-          void vscode.window.showWarningMessage(error, 'Open speech settings').then(choice => {
-            if (choice) void vscode.env.openExternal(vscode.Uri.parse('ms-settings:privacy-speech'));
-          });
-        }
       },
     });
     this.dictation = dictation;
-    dictation.start();
+    await dictation.start();
   }
 
   private smartAutoRanks(): SmartAutoRank[] {
@@ -3520,8 +3559,8 @@ class ExtensionHost implements vscode.Disposable {
           this.refreshCustomize();
           break;
         case 'saveAccessibility': await this.saveAccessibility(message.accessibility); break;
-        case 'voiceStart': this.startVoice(); break;
-        case 'voiceStop': this.dictation?.stop(); break;
+        case 'voiceStart': void this.startVoice(); break;
+        case 'voiceStop': this.stopVoice(); break;
         case 'saveVoiceCommands':
           await vscode.workspace.getConfiguration('dsh').update('voice.commands', normalizeVoiceCommands(message.commands), vscode.ConfigurationTarget.Global);
           this.refreshCustomize();

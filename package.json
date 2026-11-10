@@ -2,7 +2,7 @@
   "name": "dsh-ide",
   "displayName": "DeepSeek Harness for IDE",
   "description": "A native VS Code and Cursor front end for DeepSeek Harness",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "publisher": "dsh-local",
   "license": "MIT",
   "repository": {
@@ -243,7 +243,7 @@
           "type": "boolean",
           "default": true,
           "scope": "application",
-          "description": "Show a microphone button next to Send that types what you say, using Windows online speech recognition (the engine behind Win+H). Needs Online speech recognition turned on in Windows Settings > Privacy & security > Speech. Windows only."
+          "description": "Show a microphone button next to Send that types what you say, using local Whisper speech recognition. The first use downloads Whisper and an English model (about 157 MB, once); after that it runs offline. Windows only."
         },
         "dsh.voice.commands": {
           "type": "array",
