@@ -48,7 +48,7 @@ import { globalMemoryFolder, isMemoryPath, memoryInstructions, memorySyncNeeded,
 import { BATCH_INSTRUCTIONS, BatchCall, BatchOutcome, callLabel, executeBatch, formatBatchResult, isBatchFileTool, isBatchTool, outsideWorkingCopy, parseBatchCalls, runBatchFileTool, uniqueBatchCalls } from './runtime/batch';
 import { describePackTools, LOAD_TOOLPACK, loadToolpackTool, packCommands, RUN_TOOLPACK_TOOL, runToolpackTool } from './toolpacks/access';
 import { DshSidebarProvider, SidebarWebviewMessage } from './sidebar/provider';
-import { Dictation, normalizeVoiceCommands, VoiceCommand } from './voice/dictation';
+import { Dictation, normalizeVoiceCommands, VOICE_PRIVACY_ERROR, VoiceCommand } from './voice/dictation';
 import { ApprovalMode, CursorAccountState, SidebarAccessibility, SidebarFeatureKey, SidebarFeatures, SidebarImage, SidebarJob, SidebarNameModel, SidebarQuestion, SidebarSmartAutoRank, SidebarTimelineItem, SidebarSubagent, defaultFeatures, normalizeAccessibility, normalizeCompactTokens } from './sidebar/view';
 import { deciderPrompt, MAX_NOTE, MAX_RANKS, normalizeRanks, parseDecision, rankLabel, SMART_AUTO, SmartAutoRank } from './runtime/smartAuto';
 
@@ -2487,6 +2487,11 @@ class ExtensionHost implements vscode.Disposable {
         this.dictation = undefined;
         if (error) this.output.appendLine(`Voice input stopped: ${error}`);
         void this.sidebar.postMessage({ type: 'voiceState', listening: false, error });
+        if (error === VOICE_PRIVACY_ERROR) {
+          void vscode.window.showWarningMessage(error, 'Open speech settings').then(choice => {
+            if (choice) void vscode.env.openExternal(vscode.Uri.parse('ms-settings:privacy-speech'));
+          });
+        }
       },
     });
     this.dictation = dictation;

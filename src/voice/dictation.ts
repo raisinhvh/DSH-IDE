@@ -56,49 +56,127 @@ export function splitVoiceCommands(text: string, commands: VoiceCommand[]): Voic
   return parts;
 }
 
-// System.Speech runs dictation and a keyword grammar side by side, so a keyword said on its own is matched exactly.
-// Events go out as JSON lines; the extension stops dictation by ending the process.
+/** Shown when Windows refuses recognition because the online speech privacy setting is off. */
+export const VOICE_PRIVACY_ERROR = 'Turn on Online speech recognition in Windows Settings > Privacy & security > Speech to use voice input.';
+
+// Uses the modern Windows recognizer (Windows.Media.SpeechRecognition, the engine behind Win+H voice typing).
+// Windows PowerShell can't subscribe to WinRT events, so a small C# bridge is compiled from the system
+// WinMetadata at start. It writes JSON lines; the extension stops dictation by ending the process.
+// Keywords aren't a separate grammar here: dictation can't be combined with other constraints, so they're
+// matched in the dictated text by splitVoiceCommands.
+const BRIDGE = String.raw`
+using System;
+using System.Threading;
+using Windows.Foundation;
+using Windows.Media.SpeechRecognition;
+
+public static class DshVoice {
+	static readonly object Gate = new object();
+	static SpeechRecognizer recognizer;
+
+	static void Emit(string json) {
+		lock (Gate) {
+			Console.Out.WriteLine(json);
+			Console.Out.Flush();
+		}
+	}
+
+	static string Quote(string value) {
+		var text = (value ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "\\r").Replace("\n", "\\n").Replace("\t", "\\t");
+		return "\"" + text + "\"";
+	}
+
+	static void Fail(string message) {
+		Emit("{\"type\":\"error\",\"message\":" + Quote(message) + "}");
+		Environment.Exit(1);
+	}
+
+	// WinRT calls can fail synchronously or through the async operation; both end up here.
+	static string Describe(Exception error) {
+		var code = (uint)error.HResult;
+		var message = (error.Message ?? "").Replace("The text associated with this error code could not be found.", "").Trim();
+		if (code == 0x80045509 || message.Contains("privacy policy")) return "privacy";
+		if (code == 0x80070005) return "Windows blocked the microphone. Allow desktop apps to use it in Windows Settings > Privacy & security > Microphone.";
+		return message + " (0x" + code.ToString("X8") + ")";
+	}
+
+	static T Wait<T>(IAsyncOperation<T> operation) {
+		while (operation.Status == AsyncStatus.Started) Thread.Sleep(10);
+		if (operation.Status != AsyncStatus.Completed) throw operation.ErrorCode;
+		return operation.GetResults();
+	}
+
+	static void Wait(IAsyncAction operation) {
+		while (operation.Status == AsyncStatus.Started) Thread.Sleep(10);
+		if (operation.Status != AsyncStatus.Completed) throw operation.ErrorCode;
+		operation.GetResults();
+	}
+
+	static void Start() {
+		try {
+			Wait(recognizer.ContinuousRecognitionSession.StartAsync());
+		} catch (Exception error) {
+			Fail(Describe(error));
+		}
+	}
+
+	public static void Run() {
+		try {
+			recognizer = new SpeechRecognizer();
+			var compiled = Wait(recognizer.CompileConstraintsAsync());
+			if (compiled.Status != SpeechRecognitionResultStatus.Success) Fail("Windows speech recognition is not available (" + compiled.Status + "). Add a speech language in Windows Settings > Time & language > Speech.");
+			recognizer.ContinuousRecognitionSession.AutoStopSilenceTimeout = TimeSpan.FromHours(8);
+			recognizer.HypothesisGenerated += new TypedEventHandler<SpeechRecognizer, SpeechRecognitionHypothesisGeneratedEventArgs>((sender, args) => {
+				Emit("{\"type\":\"hypothesis\",\"text\":" + Quote(args.Hypothesis.Text) + "}");
+			});
+			recognizer.ContinuousRecognitionSession.ResultGenerated += new TypedEventHandler<SpeechContinuousRecognitionSession, SpeechContinuousRecognitionResultGeneratedEventArgs>((sender, args) => {
+				var result = args.Result;
+				if (result.Status != SpeechRecognitionResultStatus.Success || result.Confidence == SpeechRecognitionConfidence.Rejected) {
+					Emit("{\"type\":\"hypothesis\",\"text\":\"\"}");
+					return;
+				}
+				Emit("{\"type\":\"result\",\"text\":" + Quote(result.Text) + "}");
+			});
+			recognizer.ContinuousRecognitionSession.Completed += new TypedEventHandler<SpeechContinuousRecognitionSession, SpeechContinuousRecognitionCompletedEventArgs>((sender, args) => {
+				var status = args.Status;
+				if (status == SpeechRecognitionResultStatus.TimeoutExceeded || status == SpeechRecognitionResultStatus.PauseLimitExceeded || status == SpeechRecognitionResultStatus.Success) {
+					ThreadPool.QueueUserWorkItem(state => Start());
+					return;
+				}
+				if (status == SpeechRecognitionResultStatus.NetworkFailure) Fail("Windows speech recognition needs an internet connection.");
+				if (status == SpeechRecognitionResultStatus.MicrophoneUnavailable) Fail("No microphone is available.");
+				Fail("Windows speech recognition stopped (" + status + ").");
+			});
+			Wait(recognizer.ContinuousRecognitionSession.StartAsync());
+			Emit("{\"type\":\"listening\"}");
+		} catch (Exception error) {
+			Fail(Describe(error));
+		}
+	}
+}
+`;
+
 const SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 function Emit($data) { [Console]::Out.WriteLine(($data | ConvertTo-Json -Compress)); [Console]::Out.Flush() }
 try {
-  Add-Type -AssemblyName System.Speech
-  $installed = [System.Speech.Recognition.SpeechRecognitionEngine]::InstalledRecognizers()
-  $info = $installed | Where-Object { $_.Culture.Equals([System.Globalization.CultureInfo]::CurrentUICulture) } | Select-Object -First 1
-  if (-not $info) { $info = $installed | Select-Object -First 1 }
-  if (-not $info) { throw 'No Windows speech recognizer is installed. Add a speech language in Windows Settings > Time & language > Speech.' }
-  $engine = New-Object System.Speech.Recognition.SpeechRecognitionEngine($info)
-  $engine.SetInputToDefaultAudioDevice()
-  $dictation = New-Object System.Speech.Recognition.DictationGrammar
-  $dictation.Name = 'dictation'
-  $engine.LoadGrammar($dictation)
-  $phrases = @($env:DSH_VOICE_PHRASES -split "\n" | Where-Object { $_ })
-  if ($phrases.Count) {
-    $choices = New-Object System.Speech.Recognition.Choices
-    foreach ($phrase in $phrases) { $choices.Add([string]$phrase) }
-    $builder = New-Object System.Speech.Recognition.GrammarBuilder($choices)
-    $builder.Culture = $info.Culture
-    $keywords = New-Object System.Speech.Recognition.Grammar($builder)
-    $keywords.Name = 'keywords'
-    $keywords.Priority = 1
-    $engine.LoadGrammar($keywords)
-  }
-  Register-ObjectEvent $engine SpeechHypothesized -SourceIdentifier hypothesis | Out-Null
-  Register-ObjectEvent $engine SpeechRecognized -SourceIdentifier recognized | Out-Null
-  Register-ObjectEvent $engine RecognizeCompleted -SourceIdentifier completed | Out-Null
-  $engine.RecognizeAsync([System.Speech.Recognition.RecognizeMode]::Multiple)
-  Emit @{ type = 'listening' }
-  while ($true) {
-    $next = Wait-Event
-    Remove-Event -EventIdentifier $next.EventIdentifier
-    $result = $next.SourceEventArgs.Result
-    switch ($next.SourceIdentifier) {
-      'hypothesis' { if ($result.Grammar.Name -eq 'dictation') { Emit @{ type = 'hypothesis'; text = $result.Text } } }
-      'recognized' { Emit @{ type = 'result'; text = $result.Text; grammar = $result.Grammar.Name; confidence = $result.Confidence } }
-      'completed' { if ($next.SourceEventArgs.Error) { throw $next.SourceEventArgs.Error.Message }; exit 0 }
-    }
-  }
+  $framework = [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+  $metadata = Join-Path $env:WINDIR 'System32\WinMetadata'
+  $provider = New-Object Microsoft.CSharp.CSharpCodeProvider
+  $options = New-Object System.CodeDom.Compiler.CompilerParameters
+  $options.GenerateInMemory = $true
+  $options.ReferencedAssemblies.AddRange([string[]]@(
+    (Join-Path $framework 'System.Runtime.dll'),
+    (Join-Path $framework 'System.Runtime.InteropServices.WindowsRuntime.dll'),
+    (Join-Path $metadata 'Windows.Foundation.winmd'),
+    (Join-Path $metadata 'Windows.Globalization.winmd'),
+    (Join-Path $metadata 'Windows.Media.winmd')
+  ))
+  $compiled = $provider.CompileAssemblyFromSource($options, $env:DSH_VOICE_BRIDGE)
+  if ($compiled.Errors.HasErrors) { throw ('Could not load Windows speech recognition: ' + ($compiled.Errors | Select-Object -First 1)) }
+  $compiled.CompiledAssembly.GetType('DshVoice').GetMethod('Run').Invoke($null, $null)
+  while ($true) { Start-Sleep -Seconds 3600 }
 } catch { Emit @{ type = 'error'; message = $_.Exception.Message }; exit 1 }
 `;
 
@@ -122,7 +200,7 @@ export class Dictation {
     const encoded = Buffer.from(SCRIPT, 'utf16le').toString('base64');
     const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], {
       windowsHide: true,
-      env: { ...process.env, DSH_VOICE_PHRASES: this.commands.map(command => command.phrase).join('\n') },
+      env: { ...process.env, DSH_VOICE_BRIDGE: BRIDGE },
     });
     this.child = child;
     let buffer = '';
@@ -155,13 +233,14 @@ export class Dictation {
     try { event = JSON.parse(line); } catch { return undefined; }
     const text = typeof event.text === 'string' ? event.text : '';
     if (event.type === 'listening') this.events.onListening();
-    else if (event.type === 'hypothesis' && text) this.events.onHypothesis(text);
+    else if (event.type === 'hypothesis') this.events.onHypothesis(text);
     else if (event.type === 'result') {
-      // Low-confidence keyword matches are usually other words; dictation keeps whatever it heard.
-      if (event.grammar === 'keywords' && Number(event.confidence) < 0.5) return undefined;
       const parts = splitVoiceCommands(text, this.commands);
       if (parts.length) this.events.onResult(parts);
-    } else if (event.type === 'error') return typeof event.message === 'string' ? event.message : 'Windows speech recognition failed.';
+    } else if (event.type === 'error') {
+      if (event.message === 'privacy') return VOICE_PRIVACY_ERROR;
+      return typeof event.message === 'string' ? event.message : 'Windows speech recognition failed.';
+    }
     return undefined;
   }
 
