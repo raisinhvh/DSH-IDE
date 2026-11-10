@@ -48,6 +48,7 @@ import { globalMemoryFolder, isMemoryPath, memoryInstructions, memorySyncNeeded,
 import { BATCH_INSTRUCTIONS, BatchCall, BatchOutcome, callLabel, executeBatch, formatBatchResult, isBatchFileTool, isBatchTool, outsideWorkingCopy, parseBatchCalls, runBatchFileTool, uniqueBatchCalls } from './runtime/batch';
 import { describePackTools, LOAD_TOOLPACK, loadToolpackTool, packCommands, RUN_TOOLPACK_TOOL, runToolpackTool } from './toolpacks/access';
 import { DshSidebarProvider, SidebarWebviewMessage } from './sidebar/provider';
+import { Dictation, normalizeVoiceCommands, VoiceCommand } from './voice/dictation';
 import { ApprovalMode, CursorAccountState, SidebarAccessibility, SidebarFeatureKey, SidebarFeatures, SidebarImage, SidebarJob, SidebarNameModel, SidebarQuestion, SidebarSmartAutoRank, SidebarTimelineItem, SidebarSubagent, defaultFeatures, normalizeAccessibility, normalizeCompactTokens } from './sidebar/view';
 import { deciderPrompt, MAX_NOTE, MAX_RANKS, normalizeRanks, parseDecision, rankLabel, SMART_AUTO, SmartAutoRank } from './runtime/smartAuto';
 
@@ -131,7 +132,7 @@ const FEATURE_SETTINGS: Record<SidebarFeatureKey, string> = {
   activityRail: 'features.activityRail', autoName: 'features.autoName', shareRules: 'features.shareRules', editorContext: 'features.editorContext',
   reduceMotion: 'features.reduceMotion', updateChecks: 'updates.check', mirror: 'runtime.mirror', reviewAgent: 'features.reviewAgent',
   fileSummaries: 'features.fileSummaries', smartAuto: 'features.smartAuto',
-  autoCompact: 'experimental.autoCompact', batching: 'experimental.batching', trimTools: 'experimental.trimTools',
+  autoCompact: 'experimental.autoCompact', batching: 'experimental.batching', trimTools: 'experimental.trimTools', voice: 'features.voice',
 };
 type ModelSettingKey = 'nameModel' | 'reviewModel' | 'summaryModel' | 'deciderModel' | 'explorerModel';
 type ResolvedRoute = ResolvedModel | { model: ModelEntry } | { model: ModelEntry; oauthAccount: OAuthCliAccount };
@@ -239,6 +240,7 @@ class ExtensionHost implements vscode.Disposable {
   private readonly sidebar: DshSidebarProvider;
   private readonly status: vscode.StatusBarItem;
   private readonly runtimes = new Map<string, AcpRuntime>();
+  private dictation?: Dictation;
   private readonly chats = new Map<string, Chat>();
   private readonly chatLoads = new Map<string, Promise<Chat>>();
   private readonly promptStarts = new Map<string, Promise<void>>();
@@ -310,7 +312,7 @@ class ExtensionHost implements vscode.Disposable {
     this.disposables.push(
       this.output, this.status, this.sidebar, this.sync,
       { dispose: () => clearInterval(keepAliveTimer) },
-      { dispose: () => { for (const runtime of this.runtimes.values()) runtime.dispose(); this.runtimes.clear(); this.delegateHost.dispose(); void this.toolpacks.dispose(); this.fileSummaries?.dispose(); } },
+      { dispose: () => { for (const runtime of this.runtimes.values()) runtime.dispose(); this.runtimes.clear(); this.delegateHost.dispose(); void this.toolpacks.dispose(); this.fileSummaries?.dispose(); this.dictation?.stop(); } },
       this.toolpacks.onChange(() => { this.postToolpacks(); this.sync.schedule(); }),
       vscode.window.registerWebviewViewProvider(DshSidebarProvider.viewType, this.sidebar, { webviewOptions: { retainContextWhenHidden: true } }),
       vscode.workspace.onDidChangeConfiguration(event => {
@@ -1871,7 +1873,7 @@ class ExtensionHost implements vscode.Disposable {
       const background = this.takeBackgroundResults(chat);
       const tokens = record.contextTokens;
       const nudge = bridged && !fresh && !options.internal && record.provider === 'claude-cli' && tokens !== undefined && tokens >= hint && (record.nudgedAt === undefined || tokens >= record.nudgedAt + 20000)
-        ? `Context is about ${Math.round(tokens / 1000)}k tokens. If the last subtask is done, call checkpoint. If you stop here, call checkpoint with a summary.` : '';
+        ? `Context is about ${Math.round(tokens / 1000)}k tokens. Do the request below in this turn first. Once it is finished, call checkpoint with a summary as your last step. Never checkpoint instead of doing the work: nothing continues it afterwards.` : '';
       if (nudge) record.nudgedAt = tokens;
       const buildPrompt = (opening: string, withContext: boolean, fullContext = false): string => [
         nudge,
@@ -2463,7 +2465,32 @@ class ExtensionHost implements vscode.Disposable {
     this.sidebar.postMessage({ type: 'customizeState', features, nameModel: this.modelSetting('nameModel'), reviewModel: this.modelSetting('reviewModel'), summaryModel: this.modelSetting('summaryModel'),
       deciderModel: this.modelSetting('deciderModel'), explorerModel: this.modelSetting('explorerModel'), smartAutoRanks: this.smartAutoRanks(),
       accessibility: normalizeAccessibility(vscode.workspace.getConfiguration('dsh').get<unknown>('accessibility')),
-      autoCompactTokens: normalizeCompactTokens(vscode.workspace.getConfiguration('dsh').get<unknown>('experimental.autoCompactTokens')) });
+      autoCompactTokens: normalizeCompactTokens(vscode.workspace.getConfiguration('dsh').get<unknown>('experimental.autoCompactTokens')),
+      voiceCommands: this.voiceCommands(), voiceAvailable: process.platform === 'win32' });
+  }
+
+  private voiceCommands(): VoiceCommand[] {
+    return normalizeVoiceCommands(vscode.workspace.getConfiguration('dsh').get<unknown>('voice.commands'));
+  }
+
+  /** Starts dictation into the composer; a newer start replaces a running one. */
+  private startVoice(): void {
+    const previous = this.dictation;
+    this.dictation = undefined;
+    previous?.stop();
+    const dictation = new Dictation(this.voiceCommands(), {
+      onListening: () => { if (this.dictation === dictation) void this.sidebar.postMessage({ type: 'voiceState', listening: true }); },
+      onHypothesis: text => { if (this.dictation === dictation) void this.sidebar.postMessage({ type: 'voiceHypothesis', text }); },
+      onResult: parts => { if (this.dictation === dictation) void this.sidebar.postMessage({ type: 'voiceResult', parts }); },
+      onStopped: error => {
+        if (this.dictation !== dictation) return;
+        this.dictation = undefined;
+        if (error) this.output.appendLine(`Voice input stopped: ${error}`);
+        void this.sidebar.postMessage({ type: 'voiceState', listening: false, error });
+      },
+    });
+    this.dictation = dictation;
+    dictation.start();
   }
 
   private smartAutoRanks(): SmartAutoRank[] {
@@ -2707,7 +2734,7 @@ class ExtensionHost implements vscode.Disposable {
       try {
         chat.pendingCheckpoint = parseCheckpoint(args);
         if (chat.compactWatch?.askedAt !== undefined) return { text: 'Checkpoint saved. End your turn now with one short line; DSH continues the task in a fresh session automatically.' };
-        return { text: 'Checkpoint saved; it takes effect after this turn.' };
+        return { text: 'Checkpoint saved; it takes effect after this turn. Nothing continues automatically: finish the user\'s request in this turn before you end it.' };
       } catch (error) {
         return { text: error instanceof Error ? error.message : String(error), isError: true };
       }
@@ -3488,6 +3515,12 @@ class ExtensionHost implements vscode.Disposable {
           this.refreshCustomize();
           break;
         case 'saveAccessibility': await this.saveAccessibility(message.accessibility); break;
+        case 'voiceStart': this.startVoice(); break;
+        case 'voiceStop': this.dictation?.stop(); break;
+        case 'saveVoiceCommands':
+          await vscode.workspace.getConfiguration('dsh').update('voice.commands', normalizeVoiceCommands(message.commands), vscode.ConfigurationTarget.Global);
+          this.refreshCustomize();
+          break;
         case 'deleteAllSessions': await this.deleteAllSessions(); break;
         case 'syncAction': await this.syncAction(message.action); break;
         case 'setSyncAuto': await this.sync.setAuto(message.enabled === true); break;

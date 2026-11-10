@@ -2,7 +2,7 @@
   "name": "dsh-ide",
   "displayName": "DeepSeek Harness for IDE",
   "description": "A native VS Code and Cursor front end for DeepSeek Harness",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "publisher": "dsh-local",
   "license": "MIT",
   "repository": {
@@ -238,6 +238,75 @@
           "default": true,
           "scope": "application",
           "description": "Add open files, cursor position, selection and diagnostics to each message."
+        },
+        "dsh.features.voice": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "Show a microphone button next to Send that types what you say, using Windows speech recognition. Windows only."
+        },
+        "dsh.voice.commands": {
+          "type": "array",
+          "scope": "application",
+          "description": "Spoken keywords that edit the message during voice input instead of being typed.",
+          "default": [
+            {
+              "phrase": "delete word",
+              "action": "deleteWord"
+            },
+            {
+              "phrase": "scratch that",
+              "action": "deletePhrase"
+            },
+            {
+              "phrase": "new line",
+              "action": "newLine"
+            },
+            {
+              "phrase": "clear message",
+              "action": "clear"
+            },
+            {
+              "phrase": "send message",
+              "action": "send"
+            },
+            {
+              "phrase": "stop listening",
+              "action": "stop"
+            }
+          ],
+          "items": {
+            "type": "object",
+            "required": [
+              "phrase",
+              "action"
+            ],
+            "properties": {
+              "phrase": {
+                "type": "string",
+                "description": "What to say."
+              },
+              "action": {
+                "type": "string",
+                "enum": [
+                  "deleteWord",
+                  "deletePhrase",
+                  "newLine",
+                  "clear",
+                  "send",
+                  "stop"
+                ],
+                "enumDescriptions": [
+                  "Delete the last word",
+                  "Delete the last dictated phrase",
+                  "Start a new line",
+                  "Clear the message",
+                  "Send the message",
+                  "Stop listening"
+                ]
+              }
+            }
+          }
         },
         "dsh.features.reduceMotion": {
           "type": "boolean",

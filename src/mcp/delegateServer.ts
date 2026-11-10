@@ -111,7 +111,7 @@ async function tools(): Promise<Json[]> {
         ...customTools,
         {
             name: 'checkpoint',
-            description: `Call when a subtask is done and most earlier context is no longer needed. The summary is for you: goal, decisions, files changed, open items. The next message starts a fresh session from it; older messages stay in ${CHAT_HISTORY_TOOL}.`,
+            description: `Call as the last step of a turn, after the user's request is finished, when most earlier context is no longer needed. It does not hand work on: nothing continues after the turn unless DSH itself asked for the checkpoint, so never call it in place of doing the request. The summary is for you: goal, decisions, files changed, open items. The user's next message starts a fresh session from it; older messages stay in ${CHAT_HISTORY_TOOL}.`,
             inputSchema: { type: 'object', properties: { summary: { type: 'string' }, keep_files: { type: 'array', items: { type: 'string' } }, reason: { type: 'string' } }, required: ['summary', 'reason'] },
         },
         {

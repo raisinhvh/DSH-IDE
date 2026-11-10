@@ -584,7 +584,7 @@ test('checkpoint takes effect after a successful turn and opens the next prompt 
   host.promptPooled = async (_cli, turn) => {
     prompts.push(turn.prompt);
     if (prompts.length === 1) {
-      assert.equal((await host.handleDelegateCall('owner', 'checkpoint', { summary: 'Work completed', reason: 'done', keep_files: ['src/a.ts'] })).text, 'Checkpoint saved; it takes effect after this turn.');
+      assert.equal((await host.handleDelegateCall('owner', 'checkpoint', { summary: 'Work completed', reason: 'done', keep_files: ['src/a.ts'] })).text, 'Checkpoint saved; it takes effect after this turn. Nothing continues automatically: finish the user\'s request in this turn before you end it.');
       await gate.promise;
       return 'old';
     }

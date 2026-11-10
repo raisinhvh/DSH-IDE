@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type { CriterionStatus, JobPhase } from '../goal/types';
 import { SLASH_COMMANDS } from '../slash/registry';
 import { RAIL_FALLBACK_ICONS } from '../runtime/naming';
+import { defaultVoiceCommands, VoiceCommand, VoicePart } from '../voice/dictation';
 
 export interface SidebarImage { name: string; mimeType: string; data: string }
 export type ApprovalMode = 'ask' | 'auto' | 'full';
@@ -68,7 +69,7 @@ export function accessibilityStyle(value: SidebarAccessibility): { vars: Record<
   };
 }
 export type SidebarFeatureKey = 'activityRail' | 'autoName' | 'shareRules' | 'editorContext' | 'reduceMotion' | 'updateChecks' | 'mirror' | 'reviewAgent' | 'fileSummaries' | 'smartAuto'
-  | 'autoCompact' | 'batching' | 'trimTools';
+  | 'autoCompact' | 'batching' | 'trimTools' | 'voice';
 export type SidebarFeatures = Record<SidebarFeatureKey, boolean>;
 /** Model that writes chat titles; an empty model keeps the first-message title. */
 export interface SidebarNameModel { model?: string; effort?: string; speed?: string }
@@ -150,7 +151,10 @@ export type SidebarWebviewMessage =
   | { type: 'applyAll' }
   | { type: 'rejectAll' }
   | { type: 'reviewAll' }
-  | { type: 'openTerminal' };
+  | { type: 'openTerminal' }
+  | { type: 'voiceStart' }
+  | { type: 'voiceStop' }
+  | { type: 'saveVoiceCommands'; commands: VoiceCommand[] };
 
 export interface SidebarSubagentProfile {
   name: string;
@@ -315,7 +319,12 @@ export type SidebarHostMessage =
   | { type: 'subagentProfilesState'; profiles: SidebarSubagentProfile[] }
   | { type: 'subagentSaved' }
   | { type: 'memoryState'; memory: SidebarMemory }
-  | { type: 'customizeState'; features: SidebarFeatures; nameModel: SidebarNameModel; reviewModel: SidebarNameModel; summaryModel: SidebarNameModel; deciderModel: SidebarNameModel; explorerModel: SidebarNameModel; smartAutoRanks: SidebarSmartAutoRank[]; accessibility: SidebarAccessibility; autoCompactTokens: number }
+  | { type: 'customizeState'; features: SidebarFeatures; nameModel: SidebarNameModel; reviewModel: SidebarNameModel; summaryModel: SidebarNameModel; deciderModel: SidebarNameModel; explorerModel: SidebarNameModel; smartAutoRanks: SidebarSmartAutoRank[]; accessibility: SidebarAccessibility; autoCompactTokens: number; voiceCommands: VoiceCommand[]; voiceAvailable: boolean }
+  /** Dictation started or stopped; `error` explains a stop the user did not ask for. */
+  | { type: 'voiceState'; listening: boolean; error?: string }
+  /** Words heard so far in the current phrase; replaced by the next hypothesis or result. */
+  | { type: 'voiceHypothesis'; text: string }
+  | { type: 'voiceResult'; parts: VoicePart[] }
   | { type: 'jobState'; sessionId: string; job: SidebarJob | null }
   | { type: 'syncState'; sync: SidebarSync }
   | { type: 'instructionsState'; items: SidebarInstruction[] }
@@ -371,6 +380,9 @@ export interface SidebarViewState {
   explorerModel: SidebarNameModel;
   smartAutoRanks: SidebarSmartAutoRank[];
   autoCompactTokens: number;
+  voiceCommands: VoiceCommand[];
+  /** Voice input needs Windows speech recognition. */
+  voiceAvailable: boolean;
   slashCommands: SidebarSlashCommand[];
   jobs: Record<string, SidebarJob>;
   accessibility: SidebarAccessibility;
@@ -382,7 +394,7 @@ export interface SidebarViewState {
   error?: string;
 }
 
-export const defaultFeatures = (): SidebarFeatures => ({ activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: true, smartAuto: false, autoCompact: false, batching: false, trimTools: true });
+export const defaultFeatures = (): SidebarFeatures => ({ activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: true, smartAuto: false, autoCompact: false, batching: false, trimTools: true, voice: true });
 
 /** Auto compaction threshold: tokens of conversation, not counting the session's system prompt and tools. */
 export const DEFAULT_COMPACT_TOKENS = 70_000;
@@ -395,7 +407,7 @@ export function normalizeCompactTokens(value: unknown): number {
 }
 
 export const initialSidebarState = (): SidebarViewState => ({
-  page: 'chat', approvalMode: 'ask', subagentProfiles: [], instructions: [], toolpacks: [], features: defaultFeatures(), nameModel: {}, reviewModel: {}, summaryModel: {}, deciderModel: {}, explorerModel: {}, smartAutoRanks: [], autoCompactTokens: DEFAULT_COMPACT_TOKENS, slashCommands: SLASH_COMMANDS.map(command => ({ ...command })), jobs: {}, accessibility: defaultAccessibility(), sync: { connected: false, auto: true }, railIcons: [...RAIL_FALLBACK_ICONS], sessions: [], models: [], providerLabel: 'No provider', accountLabel: 'No account connected',
+  page: 'chat', approvalMode: 'ask', subagentProfiles: [], instructions: [], toolpacks: [], features: defaultFeatures(), nameModel: {}, reviewModel: {}, summaryModel: {}, deciderModel: {}, explorerModel: {}, smartAutoRanks: [], autoCompactTokens: DEFAULT_COMPACT_TOKENS, voiceCommands: defaultVoiceCommands(), voiceAvailable: process.platform === 'win32', slashCommands: SLASH_COMMANDS.map(command => ({ ...command })), jobs: {}, accessibility: defaultAccessibility(), sync: { connected: false, auto: true }, railIcons: [...RAIL_FALLBACK_ICONS], sessions: [], models: [], providerLabel: 'No provider', accountLabel: 'No account connected',
   accountConnected: false, accounts: [], usage: {}, dependencies: [], cursor: { connected: false, label: 'Not connected' },
   messages: {}, timeline: {}, tools: [], subagents: {}, diffs: [], runStates: {}, queues: {},
 });
@@ -456,7 +468,7 @@ export function getSidebarHtml(
   <div id="status" class="run-status"></div>
   <div id="queue" class="queue-list" aria-label="Queued messages" hidden></div>
   <section id="changes" class="changes" aria-label="File changes" hidden><div class="changes-head"><button id="changes-toggle" class="changes-toggle" type="button" aria-expanded="false"><span class="symbol small" id="changes-icon">expand_less</span><span id="changes-label">Changes</span><span id="changes-total" class="change-counts"></span></button><div id="changes-bulk" class="changes-bulk" hidden><button id="reject-all" class="change-action" type="button" title="Reject all pending changes">Reject all</button><button id="apply-all" class="change-action change-apply" type="button" title="Apply all pending changes">Apply all</button></div></div><div id="changes-body" class="changes-body"><div id="changes-list" class="changes-list"></div></div></section>
-  <form id="composer" class="composer"><div id="attachments" class="attachments" hidden></div><div id="composer-input" class="composer-input"><div id="composer-side" class="composer-side" hidden></div><textarea id="prompt" aria-label="Message" placeholder="Ask about your workspace or request an edit"></textarea></div><div id="compose-actions" class="compose-actions"><div id="compose-tools" class="compose-tools"><button class="icon-button" id="attach" type="button" title="Upload files for context" aria-label="Upload files for context"><span class="symbol">add</span></button><div class="option-wrap approval-wrap"><button class="tool-button" id="approval" type="button" aria-haspopup="menu" aria-controls="approval-menu" aria-expanded="false" title="Ask before running tools" aria-label="Ask before running tools"><span class="symbol small" id="approval-icon">shield</span><span id="approval-label">Ask approval</span><span class="symbol small approval-chevron">expand_more</span></button><div id="approval-menu" class="option-menu approval-menu" role="menu" aria-label="Approval mode" hidden></div></div><span class="compose-divider" aria-hidden="true"></span><div class="composer-options"><div id="agents-control" class="option-wrap agents-wrap" hidden><button id="agents-picker" class="composer-choice agents-choice" type="button" aria-haspopup="menu" aria-controls="agents-menu" aria-expanded="false"><span id="agents-label">Agents</span><span class="symbol small">expand_less</span></button><div id="agents-menu" class="option-menu agents-menu" role="menu" aria-label="Running subagents" hidden></div></div><div class="model-picker-wrap"><button id="model-picker" class="composer-choice" type="button" aria-label="Choose model" aria-haspopup="listbox" aria-controls="model-menu" aria-expanded="false"><span id="model-picker-label">Choose model</span><span class="symbol small">expand_more</span></button><div id="model-menu" class="model-menu" role="listbox" hidden></div></div><div id="speed-control" class="option-wrap" hidden><button id="speed-picker" class="composer-choice" type="button" title="Choose response speed" aria-expanded="false"><span id="speed-label">Speed</span><span class="symbol small">expand_more</span></button><div id="speed-options" class="option-menu" hidden></div></div><div id="effort-control" class="option-wrap" hidden><button id="effort-picker" class="composer-choice" type="button" title="Choose reasoning effort" aria-expanded="false"><span id="effort-label">Effort</span><span class="symbol small">expand_more</span></button><div id="effort-options" class="option-menu" hidden></div></div></div></div><div id="compose-send" class="compose-send"><button class="tool-button cancel-run" type="button" id="cancel" title="Cancel task" aria-label="Cancel task" hidden><span class="symbol small filled">stop</span></button><div class="send-wrap"><button class="primary-button" type="submit" id="send" aria-haspopup="menu" aria-expanded="false"><span class="symbol small" id="send-icon">arrow_upward</span><span id="send-label">Send</span><span class="symbol small send-chevron" id="send-chevron" hidden>expand_less</span></button><div id="send-menu" class="send-menu" role="menu" aria-label="Send while a task is running" hidden><button type="button" class="send-option" role="menuitem" data-mode="interrupt"><span class="symbol send-option-icon">bolt</span><span class="send-option-copy"><span class="send-option-title">Interrupt</span><span class="send-option-desc">Stop the current task and send now</span></span></button><button type="button" class="send-option" role="menuitem" data-mode="queue"><span class="symbol send-option-icon">schedule_send</span><span class="send-option-copy"><span class="send-option-title">Queue message</span><span class="send-option-desc">Send automatically when the task finishes</span></span></button></div></div></div></div><input id="image-input" type="file" multiple hidden></form>
+  <form id="composer" class="composer"><div id="attachments" class="attachments" hidden></div><div id="composer-input" class="composer-input"><div id="composer-side" class="composer-side"><button class="icon-button" id="attach" type="button" title="Upload files for context" aria-label="Upload files for context"><span class="symbol">add</span></button><div class="option-wrap approval-wrap"><button class="tool-button" id="approval" type="button" aria-haspopup="menu" aria-controls="approval-menu" aria-expanded="false" title="Ask before running tools" aria-label="Ask before running tools"><span class="symbol small" id="approval-icon">shield</span><span id="approval-label">Ask approval</span><span class="symbol small approval-chevron">expand_more</span></button><div id="approval-menu" class="option-menu approval-menu" role="menu" aria-label="Approval mode" hidden></div></div></div><textarea id="prompt" aria-label="Message" placeholder="Ask about your workspace or request an edit"></textarea></div><div id="compose-actions" class="compose-actions"><div id="compose-tools" class="compose-tools"><div class="composer-options"><div id="agents-control" class="option-wrap agents-wrap" hidden><button id="agents-picker" class="composer-choice agents-choice" type="button" aria-haspopup="menu" aria-controls="agents-menu" aria-expanded="false"><span id="agents-label">Agents</span><span class="symbol small">expand_less</span></button><div id="agents-menu" class="option-menu agents-menu" role="menu" aria-label="Running subagents" hidden></div></div><div class="model-picker-wrap"><button id="model-picker" class="composer-choice" type="button" aria-label="Choose model" aria-haspopup="listbox" aria-controls="model-menu" aria-expanded="false"><span id="model-picker-label">Choose model</span><span class="symbol small">expand_more</span></button><div id="model-menu" class="model-menu" role="listbox" hidden></div></div><div id="speed-control" class="option-wrap" hidden><button id="speed-picker" class="composer-choice" type="button" title="Choose response speed" aria-expanded="false"><span id="speed-label">Speed</span><span class="symbol small">expand_more</span></button><div id="speed-options" class="option-menu" hidden></div></div><div id="effort-control" class="option-wrap" hidden><button id="effort-picker" class="composer-choice" type="button" title="Choose reasoning effort" aria-expanded="false"><span id="effort-label">Effort</span><span class="symbol small">expand_more</span></button><div id="effort-options" class="option-menu" hidden></div></div></div></div><div id="compose-send" class="compose-send"><button class="tool-button cancel-run" type="button" id="cancel" title="Cancel task" aria-label="Cancel task" hidden><span class="symbol small filled">stop</span></button><button class="icon-button voice-button" type="button" id="voice" title="Voice input" aria-label="Start voice input" aria-pressed="false" hidden><span class="symbol" id="voice-icon">mic</span></button><div class="send-wrap"><button class="primary-button" type="submit" id="send" aria-haspopup="menu" aria-expanded="false"><span class="symbol small" id="send-icon">arrow_upward</span><span id="send-label">Send</span><span class="symbol small send-chevron" id="send-chevron" hidden>expand_less</span></button><div id="send-menu" class="send-menu" role="menu" aria-label="Send while a task is running" hidden><button type="button" class="send-option" role="menuitem" data-mode="interrupt"><span class="symbol send-option-icon">bolt</span><span class="send-option-copy"><span class="send-option-title">Interrupt</span><span class="send-option-desc">Stop the current task and send now</span></span></button><button type="button" class="send-option" role="menuitem" data-mode="queue"><span class="symbol send-option-icon">schedule_send</span><span class="send-option-copy"><span class="send-option-title">Queue message</span><span class="send-option-desc">Send automatically when the task finishes</span></span></button></div></div></div></div><input id="image-input" type="file" multiple hidden></form>
   </div>
 </section>
 <section id="accounts-page" class="page settings-page" hidden>

@@ -12,7 +12,7 @@
   state.runStates ||= {};
   state.subagentProfiles ||= [];
   state.instructions ||= [];
-  state.features ||= { activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: false, smartAuto: false, autoCompact: false, batching: false, trimTools: true };
+  state.features ||= { activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: false, smartAuto: false, autoCompact: false, batching: false, trimTools: true, voice: true };
   state.nameModel ||= {};
   state.reviewModel ||= {};
   state.summaryModel ||= {};
@@ -24,6 +24,7 @@
   state.accessibility ||= {};
   state.sync ||= { connected: false, auto: true };
   state.railIcons ||= [];
+  state.voiceCommands ||= [];
   boot.remove();
   const local = vscode.getState() || {};
   const pages = ['chat', 'accounts', 'models', 'subagents', 'instructions', 'toolcalls', 'customize', 'accessibility', 'experimental', 'sync'];
@@ -167,7 +168,6 @@
       const choice = button(effort.label, 'Use ' + effort.label + ' effort', () => { state.selectedEffort = effort.value; closeMenus(); renderPicker(); send({ type: 'selectEffort', value: effort.value }); }, 'menu-choice');
       choice.setAttribute('aria-selected', String((state.selectedEffort || '') === effort.value)); effortRoot.appendChild(choice);
     }
-    fitComposerActions(true);
   }
 
   const isRunning = id => (state.runStates[id]?.state || 'idle') !== 'idle';
@@ -851,7 +851,6 @@
     renderAgents();
     el('cancel').hidden = !running;
     el('cancel').disabled = run.state === 'cancelling';
-    fitComposerActions();
     const status = el('status'); status.hidden = !running; status.textContent = running ? run.label || '' : '';
     const selectedAgent = state.subagents?.[sessionId]?.[openedSubagent];
     if (selectedAgent) { renderSubagentFeed(feed, selectedAgent); return; }
@@ -1648,30 +1647,94 @@
       if (value === mode) { const check = document.createElement('span'); check.className = 'symbol approval-check'; check.textContent = 'check'; option.append(check); }
       option.onclick = () => { state.approvalMode = value; closeMenus(); renderApproval(); send({ type: 'setApproval', mode: value }); }; menu.append(option);
     }
-    fitComposerActions(true);
   }
 
   const popEasing = 'cubic-bezier(.34, 1.56, .64, 1)';
-  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
-  let composerRequiredWidth = 0;
-  function fitComposerActions(contentChanged = false) {
-    const actions = el('compose-actions'); if (!actions.clientWidth) return;
-    const tools = el('compose-tools'), side = el('composer-side'), attach = el('attach'), approval = el('approval').closest('.approval-wrap'), label = el('model-picker-label');
-    const wasCompact = actions.classList.contains('compact'), focused = document.activeElement;
-    const setCompact = compact => { actions.classList.toggle('compact', compact); if (compact) { side.appendChild(attach); side.appendChild(approval); side.hidden = false; } else { tools.insertBefore(approval, tools.firstChild); tools.insertBefore(attach, approval); side.hidden = true; } };
-    let compact = wasCompact;
-    if (!wasCompact || contentChanged === true) {
-      if (wasCompact) setCompact(false);
-      composerRequiredWidth = tools.scrollWidth + el('compose-send').offsetWidth + 6;
-      compact = composerRequiredWidth > actions.clientWidth || label.scrollWidth > label.clientWidth + 1;
-      if (wasCompact && compact) setCompact(true);
-    } else compact = actions.clientWidth < composerRequiredWidth + 4;
-    if (compact !== wasCompact) setCompact(compact);
-    if (focused instanceof HTMLElement && document.activeElement !== focused && focused.isConnected) focused.focus({ preventScroll: true });
-    if (compact !== wasCompact && !reduceMotion.matches) el('approval').animate([{ transform: 'scale(.82)' }, { transform: 'none' }], { duration: 440, easing: popEasing });
-    if (compact && compact !== wasCompact && !calm()) play(side, [{ opacity: 0, transform: 'translateX(-4px)' }, { opacity: 1, transform: 'translateX(0)' }], { duration: 220, easing: popEasing });
+
+  // Voice input: the host runs Windows dictation and streams what it hears. The words of the phrase still being
+  // spoken sit in the prompt as a draft range that each hypothesis replaces; the final result takes its place.
+  const voiceActions = { deleteWord: 'Delete word', deletePhrase: 'Delete phrase', newLine: 'New line', clear: 'Clear message', send: 'Send', stop: 'Stop listening' };
+  let voiceMode = 'off';
+  let voiceDraft = null;
+  let voicePhrase = null;
+
+  function renderVoice() {
+    const voice = el('voice');
+    voice.hidden = !state.voiceAvailable || !state.features.voice;
+    if (voice.hidden && voiceMode !== 'off') stopVoice();
+    voice.classList.toggle('listening', voiceMode === 'listening');
+    voice.classList.toggle('starting', voiceMode === 'starting');
+    voice.setAttribute('aria-pressed', String(voiceMode !== 'off'));
+    const label = voiceMode === 'off' ? 'Start voice input' : 'Stop voice input';
+    voice.title = voiceMode === 'off' ? 'Voice input' : 'Listening. Click to stop.'; voice.setAttribute('aria-label', label);
   }
-  new ResizeObserver(fitComposerActions).observe(el('compose-actions'));
+
+  function stopVoice() {
+    if (voiceMode === 'off') return;
+    voiceMode = 'off'; clearVoiceDraft(); renderVoice(); send({ type: 'voiceStop' });
+  }
+
+  /** Replaces `start`..`end` of the prompt, spacing it from the text before, and returns the new range. */
+  function voiceInsert(text, start, end) {
+    const prompt = el('prompt');
+    const before = prompt.value.slice(0, start);
+    const spaced = before && !/\s$/.test(before) && !/^[.,!?;:]/.test(text) ? ' ' + text : text;
+    prompt.setRangeText(spaced, start, end, 'end');
+    return { start, end: start + spaced.length, text: spaced };
+  }
+
+  function voiceDraftIntact() {
+    return voiceDraft && el('prompt').value.slice(voiceDraft.start, voiceDraft.end) === voiceDraft.text;
+  }
+
+  function clearVoiceDraft() {
+    if (voiceDraftIntact()) el('prompt').setRangeText('', voiceDraft.start, voiceDraft.end, 'end');
+    voiceDraft = null; el('prompt').classList.remove('voice-draft');
+  }
+
+  function showVoiceHypothesis(text) {
+    const prompt = el('prompt');
+    const intact = voiceDraftIntact();
+    const start = intact ? voiceDraft.start : prompt.selectionEnd, end = intact ? voiceDraft.end : prompt.selectionEnd;
+    voiceDraft = voiceInsert(text, start, end);
+    prompt.classList.add('voice-draft');
+  }
+
+  function runVoiceAction(action) {
+    const prompt = el('prompt'), at = prompt.selectionEnd;
+    if (action === 'deletePhrase' && voicePhrase && prompt.value.slice(voicePhrase.start, voicePhrase.end) === voicePhrase.text) {
+      prompt.setRangeText('', voicePhrase.start, voicePhrase.end, 'end'); voicePhrase = null; return;
+    }
+    if (action === 'deleteWord' || action === 'deletePhrase') {
+      const word = /\S+\s*$/.exec(prompt.value.slice(0, at));
+      if (word) prompt.setRangeText('', word.index, at, 'end');
+    } else if (action === 'newLine') prompt.setRangeText('\n', at, prompt.selectionStart === at ? at : prompt.selectionStart, 'end');
+    else if (action === 'clear') prompt.value = '';
+    else if (action === 'send') el('composer').requestSubmit();
+    else if (action === 'stop') stopVoice();
+    voicePhrase = null;
+  }
+
+  function applyVoiceResult(parts) {
+    const prompt = el('prompt');
+    const intact = voiceDraftIntact();
+    const at = intact ? voiceDraft.start : prompt.selectionEnd;
+    if (intact) prompt.setRangeText('', voiceDraft.start, voiceDraft.end, 'end');
+    voiceDraft = null; prompt.classList.remove('voice-draft');
+    prompt.setSelectionRange(at, at);
+    for (const part of parts) {
+      if (typeof part.text === 'string') voicePhrase = voiceInsert(part.text, prompt.selectionEnd, prompt.selectionEnd);
+      else if (part.action) runVoiceAction(part.action);
+    }
+    prompt.scrollTop = prompt.scrollHeight;
+    updateSlashMenu();
+  }
+
+  el('voice').onclick = () => {
+    if (voiceMode !== 'off') { stopVoice(); return; }
+    voiceMode = 'starting'; voicePhrase = null; renderVoice(); send({ type: 'voiceStart' });
+    const prompt = el('prompt'); prompt.focus(); prompt.setSelectionRange(prompt.value.length, prompt.value.length);
+  };
 
   function attachmentTotalBytes() {
     return attachments.reduce((sum, file) => sum + (file.size || 0), 0);
@@ -1743,6 +1806,7 @@
     { key: 'smartAuto', icon: 'auto_awesome', title: 'Smart Auto', desc: 'Adds Smart Auto to the model menu. For each message you send, a decider model picks a model and effort from your ranked list.' },
     { key: 'shareRules', icon: 'share', title: 'Share global rules and skills', desc: 'Before each Claude or Codex turn, copies your all-workspace rules and skills into that account. DSH already reads them.' },
     { key: 'editorContext', icon: 'code', title: 'Send editor context', desc: 'Adds your open files, cursor position, selection and diagnostics to each message.' },
+    { key: 'voice', icon: 'mic', title: 'Voice input', desc: 'A microphone button next to Send types what you say, using Windows speech recognition on this PC. Keywords below edit the message while you talk.' },
     { key: 'mirror', icon: 'content_copy', title: 'Private workspace copy', desc: 'Each new chat edits its own copy of the workspace. Turn off to let agents edit your real files, so they see your changes and each other\'s. Applies to new chats.' },
     { key: 'updateChecks', icon: 'update', title: 'Offer optional updates', desc: 'Checks for DSH-IDE and DSH updates at startup. Required updates still apply.' },
   ];
@@ -1834,7 +1898,40 @@
     return detail;
   }
 
-  const customizeStateKey = () => JSON.stringify([state.features, state.nameModel, state.reviewModel, state.summaryModel, state.deciderModel, state.explorerModel, state.smartAutoRanks, state.selectedModelId, state.accounts, state.models.map(item => [item.id, item.enabled, item.provider, item.account, item.effortOptions, item.speedOptions])]);
+  function voiceCommandFields() {
+    const detail = document.createElement('div'); detail.className = 'feature-detail';
+    if (!state.voiceAvailable) {
+      const help = document.createElement('p'); help.className = 'helper'; help.textContent = 'Voice input needs Windows speech recognition, so it is only available on Windows.';
+      detail.appendChild(help); return detail;
+    }
+    const title = document.createElement('div'); title.className = 'smart-ranks-title'; title.textContent = 'Keywords';
+    detail.appendChild(title);
+    const commands = state.voiceCommands;
+    const save = (next, rebuildList = true) => { state.voiceCommands = next; if (rebuildList) { customizeKey = ''; renderCustomize(); } else customizeKey = customizeStateKey(); send({ type: 'saveVoiceCommands', commands: next }); };
+    commands.forEach((command, index) => {
+      const row = document.createElement('div'); row.className = 'voice-command';
+      const phrase = document.createElement('input'); phrase.type = 'text'; phrase.maxLength = 60; phrase.value = command.phrase; phrase.placeholder = 'Say this';
+      phrase.setAttribute('aria-label', 'Keyword ' + (index + 1));
+      // Saved on blur without a rebuild, so focus can move straight to the next field.
+      phrase.onchange = () => {
+        const text = phrase.value.trim().replace(/\s+/g, ' ');
+        if (!text) { phrase.value = command.phrase; return; }
+        save(commands.map((item, at) => at === index ? { ...item, phrase: text } : item), false);
+      };
+      const action = document.createElement('select'); action.setAttribute('aria-label', 'Action for keyword ' + (index + 1));
+      fillSelect(action, Object.entries(voiceActions).map(([value, label]) => ({ value, label })), command.action);
+      action.onchange = () => save(commands.map((item, at) => at === index ? { ...item, action: action.value } : item), false);
+      row.append(phrase, action, button('', 'Remove keyword', () => save(commands.filter((_, at) => at !== index)), 'icon-button', 'close'));
+      detail.appendChild(row);
+    });
+    if (commands.length < 30) detail.appendChild(button('Add keyword', 'Add a voice keyword', () => save([...commands, { phrase: 'keyword ' + (commands.length + 1), action: 'deleteWord' }]), 'text-button'));
+    const help = document.createElement('p'); help.className = 'helper';
+    help.textContent = 'Say a keyword on its own, or mid-sentence, while listening. Short, unusual phrases are recognized best. Changes apply the next time you start listening.';
+    detail.appendChild(help);
+    return detail;
+  }
+
+  const customizeStateKey = () => JSON.stringify([state.voiceCommands, state.features, state.nameModel, state.reviewModel, state.summaryModel, state.deciderModel, state.explorerModel, state.smartAutoRanks, state.selectedModelId, state.accounts, state.models.map(item => [item.id, item.enabled, item.provider, item.account, item.effortOptions, item.speedOptions])]);
 
   function renderCustomize() {
     const root = el('feature-list');
@@ -1854,6 +1951,7 @@
         if (feature.key === 'autoName' && enabled) row.appendChild(featureModelFields('nameModel', 'saveNameModel', 'Name model', 'None (use the first message)', 'Pick a fast, cheap model. It only sees your first message.', 'Without a name model, chats are named after the first message.'));
         if (feature.key === 'reviewAgent' && enabled) row.appendChild(featureModelFields('reviewModel', 'saveReviewModel', 'Review model', 'Choose a model', 'It reads the working copy and checks every criterion.', 'Pick a model, or each /job stops when it reaches review.'));
         if (feature.key === 'smartAuto' && enabled) row.append(featureModelFields('deciderModel', 'saveDeciderModel', 'Decider model', 'Choose a model', 'Pick a fast, cheap model. It sees your message and the last few exchanges, then picks a model below.', 'Pick a decider model to use Smart Auto.'), smartAutoRankFields());
+        if (feature.key === 'voice' && enabled) row.appendChild(voiceCommandFields());
         if (feature.key === 'fileSummaries' && enabled) row.appendChild(featureModelFields('summaryModel', 'saveSummaryModel', 'Summary model', 'Choose a model', 'Pick a fast, cheap model. It runs in the background and only sees the files it summarizes.', 'A model is only needed for other languages.'));
         root.appendChild(row);
       }
@@ -2104,7 +2202,7 @@
     for (const name of settingsPages) el(name).classList.toggle('current', page === name);
     el('settings-toggle').setAttribute('aria-pressed', String(settingsPages.includes(page)));
     el('accounts').setAttribute('aria-pressed', String(page === 'accounts'));
-    renderNotice(); renderPicker(); renderApproval(); renderSessions(); renderFeed(); renderUsageButton();
+    renderNotice(); renderPicker(); renderApproval(); renderVoice(); renderSessions(); renderFeed(); renderUsageButton();
     if (page === 'accounts') renderAccounts();
     if (page === 'subagents') renderSubagents();
     if (page === 'instructions') { renderMemory(); renderInstructions(); }
@@ -2393,9 +2491,19 @@
         state.deciderModel = message.deciderModel || {}; state.explorerModel = message.explorerModel || {}; state.smartAutoRanks = message.smartAutoRanks || [];
         state.accessibility = message.accessibility || state.accessibility;
         if (typeof message.autoCompactTokens === 'number') state.autoCompactTokens = message.autoCompactTokens;
+        if (Array.isArray(message.voiceCommands)) state.voiceCommands = message.voiceCommands;
+        if (typeof message.voiceAvailable === 'boolean') state.voiceAvailable = message.voiceAvailable;
         applyAccessibility(state.accessibility);
         break;
       case 'syncState': state.sync = message.sync || state.sync; break;
+      case 'voiceState':
+        if (message.listening) { if (voiceMode !== 'off') voiceMode = 'listening'; }
+        else { voiceMode = 'off'; clearVoiceDraft(); }
+        if (message.error) state.error = message.error;
+        renderVoice(); renderNotice();
+        return;
+      case 'voiceHypothesis': if (voiceMode !== 'off') showVoiceHypothesis(message.text || ''); return;
+      case 'voiceResult': if (voiceMode !== 'off') applyVoiceResult(message.parts || []); return;
       case 'memoryState': state.memory = message.memory; if (page === 'instructions') renderMemory(); break;
       case 'instructionContent': {
         const form = el('instruction-form');
