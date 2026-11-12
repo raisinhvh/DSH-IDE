@@ -52,21 +52,17 @@
   let slashMatches = [];
   let slashHighlight = 0;
   const toolGlyph = tool => tool.children && tool.state !== 'running' && tool.state !== 'error' ? 'stacks' : tool.state === 'running' ? 'progress_activity' : tool.state === 'error' ? 'error' : tool.state === 'cancelled' ? 'stop_circle' : tool.kind === 'search' ? 'search' : tool.kind === 'shell' ? 'terminal' : tool.kind === 'read' ? 'description' : 'check_circle';
-  const toolLabel = tool => {
-    const running = tool.state === 'running';
-    if (tool.kind === 'read') return running ? 'Reading File' : 'File Read';
-    if (tool.kind === 'search') return running ? 'Searching' : 'Search';
-    if (tool.kind === 'shell') return running ? 'Running Command' : 'Command Run';
-    return tool.title;
+  // One tool row: short name, short detail, and the whole call on hover. Main agent, batch calls and subagents share it.
+  const toolRow = (tool, tag = 'div', extraClass = '') => {
+    const row = document.createElement(tag);
+    row.className = 'tool-row tool-' + tool.state + (extraClass ? ' ' + extraClass : '');
+    row.title = tool.full || tool.title + (tool.detail ? ' ' + tool.detail : '');
+    const name = document.createElement('span'); name.className = 'tool-row-title'; name.textContent = tool.title;
+    row.append(icon(toolGlyph(tool)), name);
+    if (tool.detail) { const detail = document.createElement('span'); detail.className = 'tool-row-detail'; detail.textContent = tool.detail.replace(/\s+/g, ' '); row.appendChild(detail); }
+    return row;
   };
-  const tickerItem = tool => {
-    const item = document.createElement('span'); item.className = 'ticker-item tool-row tool-' + tool.state;
-    const glyph = icon(toolGlyph(tool));
-    const name = document.createElement('span'); name.className = 'tool-row-title'; name.textContent = toolLabel(tool);
-    item.append(glyph, name);
-    if (tool.detail) { const detail = document.createElement('span'); detail.className = 'tool-row-detail'; detail.textContent = tool.detail.replace(/\s+/g, ' '); item.appendChild(detail); }
-    return item;
-  };
+  const tickerItem = tool => toolRow(tool, 'span', 'ticker-item');
   const questionDrafts = new Map();
   const maxAttachments = 8;
   const maxAttachmentBytes = 10 * 1024 * 1024;
@@ -599,12 +595,24 @@
       feed.appendChild(locks);
     }
     if (agent.prompt) { const prompt = document.createElement('div'); prompt.className = 'bubble user'; prompt.textContent = agent.prompt; feed.appendChild(prompt); }
-    for (const message of agent.messages) {
-      const item = document.createElement('div');
-      if (message.role === 'tool') { item.className = 'subagent-tool'; item.textContent = message.text; }
-      else { item.className = 'bubble assistant markdown'; renderMarkdown(item, message.text); }
+    // Consecutive tool calls form one batch, drawn exactly like the main agent's.
+    let batch = null;
+    agent.messages.forEach((message, index) => {
+      if (message.role === 'tool') {
+        const latest = index === agent.messages.length - 1 && agent.state === 'running';
+        const tool = { id: message.id, kind: 'other', title: message.text, ...message.tool, state: latest ? 'running' : agent.state === 'error' && index === agent.messages.length - 1 ? 'error' : 'complete' };
+        if (batch) { batch.tools.push(tool); return; }
+        batch = { id: `${view}:batch:${message.id}`, tools: [tool] };
+        const node = document.createElement('div'); node.className = 'feed-entry';
+        feed.appendChild(node);
+        batch.node = node;
+        return;
+      }
+      if (batch) { renderToolBatch(batch.node, batch); batch = null; }
+      const item = document.createElement('div'); item.className = 'bubble assistant markdown'; renderMarkdown(item, message.text);
       feed.appendChild(item);
-    }
+    });
+    if (batch) renderToolBatch(batch.node, batch);
     if (!agent.messages.length) { const empty = document.createElement('div'); empty.className = 'subagent-empty'; empty.textContent = agent.state === 'running' ? 'Waiting for subagent output…' : 'No subagent text was provided by this provider.'; feed.appendChild(empty); }
     feed.scrollTop = nearBottom ? feed.scrollHeight : previousTop;
   }
@@ -837,6 +845,65 @@
     play(root, [{ opacity: 1 }, { opacity: 0 }], { duration: 200, easing: 'ease-in', fill: 'forwards' }, () => root.remove());
   }
 
+  // A run of tool calls: a ticker of the latest call that expands into every row.
+  function renderToolBatch(node, entry) {
+    const tools = entry.tools;
+    const expanded = expandedBatches.has(entry.id);
+    const signature = [expanded, ...tools.map(tool => [tool.id, tool.title, tool.detail, tool.state, tool.kind, JSON.stringify(tool.children || [])].join('|'))].join('\n');
+    if (node.dataset.text !== signature) {
+      const opening = expanded && node.dataset.expanded !== 'true';
+      node.className = 'feed-entry tool-batch';
+      let head = node.firstElementChild?.classList.contains('tool-batch-head') ? node.firstElementChild : null;
+      if (!head) {
+        node.textContent = '';
+        head = button('', '', () => { if (expandedBatches.has(entry.id)) expandedBatches.delete(entry.id); else expandedBatches.add(entry.id); renderFeed(); }, 'tool-batch-head');
+        const chevron = icon('chevron_right'); chevron.classList.add('small');
+        const ticker = document.createElement('span'); ticker.className = 'tool-ticker';
+        const count = document.createElement('span'); count.className = 'tool-count';
+        head.append(ticker, count, chevron); node.prepend(head);
+      }
+      while (node.children.length > 1) node.lastElementChild.remove();
+      const label = (expanded ? 'Collapse ' : 'Expand ') + 'tool calls';
+      head.title = label; head.setAttribute('aria-label', label); head.setAttribute('aria-expanded', String(expanded));
+      head.querySelector('.symbol.small').textContent = expanded ? 'expand_more' : 'chevron_right';
+      const last = tools[tools.length - 1];
+      const ticker = head.querySelector('.tool-ticker');
+      const live = [...ticker.children].filter(item => !item.classList.contains('leaving')).pop();
+      const current = tickerItem(last); current.dataset.toolId = last.id;
+      if (!live) ticker.appendChild(current);
+      else if (live.dataset.toolId === last.id) {
+        for (const name of [...live.classList]) if (name.startsWith('tool-') && name !== 'tool-row') live.classList.remove(name);
+        live.classList.add('tool-' + last.state);
+        live.replaceChildren(...current.childNodes); live.title = current.title;
+      }
+      else {
+        live.classList.remove('entering'); live.classList.add('leaving'); live.addEventListener('animationend', () => live.remove(), { once: true });
+        current.classList.add('entering'); ticker.appendChild(current);
+      }
+      const count = head.querySelector('.tool-count'); count.textContent = String(tools.length);
+      const previousCount = batchCounts.get(entry.id); batchCounts.set(entry.id, tools.length);
+      count.classList.remove('bump');
+      if (previousCount !== undefined && previousCount !== tools.length) { void count.offsetWidth; count.classList.add('bump'); }
+      if (expanded) {
+        const list = document.createElement('div'); list.className = 'tool-batch-list' + (opening ? ' bubbling' : '');
+        for (const tool of tools) {
+          list.appendChild(toolRow(tool));
+          if (tool.children?.length) {
+            const nested = document.createElement('div'); nested.className = 'tool-children';
+            for (const child of tool.children) {
+              const kind = child.kind || (/search/i.test(child.title) ? 'search' : /read|list|summar|history/i.test(child.title) ? 'read' : 'other');
+              nested.appendChild(toolRow({ ...child, kind }, 'div', 'tool-child'));
+            }
+            list.appendChild(nested);
+          }
+        }
+        node.appendChild(list);
+      }
+      node.dataset.expanded = String(expanded);
+      node.dataset.text = signature;
+    }
+  }
+
   function renderFeed() {
     const feed = el('feed');
     const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
@@ -908,70 +975,7 @@
           node.dataset.text = signature;
         }
       } else if (entry.kind === 'toolbatch') {
-        const tools = entry.tools;
-        const expanded = expandedBatches.has(entry.id);
-        const signature = [expanded, ...tools.map(tool => [tool.id, tool.title, tool.detail, tool.state, tool.kind, JSON.stringify(tool.children || [])].join('|'))].join('\n');
-        if (node.dataset.text !== signature) {
-          const opening = expanded && node.dataset.expanded !== 'true';
-          node.className = 'feed-entry tool-batch';
-          let head = node.firstElementChild?.classList.contains('tool-batch-head') ? node.firstElementChild : null;
-          if (!head) {
-            node.textContent = '';
-            head = button('', '', () => { if (expandedBatches.has(entry.id)) expandedBatches.delete(entry.id); else expandedBatches.add(entry.id); renderFeed(); }, 'tool-batch-head');
-            const chevron = icon('chevron_right'); chevron.classList.add('small');
-            const ticker = document.createElement('span'); ticker.className = 'tool-ticker';
-            const count = document.createElement('span'); count.className = 'tool-count';
-            head.append(ticker, count, chevron); node.prepend(head);
-          }
-          while (node.children.length > 1) node.lastElementChild.remove();
-          const label = (expanded ? 'Collapse ' : 'Expand ') + 'tool calls';
-          head.title = label; head.setAttribute('aria-label', label); head.setAttribute('aria-expanded', String(expanded));
-          head.querySelector('.symbol.small').textContent = expanded ? 'expand_more' : 'chevron_right';
-          const last = tools[tools.length - 1];
-          const ticker = head.querySelector('.tool-ticker');
-          const live = [...ticker.children].filter(item => !item.classList.contains('leaving')).pop();
-          const current = tickerItem(last); current.dataset.toolId = last.id;
-          if (!live) ticker.appendChild(current);
-          else if (live.dataset.toolId === last.id) {
-            for (const name of [...live.classList]) if (name.startsWith('tool-') && name !== 'tool-row') live.classList.remove(name);
-            live.classList.add('tool-' + last.state);
-            live.replaceChildren(...current.childNodes);
-          }
-          else {
-            live.classList.remove('entering'); live.classList.add('leaving'); live.addEventListener('animationend', () => live.remove(), { once: true });
-            current.classList.add('entering'); ticker.appendChild(current);
-          }
-          const count = head.querySelector('.tool-count'); count.textContent = String(tools.length);
-          const previousCount = batchCounts.get(entry.id); batchCounts.set(entry.id, tools.length);
-          count.classList.remove('bump');
-          if (previousCount !== undefined && previousCount !== tools.length) { void count.offsetWidth; count.classList.add('bump'); }
-          if (expanded) {
-            const list = document.createElement('div'); list.className = 'tool-batch-list' + (opening ? ' bubbling' : '');
-            for (const tool of tools) {
-              const row = document.createElement('div'); row.className = 'tool-row tool-' + tool.state; row.title = tool.title + (tool.detail ? ': ' + tool.detail : '');
-              const glyph = icon(toolGlyph(tool));
-              const name = document.createElement('span'); name.className = 'tool-row-title'; name.textContent = tool.title;
-              row.append(glyph, name);
-              if (tool.detail) { const detail = document.createElement('span'); detail.className = 'tool-row-detail'; detail.textContent = tool.detail.replace(/\s+/g, ' '); row.appendChild(detail); }
-              list.appendChild(row);
-              if (tool.children?.length) {
-                const nested = document.createElement('div'); nested.className = 'tool-children';
-                for (const child of tool.children) {
-                  const kind = /search/i.test(child.title) ? 'search' : /read|list|summar|history/i.test(child.title) ? 'read' : 'other';
-                  const item = document.createElement('div'); item.className = 'tool-row tool-child tool-' + child.state; item.title = child.title + (child.detail ? ': ' + child.detail : '');
-                  const label = document.createElement('span'); label.className = 'tool-row-title'; label.textContent = child.title;
-                  item.append(icon(toolGlyph({ kind, state: child.state })), label);
-                  if (child.detail) { const detail = document.createElement('span'); detail.className = 'tool-row-detail'; detail.textContent = child.detail.replace(/\s+/g, ' '); item.appendChild(detail); }
-                  nested.appendChild(item);
-                }
-                list.appendChild(nested);
-              }
-            }
-            node.appendChild(list);
-          }
-          node.dataset.expanded = String(expanded);
-          node.dataset.text = signature;
-        }
+        renderToolBatch(node, entry);
       } else if (entry.kind === 'approval') {
         const signature = entry.status;
         if (node.dataset.text !== signature) {
@@ -2567,7 +2571,7 @@
           const id = message.messageId || `message:${agent.messages.length}`;
           const entry = agent.messages.find(item => item.id === id);
           if (entry) entry.text += message.text;
-          else agent.messages.push({ id, role: message.role || 'assistant', text: message.text });
+          else agent.messages.push({ id, role: message.role || 'assistant', text: message.text, ...(message.tool ? { tool: message.tool } : {}) });
         }
         const timeline = state.timeline[message.sessionId] ||= [];
         if (!timeline.some(item => item.kind === 'subagent' && item.agentId === message.agentId)) timeline.push({ id: `subagent:${message.agentId}`, kind: 'subagent', agentId: message.agentId });

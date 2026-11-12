@@ -6,6 +6,8 @@ import { canDelegate, delegationInstructions, isNativeSubagentTool } from './del
 import { terminateProcessTree } from './cancellation';
 import { claudeSpeedSettings } from './models';
 import { isLimitNotice, isUsageLimitText, UsageLimitError } from './limits';
+import { agentEnv } from './agentShell';
+import { applyAgentPriority } from './priority';
 
 export interface CliTurn {
   account: OAuthCliAccount;
@@ -146,7 +148,7 @@ export function claudeArgs(turn: CliTurn): string[] {
 /** Child environment for a Claude turn, with the prompt cache lifetime when the turn sets one. */
 function claudeEnv(turn: CliTurn): NodeJS.ProcessEnv {
   const ttl = turn.cacheTtl ?? (turn.lean ? '5m' : undefined);
-  const env = cliEnv(turn.account);
+  const env = agentEnv(cliEnv(turn.account));
   return ttl ? { ...env, CLAUDE_CODE_PROMPT_CACHE_TTL: ttl } : env;
 }
 
@@ -188,7 +190,20 @@ export class ClaudeCliRuntime {
       const reportWait = (tasks: string[]): void => {
         try { turn.onBackgroundWait?.(tasks); } catch { /* Callback errors must not interrupt the turn. */ }
       };
-      const endInput = (): void => { clearTimeout(idleTimer); if (!child.stdin.writableEnded) child.stdin.end(); };
+      // A background task that never ends (a dev server, a watcher) keeps Claude alive after its input closes,
+      // so the turn would wait forever. Past a grace period the process tree, task included, is stopped.
+      let exitTimer: NodeJS.Timeout | undefined;
+      let stoppedLingering = false;
+      const endInput = (): void => {
+        clearTimeout(idleTimer);
+        if (!child.stdin.writableEnded) child.stdin.end();
+        if (!exitTimer) exitTimer = setTimeout(() => {
+          if (done || child.exitCode !== null || !turnOver) return;
+          stoppedLingering = true;
+          terminateProcessTree(child);
+        }, 15_000);
+        exitTimer.unref();
+      };
       const settleInput = (): void => {
         clearTimeout(idleTimer);
         if (!turnOver || child.stdin.writableEnded) return;
@@ -206,6 +221,7 @@ export class ClaudeCliRuntime {
         cwd: turn.cwd, env: claudeEnv(turn), windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'],
       });
       this.child = child;
+      applyAgentPriority(child.pid);
       const finish = (error?: Error): void => {
         if (done) return;
         done = true;
@@ -391,7 +407,7 @@ export class ClaudeCliRuntime {
       child.stderr.setEncoding('utf8');
       child.stderr.on('data', (chunk: string) => { errorText = (errorText + chunk).slice(-4000); });
       child.on('error', () => finish(new Error('Claude Code CLI could not start. Check the configured path.')));
-      const closed = (code: number | null): void => finish(code === 0 || this.cancelled ? undefined : isUsageLimitText(errorText)
+      const closed = (code: number | null): void => finish(code === 0 || this.cancelled || stoppedLingering ? undefined : isUsageLimitText(errorText)
         ? new UsageLimitError(`Claude Code usage limit: ${errorText.trim().slice(-300)}`)
         : new Error(`Claude Code exited with code ${code}. ${errorText.includes('not logged') ? 'Sign in again from Accounts.' : 'Open the CLI for details.'}`));
       child.on('close', closed);

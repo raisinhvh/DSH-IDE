@@ -7,6 +7,8 @@ import * as vscode from 'vscode';
 import { AgentModel, agentModels } from './models';
 import { cancellationDeadline, terminateProcessTree } from './cancellation';
 import { isPiAiProvider, piAiCatalog, piAiPatch } from './piAi';
+import { applyAgentPriority } from './priority';
+import { agentEnv } from './agentShell';
 
 type Json = Record<string, unknown>;
 type Pending = { resolve(value: Json): void; reject(error: Error): void; timer?: NodeJS.Timeout; method: string; sessionId?: string; clearCancellation?: () => void };
@@ -107,8 +109,9 @@ export class AcpRuntime implements vscode.Disposable {
       args = route.args;
       cwd = route.cwd;
     }
-    this.child = spawn(command, args, { cwd, env, windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
+    this.child = spawn(command, args, { cwd, env: agentEnv(env), windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
     const child = this.child;
+    applyAgentPriority(child.pid);
     child.stdin.on('error', error => { if (this.child === child) this.fail(error); });
     this.child.stdout.setEncoding('utf8');
     this.child.stderr.setEncoding('utf8');

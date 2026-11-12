@@ -47,3 +47,5 @@ await import('./keep-alive.test.mjs');
 
 await import('./explorer.test.mjs');
 await import('./prompt-prefix.test.mjs');
+await import('./rust-tools.test.mjs');
+await import('./tool-display.test.mjs');

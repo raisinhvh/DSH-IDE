@@ -1,6 +1,6 @@
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { ChatMessage, formatMessages, MAX_MESSAGE_CHARS } from './handoff';
+import { ChatMessage, formatMessages, HANDOFF_OPENING, MAX_MESSAGE_CHARS } from './handoff';
 
 /**
  * Experimental, with auto compaction: a new session does not get one summary of everything before it. The earlier
@@ -102,7 +102,7 @@ export function buildPartsHandoff(chatId: string, history: ChatMessage[], parts:
   const dir = partsDir(chatId);
   const covered = parts[parts.length - 1]?.to ?? 0;
   return [
-    'This conversation continues from an earlier session.',
+    HANDOFF_OPENING,
     `Its earlier messages are saved in ${dir}/, one file per part. You only see the summaries below; read a part when you need its detail.`,
     parts.map((part, index) => `- ${partFileName(index)} (messages ${part.from + 1}-${part.to}), ${part.title}: ${part.summary}`).join('\n'),
     `Latest messages, word for word:\n${formatMessages(history.slice(covered), MAX_MESSAGE_CHARS)}`,

@@ -157,7 +157,7 @@ test('a batch runs DSH tools and file reads in parallel and returns one combined
   const card = events.filter(event => event.type === 'toolEvent').at(-1).event;
   assert.equal(card.title, 'Batch');
   assert.equal(card.state, 'complete');
-  assert.deepEqual(card.children.map(child => [child.title, child.state]), [['delegate_task', 'complete'], ['read_file', 'complete'], ['list_locked_files', 'complete'], ['no_such_tool', 'error']]);
+  assert.deepEqual(card.children.map(child => [child.title, child.state]), [['Delegate', 'complete'], ['Read', 'complete'], ['List locked files', 'complete'], ['No such tool', 'error']]);
 
   // Outside paths are asked about once, up front; inside ones that look sensitive are still refused.
   const asked = [];

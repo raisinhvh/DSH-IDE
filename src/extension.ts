@@ -37,8 +37,12 @@ import { AcpRuntime, RuntimeEvent } from './runtime/acp';
 import { CliTurn, OAuthCliRuntime, TurnUsage } from './runtime/oauthCli';
 import { MirrorChange, mirrorPathExcluded, WorkspaceMirror } from './runtime/shadow';
 import { FileSummaries, readToolPath, SUMMARY_INSTRUCTIONS, SUMMARY_TOOL } from './summaries/store';
+import { setAgentPriority } from './runtime/priority';
+import { BACKGROUND_CLEANUP, setPowershellSpeedups, shellInstructions } from './runtime/agentShell';
+import { activateRustTools, deactivateRustTools, ensureRustTools } from './runtime/rustTools';
 import { shouldKeepAlive } from './runtime/keepAlive';
 import { Checkpoint, checkpointHandoff, parseCheckpoint } from './runtime/checkpoint';
+import { displayTool } from './runtime/toolDisplay';
 import { chatCompactRequest, compactStep, CompactWatch, CONTINUE_AFTER_CHECKPOINT, MAX_SUBAGENT_SEGMENTS, sendCompactRequest, subagentCheckpoint, subagentCompactRequest, subagentResumeTask, takeFollowUp, TurnChannel } from './runtime/midTurnCompact';
 import { trimSessionImages } from './runtime/imageTrim';
 import { buildHandoff, CHAT_HISTORY_TOOL, chatHistoryReply, ChatMessage, handoffSummaryPrompt, KEEP_WITH_TOOL, MAX_TURN_TOOLS, toolLine } from './runtime/handoff';
@@ -50,7 +54,7 @@ import { describePackTools, LOAD_TOOLPACK, loadToolpackTool, packCommands, RUN_T
 import { DshSidebarProvider, SidebarWebviewMessage } from './sidebar/provider';
 import { Dictation, normalizeVoiceCommands, VoiceCommand } from './voice/dictation';
 import { installedWhisper, installWhisper, WHISPER_DOWNLOAD_BYTES, WhisperEngine } from './voice/whisperInstall';
-import { ApprovalMode, CursorAccountState, SidebarAccessibility, SidebarFeatureKey, SidebarFeatures, SidebarImage, SidebarJob, SidebarNameModel, SidebarQuestion, SidebarSmartAutoRank, SidebarTimelineItem, SidebarSubagent, defaultFeatures, normalizeAccessibility, normalizeCompactTokens } from './sidebar/view';
+import { ApprovalMode, CursorAccountState, SidebarAccessibility, SidebarFeatureKey, SidebarFeatures, SidebarImage, SidebarJob, SidebarNameModel, SidebarQuestion, SidebarSmartAutoRank, SidebarTimelineItem, SidebarSubagent, SidebarSubagentTool, defaultFeatures, normalizeAccessibility, normalizeCompactTokens } from './sidebar/view';
 import { deciderPrompt, MAX_NOTE, MAX_RANKS, normalizeRanks, parseDecision, rankLabel, SMART_AUTO, SmartAutoRank } from './runtime/smartAuto';
 
 interface SessionRecord {
@@ -313,6 +317,8 @@ class ExtensionHost implements vscode.Disposable {
     this.status.tooltip = 'DeepSeek Harness: click to continue chat';
     this.status.show();
     const keepAliveTimer = setInterval(() => { void this.keepAliveChats(); }, 60_000);
+    setAgentPriority(vscode.workspace.getConfiguration('dsh').get('runtime.processPriority'));
+    this.applyShellSettings();
     this.disposables.push(
       this.output, this.status, this.sidebar, this.sync,
       { dispose: () => clearInterval(keepAliveTimer) },
@@ -323,6 +329,8 @@ class ExtensionHost implements vscode.Disposable {
         if (event.affectsConfiguration('dsh.models')) this.refreshModels();
         if (event.affectsConfiguration('dsh.subagents')) this.refreshSubagents();
         if (event.affectsConfiguration('dsh.memory')) this.refreshMemory();
+        if (event.affectsConfiguration('dsh.runtime.processPriority')) setAgentPriority(vscode.workspace.getConfiguration('dsh').get('runtime.processPriority'));
+        if (event.affectsConfiguration('dsh.runtime.powershellSpeedups') || event.affectsConfiguration('dsh.runtime.rustTools')) this.applyShellSettings();
         if (['dsh.features', 'dsh.experimental', 'dsh.nameModel', 'dsh.reviewModel', 'dsh.summaryModel', 'dsh.deciderModel', 'dsh.explorerModel', 'dsh.smartAutoRanks', 'dsh.updates.check', 'dsh.accessibility'].some(key => event.affectsConfiguration(key))) this.refreshCustomize();
         if (['dsh.models', 'dsh.features.smartAuto', 'dsh.deciderModel', 'dsh.smartAutoRanks'].some(key => event.affectsConfiguration(key))) void this.guarded(() => this.dropSmartAuto());
         if (SYNCED_SETTINGS.some(key => event.affectsConfiguration(`dsh.${key}`))) this.sync.schedule();
@@ -1772,14 +1780,17 @@ class ExtensionHost implements vscode.Disposable {
       if (batch || isDelegationTool(title) || (title === 'MCP tool' && isDelegationTool(detail || ''))) { if (!chat.delegationToolIds.has(id)) breakMessage(); chat.delegationToolIds.add(id); }
       if (chat.delegationToolIds.has(id)) return;
       if (state === 'running') this.noteRead(chat.mirror.cwd, readToolPath(title, detail));
+      const shown = displayTool(title, detail);
       this.sidebar.postMessage({ type: 'toolEvent', sessionId: record.id, entryId: `tool:${turnEntryId}:${id}`, event: {
-        id, kind: /search|grep|glob|web/i.test(title) ? 'search' : /edit|write/i.test(title) ? 'edit' : /command|bash|shell/i.test(title) ? 'shell' : /read/i.test(title) ? 'read' : 'other',
-        title, detail, state,
+        id, kind: shown.kind, title: shown.title, detail: shown.detail, full: shown.full, state,
       } });
       if (state === 'running') { segment++; segmentHasText = false; }
     };
     const postSubagent = (event: { id: string; title?: string; model?: string; prompt?: string; state?: 'running' | 'complete' | 'error'; text?: string; messageId?: string; role?: 'assistant' | 'tool' }): void => {
-      this.sidebar.postMessage({ type: 'subagentEvent', sessionId: record.id, agentId: `${turnEntryId}:${event.id}`, ...event, model: event.model === 'default' ? record.modelName : event.model || record.modelName });
+      // Harnesses report a subagent's tool call as "Title: detail" text.
+      const split = event.role === 'tool' && event.text ? event.text.match(/^([^:\n]+?)(?::\s*([\s\S]*))?$/) : null;
+      const tool = split ? displayTool(split[1], split[2]) : undefined;
+      this.sidebar.postMessage({ type: 'subagentEvent', sessionId: record.id, agentId: `${turnEntryId}:${event.id}`, ...event, ...(tool ? { tool } : {}), model: event.model === 'default' ? record.modelName : event.model || record.modelName });
     };
     chat.running = true;
     started();
@@ -2140,12 +2151,34 @@ class ExtensionHost implements vscode.Disposable {
   }
 
   /** Fixed instructions for a chat's agent: where it works, delegation, file summaries and batching. Kept short: they are sent with every request. */
+  /** Applies dsh.runtime.powershellSpeedups and dsh.runtime.rustTools to agents started from now on. */
+  private applyShellSettings(): void {
+    const config = vscode.workspace.getConfiguration('dsh');
+    setPowershellSpeedups(config.get('runtime.powershellSpeedups'));
+    if (config.get<boolean>('runtime.rustTools') === false || process.platform !== 'win32') {
+      deactivateRustTools();
+      return;
+    }
+    void ensureRustTools(this.context.globalStorageUri.fsPath).then(bin => {
+      // The setting may have been turned off while the download ran.
+      if (!bin || vscode.workspace.getConfiguration('dsh').get<boolean>('runtime.rustTools') === false) return;
+      try {
+        activateRustTools(bin);
+      } catch (error) {
+        this.output.appendLine(`rg/fd/sd unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+  }
+
   private agentInstructions(chat: Chat, bridged: boolean): string {
     const scope = chat.mirror.direct
       ? 'You edit the user\'s files directly; they and other agents may change files between turns, so re-read before editing.'
       : 'Edits stay in this working copy until the user reviews them.';
     return [
       `DSH IDE, workspace ${this.root().name}. ${scope}`,
+      'End a turn only when everything the user asked for is done, or you are blocked on a question only they can answer. Answering the latest message, a checkpoint, a compaction or a resumed session is not a stopping point: carry on with any unfinished requests in the same turn.',
+      BACKGROUND_CLEANUP,
+      shellInstructions(),
       memoryInstructions(chat.mirror.cwd, this.memorySettings().enabled),
       delegationInstructions(bridged, { explorer: this.delegationProfiles().some(profile => profile.name === 'explorer') }),
       bridged && this.feature('batching') ? BATCH_INSTRUCTIONS : '',
@@ -2336,7 +2369,10 @@ class ExtensionHost implements vscode.Disposable {
     let skipped: number;
     try { ({ calls, skipped } = uniqueBatchCalls(parseBatchCalls(args))); } catch (error) { return { text: error instanceof Error ? error.message : String(error), isError: true }; }
     const id = `batch-${randomUUID().slice(0, 8)}`;
-    const children = calls.map(call => ({ title: call.tool, detail: callLabel(call).slice(call.tool.length).trim() || undefined, state: 'running' as 'running' | 'complete' | 'error' }));
+    const children = calls.map(call => {
+      const shown = displayTool(call.tool, callLabel(call).slice(call.tool.length).trim() || undefined);
+      return { title: shown.title, detail: shown.detail, full: shown.full, kind: shown.kind, state: 'running' as 'running' | 'complete' | 'error' };
+    });
     const post = (): void => {
       const done = children.every(child => child.state !== 'running');
       this.sidebar.postMessage({ type: 'toolEvent', sessionId: chat.record.id, entryId: `tool:${chat.turnEntryId}:${id}`, event: {
@@ -2975,7 +3011,7 @@ class ExtensionHost implements vscode.Disposable {
     const model: ModelEntry = { ...entry, backend };
     const owner = `sub:${randomUUID()}`;
     const agentId = `${chat.turnEntryId}:delegate:${randomUUID()}`;
-    const post = (event: { title?: string; prompt?: string; model?: string; state?: 'running' | 'complete' | 'error' | 'cancelled'; delegated?: boolean; files?: string[]; text?: string; messageId?: string; role?: 'assistant' | 'tool' }): void => {
+    const post = (event: { title?: string; prompt?: string; model?: string; state?: 'running' | 'complete' | 'error' | 'cancelled'; delegated?: boolean; files?: string[]; text?: string; messageId?: string; role?: 'assistant' | 'tool'; tool?: SidebarSubagentTool }): void => {
       this.sidebar.postMessage({ type: 'subagentEvent', sessionId: chat.record.id, agentId, ...event });
     };
     const run: ChildRun = { parent: chat, owner, label: profile.name, readOnly, changed: new Set(), outOfScope: new Set(), files: readOnly ? [] : files, background: !!onBackground, cancel: () => undefined };
@@ -2994,7 +3030,8 @@ class ExtensionHost implements vscode.Disposable {
     const memory = memoryInstructions(chat.mirror.cwd, this.memorySettings().enabled);
     const explorer = name === 'explorer' && readOnly;
     const explorerNote = explorer ? 'Answer in at most about 300 words. Include file paths with line numbers for every claim.\n\n' : '';
-    const intro = `You are a subagent working in a shared working copy on behalf of another agent. ${instructions}`;
+    const shell = [BACKGROUND_CLEANUP, shellInstructions()].filter(Boolean).join('\n');
+    const intro = `You are a subagent working in a shared working copy on behalf of another agent. ${instructions}\n\n${shell}`;
     // Claude and Codex already get the delegation note as system text.
     const promptFor = (text: string, systemDelegation: boolean): string => `${intro}\n\n${systemDelegation ? '' : `${delegationInstructions(false)}\n\n`}${memory ? `${memory}\n\n` : ''}${summaries}Task:\n${explorerNote}${text}\n\n`
       + 'When you finish, reply with a concise final report of at most 300 words unless the task asks for more: findings, files changed, and anything the requester must still do.';
@@ -3002,10 +3039,18 @@ class ExtensionHost implements vscode.Disposable {
     let reportStart = 0;
     // Text after a tool call or a new model message starts a new paragraph instead of running on.
     let gap = false;
+    // Text after a tool call opens a new message, so the subagent view keeps text and tools in order.
+    let replySegment = 0;
+    let segmentStarted = false;
     const onText = (raw: string): void => {
       const text = gap && reply.trim() && raw.trim() ? `${reply.endsWith('\n\n') ? '' : reply.endsWith('\n') ? '\n' : '\n\n'}${raw.trimStart()}` : raw;
       if (raw.trim()) gap = false;
-      reply += text; post({ text, messageId: 'reply' });
+      reply += text;
+      // A message that starts after a tool call drops the paragraph break that joined it to the reply.
+      const shown = segmentStarted ? text : text.replace(/^\s+/, '');
+      if (!shown) return;
+      segmentStarted = true;
+      post({ text: shown, messageId: `reply:${replySegment}` });
     };
     // The latest tool calls, reported if the subagent is cancelled or fails.
     const toolLog: string[] = [];
@@ -3016,7 +3061,8 @@ class ExtensionHost implements vscode.Disposable {
       toolCount += 1;
       toolLog.push(`- ${title}${detail ? `: ${detail.replace(/\s+/g, ' ').slice(0, 150)}` : ''}`);
       if (toolLog.length > 30) toolLog.shift();
-      post({ text: `${title}${detail ? `: ${detail.slice(0, 300)}` : ''}`, messageId: `tool:${id}`, role: 'tool' });
+      if (segmentStarted) { replySegment += 1; segmentStarted = false; }
+      post({ text: `${title}${detail ? `: ${detail.slice(0, 300)}` : ''}`, messageId: `tool:${id}`, role: 'tool', tool: displayTool(title, detail) });
       this.noteRead(chat.mirror.cwd, readToolPath(title, detail));
     };
     try {
@@ -3400,8 +3446,10 @@ class ExtensionHost implements vscode.Disposable {
       const detail = typeof location === 'string' ? location : typeof update.status === 'string' ? update.status : undefined;
       if (rawKind === 'read') this.noteRead(chat.mirror.cwd, location);
       if (!chat.startedTools.has(id)) { chat.startedTools.add(id); chat.segment++; }
+      const rawInput = update.rawInput && typeof update.rawInput === 'object' ? JSON.stringify(update.rawInput) : undefined;
+      const shown = displayTool(title, rawInput && toolKind === 'shell' ? rawInput : detail);
       this.sidebar.postMessage({ type: 'toolEvent', sessionId: chatId, entryId: `tool:${chat.turnEntryId}:${id}`, event: {
-        id, kind: toolKind, title, detail,
+        id, kind: shown.kind === 'other' ? toolKind : shown.kind, title: shown.title, detail: shown.detail, full: shown.full,
         state: update.status === 'failed' ? 'error' : kind === 'tool_call' || update.status === 'in_progress' ? 'running' : 'complete',
       } });
       if (chat.running) this.postRun(chatId, 'tool', 'Using tools…');

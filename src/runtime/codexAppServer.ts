@@ -5,6 +5,8 @@ import { canDelegate, delegationInstructions } from './delegation';
 import { codexServiceTier } from './models';
 import { cancellationDeadline, terminateProcessTree } from './cancellation';
 import { isUsageLimitText, UsageLimitError } from './limits';
+import { applyAgentPriority } from './priority';
+import { agentEnv } from './agentShell';
 
 type Json = Record<string, unknown>;
 
@@ -45,9 +47,10 @@ export class CodexAppServerRuntime {
     // Codex goals duplicate DSH's /job runner. -c, unlike --disable, is ignored by a Codex that does not know the feature.
     const trimArgs = turn.trimTools ? ['-c', 'features.goals=false'] : [];
     const child = spawn(cliCommand('codex-cli'), [...delegateArgs, ...trimArgs, '--disable', 'multi_agent', 'app-server', '--listen', 'stdio://'], {
-      cwd: turn.cwd, env: cliEnv(turn.account), windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: turn.cwd, env: agentEnv(cliEnv(turn.account)), windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.child = child;
+    applyAgentPriority(child.pid);
     let buffer = '';
     let stderr = '';
     let nextId = 1;

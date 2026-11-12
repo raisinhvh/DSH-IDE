@@ -256,10 +256,15 @@ export interface SidebarToolEvent {
   kind: 'read' | 'search' | 'shell' | 'edit' | 'subagent' | 'other';
   title: string;
   detail?: string;
+  /** The whole call, shown on hover. */
+  full?: string;
   state: 'running' | 'complete' | 'error' | 'cancelled';
   /** Calls inside one batch tool call, shown nested under it. */
-  children?: { title: string; detail?: string; state: 'running' | 'complete' | 'error' }[];
+  children?: { title: string; detail?: string; full?: string; kind?: SidebarToolEvent['kind']; state: 'running' | 'complete' | 'error' }[];
 }
+
+/** A subagent's tool call, shown like the main agent's tool rows. */
+export interface SidebarSubagentTool { title: string; detail?: string; full?: string; kind: SidebarToolEvent['kind'] }
 
 export interface SidebarSubagent {
   id: string;
@@ -270,7 +275,7 @@ export interface SidebarSubagent {
   state: 'running' | 'complete' | 'error' | 'cancelled';
   /** Started with delegate_task: DSH reports its final state, and it can outlive its parent's turn, so cancelling that turn does not mark it cancelled. */
   delegated?: boolean;
-  messages: { id: string; role: 'assistant' | 'tool'; text: string }[];
+  messages: { id: string; role: 'assistant' | 'tool'; text: string; tool?: SidebarSubagentTool }[];
 }
 
 export interface SidebarDiff {
@@ -340,7 +345,7 @@ export type SidebarHostMessage =
   | { type: 'runState'; sessionId: string; state: 'idle' | 'thinking' | 'tool' | 'cancelling'; label?: string }
   | { type: 'toolEvent'; event: SidebarToolEvent; sessionId?: string; entryId?: string }
   | { type: 'toolState'; tools: SidebarToolEvent[] }
-  | { type: 'subagentEvent'; sessionId: string; agentId: string; title?: string; model?: string; prompt?: string; files?: string[]; state?: SidebarSubagent['state']; delegated?: boolean; text?: string; messageId?: string; role?: 'assistant' | 'tool' }
+  | { type: 'subagentEvent'; sessionId: string; agentId: string; title?: string; model?: string; prompt?: string; files?: string[]; state?: SidebarSubagent['state']; delegated?: boolean; text?: string; messageId?: string; role?: 'assistant' | 'tool'; tool?: SidebarSubagentTool }
   | { type: 'diff'; diff: SidebarDiff }
   | { type: 'diffState'; diffs: SidebarDiff[] }
   | { type: 'error'; message: string };

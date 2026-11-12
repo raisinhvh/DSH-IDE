@@ -1,4 +1,4 @@
-import { buildHandoff, ChatMessage } from './handoff';
+import { buildHandoff, ChatMessage, HANDOFF_OPENING } from './handoff';
 
 export interface Checkpoint { summary: string; keepFiles: string[] }
 
@@ -17,5 +17,6 @@ export function checkpointHandoff(history: ChatMessage[], checkpoint: Checkpoint
   const files = checkpoint.keepFiles.length ? `\n\nFiles to re-read if needed: ${checkpoint.keepFiles.join(', ')}` : '';
   const text = buildHandoff(history, checkpoint.summary + files, toolAvailable);
   if (history.length > (toolAvailable ? 2 : 6)) return text;
-  return `This conversation continues from an earlier session.\n\nSummary:\n${checkpoint.summary}${files}${text ? `\n\n${text}` : ''}`;
+  if (text) return text.replace(HANDOFF_OPENING, `${HANDOFF_OPENING}\n\nSummary:\n${checkpoint.summary}${files}`);
+  return `${HANDOFF_OPENING}\n\nSummary:\n${checkpoint.summary}${files}`;
 }

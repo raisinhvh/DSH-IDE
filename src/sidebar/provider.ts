@@ -160,7 +160,7 @@ export class DshSidebarProvider implements vscode.WebviewViewProvider {
           const id = message.messageId || `message:${agent.messages.length}`;
           const entry = agent.messages.find(item => item.id === id);
           if (entry) entry.text += message.text;
-          else agent.messages.push({ id, role: message.role || 'assistant', text: message.text });
+          else agent.messages.push({ id, role: message.role || 'assistant', text: message.text, ...(message.tool ? { tool: message.tool } : {}) });
         }
         const timeline = this.state.timeline[message.sessionId] ||= [];
         if (!timeline.some(item => item.kind === 'subagent' && item.agentId === message.agentId)) timeline.push({ id: `subagent:${message.agentId}`, kind: 'subagent', agentId: message.agentId });

@@ -45,13 +45,16 @@ export function handoffSummaryPrompt(messages: ChatMessage[]): string {
   ].join('\n');
 }
 
+/** Opens every handoff: a resumed session is not a stopping point. */
+export const HANDOFF_OPENING = 'This conversation continues from an earlier session. Requests from earlier messages that are not finished are still yours: answer the latest message, then go on with that unfinished work in this turn.';
+
 /** The handoff block that opens the first prompt of a new session. */
 export function buildHandoff(history: ChatMessage[], summary: string | undefined, toolAvailable: boolean): string {
   if (!history.length) return '';
   const keep = toolAvailable && summary ? KEEP_WITH_TOOL : KEEP_WITHOUT_TOOL;
   const recent = history.slice(-keep);
   const older = history.length - recent.length;
-  const parts = ['This conversation continues from an earlier session.'];
+  const parts = [HANDOFF_OPENING];
   if (older && summary) parts.push(`Summary of the ${older} earlier messages:\n${summary.trim()}`);
   else if (older) parts.push(`(${older} earlier messages are not shown.)`);
   parts.push(`Latest messages, word for word:\n${formatMessages(recent, MAX_MESSAGE_CHARS)}`);

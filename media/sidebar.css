@@ -426,29 +426,36 @@ body.a11y-targets .compose-tools .icon-button, body.a11y-targets .composer-side 
 .message-editor { display: flex; flex-direction: column; gap: 6px; }
 .message-edit-input { min-height: calc(72px * var(--text-scale, 1)); padding: 8px; resize: vertical; line-height: 1.45; }
 .message-edit-actions { display: flex; justify-content: flex-end; gap: 6px; }
-.tool-batch { width: 80%; margin: 6px 0 14px; padding: 4px 10px; border: 1px solid var(--quiet-line); border-radius: 10px; background: color-mix(in srgb, #000 7%, var(--vscode-sideBar-background)); }
-.tool-batch-head { display: flex; align-items: center; gap: 6px; width: 100%; padding: 2px 0; border: 0; border-radius: 6px; background: transparent; color: var(--muted); text-align: left; font-weight: 400; }
+/* Tool calls read as quiet captions under the text: no box, faded until hovered, arrow first. */
+.tool-batch { width: 100%; margin: 2px 0 8px; padding: 0; border: 0; background: transparent; font-size: calc(11px * var(--text-scale, 1)); filter: opacity(.6); transition: filter 160ms ease; }
+/* filter, not opacity: the feed-entry and list entrance animations hold opacity at 1. */
+.bubble.assistant + .tool-batch { margin-top: calc(-9px * var(--space-scale, 1)); }
+/* :focus-visible, not :focus-within: a mouse click on the arrow keeps focus and would leave the open list unfaded. */
+.tool-batch:hover, .tool-batch:has(:focus-visible) { filter: none; }
+/* Commands and paths stay a step quieter than tool names, even when hovered. */
+.tool-batch .tool-row-detail { opacity: .7; }
+.tool-batch-head { display: flex; align-items: center; gap: 3px; width: 100%; padding: 1px 0; border: 0; border-radius: 6px; background: transparent; color: var(--muted); text-align: left; font-weight: 400; font-size: inherit; }
 .tool-batch-head:hover { color: var(--vscode-foreground); }
-.tool-ticker { position: relative; flex: 1; min-width: 0; height: calc(22px * var(--text-scale, 1)); overflow: hidden; }
+.tool-batch-head > .symbol.small { order: -1; margin-left: -2px; font-size: calc(12.75px * var(--text-scale, 1)); }
+.tool-ticker { position: relative; flex: 1; min-width: 0; height: calc(19px * var(--text-scale, 1)); overflow: hidden; }
 .tool-ticker .ticker-item { width: 100%; }
 .tool-ticker .ticker-item.leaving { position: absolute; top: 0; left: 0; animation: ticker-out 420ms cubic-bezier(.2, 1.35, .4, 1) both; pointer-events: none; }
 .tool-ticker .ticker-item.entering { animation: ticker-in 420ms cubic-bezier(.2, 1.35, .4, 1) both; }
 @keyframes ticker-out { from { transform: translateY(0); opacity: 1; } to { transform: translateY(-100%); opacity: 0; } }
 @keyframes ticker-in { from { transform: translateY(100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .tool-ticker .ticker-item.leaving, .tool-ticker .ticker-item.entering { animation-duration: 1ms; } }
-.tool-batch-list { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--quiet-line); }
+.tool-batch-list { margin: 2px 0 2px 6px; padding-left: 9px; border-left: 1px solid var(--quiet-line); }
 .tool-children { margin: 1px 0 3px 7px; padding-left: 9px; border-left: 1px solid var(--quiet-line); }
-.tool-children .tool-row { font-size: calc(11.5px * var(--text-scale, 1)); }
-.tool-batch .tool-count { flex: 0 0 auto; min-width: calc(18px * var(--text-scale, 1)); padding: 0 6px; border-radius: 999px; background: var(--quiet-line); text-align: center; font-size: calc(10px * var(--text-scale, 1)); line-height: 16px; }
+.tool-batch .tool-count { flex: 0 0 auto; order: 2; padding: 0 2px; text-align: right; font-size: calc(10.5px * var(--text-scale, 1)); opacity: .8; }
 .tool-batch-list.bubbling { transform-origin: top left; animation: menu-bubble 260ms cubic-bezier(.18, 1.45, .3, 1) both; }
 .tool-batch-list.bubbling .tool-row { animation: entry-rise 280ms cubic-bezier(.18, 1.45, .3, 1) both; }
 .tool-batch-list.bubbling .tool-row:nth-child(2) { animation-delay: 30ms; }
 .tool-batch-list.bubbling .tool-row:nth-child(3) { animation-delay: 60ms; }
 .tool-batch-list.bubbling .tool-row:nth-child(n+4) { animation-delay: 90ms; }
-.tool-row { display: flex; align-items: center; gap: 5px; min-width: 0; height: calc(22px * var(--text-scale, 1)); white-space: nowrap; }
-.tool-row .symbol { flex: 0 0 auto; font-size: calc(15px * var(--text-scale, 1)); color: var(--muted); }
-.tool-row-title { flex: 0 0 auto; font-weight: 600; }
-.tool-row-detail { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); }
+.tool-row { display: flex; align-items: center; gap: 5px; min-width: 0; height: calc(19px * var(--text-scale, 1)); white-space: nowrap; }
+.tool-row .symbol { flex: 0 0 auto; font-size: calc(12.75px * var(--text-scale, 1)); color: var(--muted); }
+.tool-row-title { flex: 0 0 auto; font-weight: 500; }
+.tool-row-detail { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: calc(10.5px * var(--text-scale, 1)); }
 .tool-row.tool-error .symbol { color: var(--vscode-errorForeground); }
 .tool-row.tool-cancelled .symbol { color: var(--muted); }
 .tool-row.tool-running .symbol { animation: tool-pulse 1.15s ease-in-out infinite; }
