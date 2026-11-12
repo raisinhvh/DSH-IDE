@@ -54,7 +54,7 @@ import { describePackTools, LOAD_TOOLPACK, loadToolpackTool, packCommands, RUN_T
 import { DshSidebarProvider, SidebarWebviewMessage } from './sidebar/provider';
 import { Dictation, normalizeVoiceCommands, VoiceCommand } from './voice/dictation';
 import { installedWhisper, installWhisper, WHISPER_DOWNLOAD_BYTES, WhisperEngine } from './voice/whisperInstall';
-import { ApprovalMode, CursorAccountState, SidebarAccessibility, SidebarFeatureKey, SidebarFeatures, SidebarImage, SidebarJob, SidebarNameModel, SidebarQuestion, SidebarSmartAutoRank, SidebarTimelineItem, SidebarSubagent, SidebarSubagentTool, defaultFeatures, normalizeAccessibility, normalizeCompactTokens } from './sidebar/view';
+import { ApprovalMode, CursorAccountState, SidebarAccessibility, SidebarFeatureKey, SidebarFeatures, SidebarImage, SidebarJob, SidebarNameModel, SidebarQuestion, SidebarSmartAutoRank, SidebarTimelineItem, SidebarSubagent, SidebarSubagentTool, defaultFeatures, normalizeAccessibility, normalizeCompactTokens, normalizeProcessPriority } from './sidebar/view';
 import { deciderPrompt, MAX_NOTE, MAX_RANKS, normalizeRanks, parseDecision, rankLabel, SMART_AUTO, SmartAutoRank } from './runtime/smartAuto';
 
 interface SessionRecord {
@@ -138,6 +138,7 @@ const FEATURE_SETTINGS: Record<SidebarFeatureKey, string> = {
   reduceMotion: 'features.reduceMotion', updateChecks: 'updates.check', mirror: 'runtime.mirror', reviewAgent: 'features.reviewAgent',
   fileSummaries: 'features.fileSummaries', smartAuto: 'features.smartAuto',
   autoCompact: 'experimental.autoCompact', batching: 'experimental.batching', trimTools: 'experimental.trimTools', voice: 'features.voice',
+  rustTools: 'runtime.rustTools', powershellSpeedups: 'runtime.powershellSpeedups',
 };
 type ModelSettingKey = 'nameModel' | 'reviewModel' | 'summaryModel' | 'deciderModel' | 'explorerModel';
 type ResolvedRoute = ResolvedModel | { model: ModelEntry } | { model: ModelEntry; oauthAccount: OAuthCliAccount };
@@ -331,7 +332,7 @@ class ExtensionHost implements vscode.Disposable {
         if (event.affectsConfiguration('dsh.memory')) this.refreshMemory();
         if (event.affectsConfiguration('dsh.runtime.processPriority')) setAgentPriority(vscode.workspace.getConfiguration('dsh').get('runtime.processPriority'));
         if (event.affectsConfiguration('dsh.runtime.powershellSpeedups') || event.affectsConfiguration('dsh.runtime.rustTools')) this.applyShellSettings();
-        if (['dsh.features', 'dsh.experimental', 'dsh.nameModel', 'dsh.reviewModel', 'dsh.summaryModel', 'dsh.deciderModel', 'dsh.explorerModel', 'dsh.smartAutoRanks', 'dsh.updates.check', 'dsh.accessibility'].some(key => event.affectsConfiguration(key))) this.refreshCustomize();
+        if (['dsh.features', 'dsh.experimental', 'dsh.runtime','dsh.nameModel', 'dsh.reviewModel', 'dsh.summaryModel', 'dsh.deciderModel', 'dsh.explorerModel', 'dsh.smartAutoRanks', 'dsh.updates.check', 'dsh.accessibility'].some(key => event.affectsConfiguration(key))) this.refreshCustomize();
         if (['dsh.models', 'dsh.features.smartAuto', 'dsh.deciderModel', 'dsh.smartAutoRanks'].some(key => event.affectsConfiguration(key))) void this.guarded(() => this.dropSmartAuto());
         if (SYNCED_SETTINGS.some(key => event.affectsConfiguration(`dsh.${key}`))) this.sync.schedule();
       }),
@@ -2506,7 +2507,8 @@ class ExtensionHost implements vscode.Disposable {
       deciderModel: this.modelSetting('deciderModel'), explorerModel: this.modelSetting('explorerModel'), smartAutoRanks: this.smartAutoRanks(),
       accessibility: normalizeAccessibility(vscode.workspace.getConfiguration('dsh').get<unknown>('accessibility')),
       autoCompactTokens: normalizeCompactTokens(vscode.workspace.getConfiguration('dsh').get<unknown>('experimental.autoCompactTokens')),
-      voiceCommands: this.voiceCommands(), voiceAvailable: process.platform === 'win32' });
+      voiceCommands: this.voiceCommands(), voiceAvailable: process.platform === 'win32',
+      processPriority: normalizeProcessPriority(vscode.workspace.getConfiguration('dsh').get<unknown>('runtime.processPriority')) });
   }
 
   private voiceCommands(): VoiceCommand[] {
@@ -3604,6 +3606,10 @@ class ExtensionHost implements vscode.Disposable {
         }
         case 'saveAutoCompactTokens':
           await vscode.workspace.getConfiguration('dsh').update('experimental.autoCompactTokens', normalizeCompactTokens(message.tokens), vscode.ConfigurationTarget.Global);
+          this.refreshCustomize();
+          break;
+        case 'saveProcessPriority':
+          await vscode.workspace.getConfiguration('dsh').update('runtime.processPriority', normalizeProcessPriority(message.priority), vscode.ConfigurationTarget.Global);
           this.refreshCustomize();
           break;
         case 'saveAccessibility': await this.saveAccessibility(message.accessibility); break;

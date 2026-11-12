@@ -69,8 +69,13 @@ export function accessibilityStyle(value: SidebarAccessibility): { vars: Record<
   };
 }
 export type SidebarFeatureKey = 'activityRail' | 'autoName' | 'shareRules' | 'editorContext' | 'reduceMotion' | 'updateChecks' | 'mirror' | 'reviewAgent' | 'fileSummaries' | 'smartAuto'
-  | 'autoCompact' | 'batching' | 'trimTools' | 'voice';
+  | 'autoCompact' | 'batching' | 'trimTools' | 'voice' | 'rustTools' | 'powershellSpeedups';
 export type SidebarFeatures = Record<SidebarFeatureKey, boolean>;
+/** CPU priority for agent harnesses and the commands they run (dsh.runtime.processPriority). */
+export type SidebarProcessPriority = 'normal' | 'aboveNormal' | 'high';
+export const PROCESS_PRIORITIES: readonly SidebarProcessPriority[] = ['normal', 'aboveNormal', 'high'];
+export const normalizeProcessPriority = (value: unknown): SidebarProcessPriority =>
+  PROCESS_PRIORITIES.includes(value as SidebarProcessPriority) ? value as SidebarProcessPriority : 'normal';
 /** Model that writes chat titles; an empty model keeps the first-message title. */
 export interface SidebarNameModel { model?: string; effort?: string; speed?: string }
 /** One entry of the Smart Auto ranking; the list runs from smartest to least smart. */
@@ -121,6 +126,7 @@ export type SidebarWebviewMessage =
   | { type: 'saveExplorerModel'; explorerModel: SidebarNameModel }
   | { type: 'saveSmartAutoRanks'; ranks: SidebarSmartAutoRank[] }
   | { type: 'saveAutoCompactTokens'; tokens: number }
+  | { type: 'saveProcessPriority'; priority: SidebarProcessPriority }
   | { type: 'setMemory'; enabled: boolean }
   | { type: 'openMemoryFolder' }
   | { type: 'saveAccessibility'; accessibility: SidebarAccessibility }
@@ -324,7 +330,7 @@ export type SidebarHostMessage =
   | { type: 'subagentProfilesState'; profiles: SidebarSubagentProfile[] }
   | { type: 'subagentSaved' }
   | { type: 'memoryState'; memory: SidebarMemory }
-  | { type: 'customizeState'; features: SidebarFeatures; nameModel: SidebarNameModel; reviewModel: SidebarNameModel; summaryModel: SidebarNameModel; deciderModel: SidebarNameModel; explorerModel: SidebarNameModel; smartAutoRanks: SidebarSmartAutoRank[]; accessibility: SidebarAccessibility; autoCompactTokens: number; voiceCommands: VoiceCommand[]; voiceAvailable: boolean }
+  | { type: 'customizeState'; features: SidebarFeatures; nameModel: SidebarNameModel; reviewModel: SidebarNameModel; summaryModel: SidebarNameModel; deciderModel: SidebarNameModel; explorerModel: SidebarNameModel; smartAutoRanks: SidebarSmartAutoRank[]; accessibility: SidebarAccessibility; autoCompactTokens: number; voiceCommands: VoiceCommand[]; voiceAvailable: boolean; processPriority: SidebarProcessPriority }
   /** Dictation started or stopped; `error` explains a stop the user did not ask for. */
   | { type: 'voiceState'; listening: boolean; error?: string }
   /** Words heard so far in the current phrase; replaced by the next hypothesis or result. */
@@ -388,6 +394,7 @@ export interface SidebarViewState {
   voiceCommands: VoiceCommand[];
   /** Voice input needs Windows speech recognition. */
   voiceAvailable: boolean;
+  processPriority: SidebarProcessPriority;
   slashCommands: SidebarSlashCommand[];
   jobs: Record<string, SidebarJob>;
   accessibility: SidebarAccessibility;
@@ -399,7 +406,7 @@ export interface SidebarViewState {
   error?: string;
 }
 
-export const defaultFeatures = (): SidebarFeatures => ({ activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: true, smartAuto: false, autoCompact: false, batching: false, trimTools: true, voice: true });
+export const defaultFeatures = (): SidebarFeatures => ({ activityRail: true, autoName: true, shareRules: true, editorContext: true, reduceMotion: false, updateChecks: true, mirror: true, reviewAgent: false, fileSummaries: true, smartAuto: false, autoCompact: false, batching: false, trimTools: true, voice: true, rustTools: true, powershellSpeedups: true });
 
 /** Auto compaction threshold: tokens of conversation, not counting the session's system prompt and tools. */
 export const DEFAULT_COMPACT_TOKENS = 70_000;
@@ -412,7 +419,7 @@ export function normalizeCompactTokens(value: unknown): number {
 }
 
 export const initialSidebarState = (): SidebarViewState => ({
-  page: 'chat', approvalMode: 'ask', subagentProfiles: [], instructions: [], toolpacks: [], features: defaultFeatures(), nameModel: {}, reviewModel: {}, summaryModel: {}, deciderModel: {}, explorerModel: {}, smartAutoRanks: [], autoCompactTokens: DEFAULT_COMPACT_TOKENS, voiceCommands: defaultVoiceCommands(), voiceAvailable: process.platform === 'win32', slashCommands: SLASH_COMMANDS.map(command => ({ ...command })), jobs: {}, accessibility: defaultAccessibility(), sync: { connected: false, auto: true }, railIcons: [...RAIL_FALLBACK_ICONS], sessions: [], models: [], providerLabel: 'No provider', accountLabel: 'No account connected',
+  page: 'chat', approvalMode: 'ask', subagentProfiles: [], instructions: [], toolpacks: [], features: defaultFeatures(), nameModel: {}, reviewModel: {}, summaryModel: {}, deciderModel: {}, explorerModel: {}, smartAutoRanks: [], autoCompactTokens: DEFAULT_COMPACT_TOKENS, voiceCommands: defaultVoiceCommands(), voiceAvailable: process.platform === 'win32', processPriority: 'normal', slashCommands: SLASH_COMMANDS.map(command => ({ ...command })), jobs: {}, accessibility: defaultAccessibility(), sync: { connected: false, auto: true }, railIcons: [...RAIL_FALLBACK_ICONS], sessions: [], models: [], providerLabel: 'No provider', accountLabel: 'No account connected',
   accountConnected: false, accounts: [], usage: {}, dependencies: [], cursor: { connected: false, label: 'Not connected' },
   messages: {}, timeline: {}, tools: [], subagents: {}, diffs: [], runStates: {}, queues: {},
 });

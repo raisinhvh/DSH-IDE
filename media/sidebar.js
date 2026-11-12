@@ -1820,6 +1820,10 @@
     { key: 'mirror', icon: 'content_copy', title: 'Private workspace copy', desc: 'Each new chat edits its own copy of the workspace. Turn off to let agents edit your real files, so they see your changes and each other\'s. Applies to new chats.' },
     { key: 'updateChecks', icon: 'update', title: 'Offer optional updates', desc: 'Checks for DSH-IDE and DSH updates at startup. Required updates still apply.' },
   ];
+  const shellInfo = [
+    { key: 'rustTools', icon: 'bolt', windowsOnly: true, title: 'Fast search tools', desc: 'Downloads ripgrep, fd and sd (checked against their release SHA-256), puts them on agents\' PATH and steers agent shells to them instead of grep, find and sed. Applies to agents started after the change.' },
+    { key: 'powershellSpeedups', icon: 'terminal', title: 'PowerShell speedups', desc: 'Starts agent PowerShells without telemetry or update checks, and tells agents the fast PowerShell patterns. Applies to agents started after the change.' },
+  ];
   let customizeKey = '';
 
   function featureModelFields(stateKey, saveType, modelLabel, emptyLabel, helperWithModel, helperWithoutModel) {
@@ -1941,7 +1945,7 @@
     return detail;
   }
 
-  const customizeStateKey = () => JSON.stringify([state.voiceCommands, state.features, state.nameModel, state.reviewModel, state.summaryModel, state.deciderModel, state.explorerModel, state.smartAutoRanks, state.selectedModelId, state.accounts, state.models.map(item => [item.id, item.enabled, item.provider, item.account, item.effortOptions, item.speedOptions])]);
+  const customizeStateKey = () => JSON.stringify([state.voiceCommands, state.features, state.processPriority,state.nameModel, state.reviewModel, state.summaryModel, state.deciderModel, state.explorerModel, state.smartAutoRanks, state.selectedModelId, state.accounts, state.models.map(item => [item.id, item.enabled, item.provider, item.account, item.effortOptions, item.speedOptions])]);
 
   function renderCustomize() {
     const root = el('feature-list');
@@ -1970,6 +1974,25 @@
       explorer.className = 'feature-row explorer-row';
       explorer.appendChild(featureModelFields('explorerModel', 'saveExplorerModel', 'Explorer model', 'Off', 'Searches and reads files for the chat and returns only the answer. Off until you pick a model.', 'Searches and reads files for the chat and returns only the answer. Off until you pick a model.'));
       root.appendChild(explorer);
+      // Agent shell settings apply to agents started after the change, not to running chats.
+      for (const feature of shellInfo) {
+        if (feature.windowsOnly && !state.voiceAvailable) continue; // voiceAvailable is true exactly on Windows.
+        const enabled = !!state.features[feature.key];
+        root.appendChild(settingRow('feature:' + feature.key, feature, enabled, () => {
+          state.features = { ...state.features, [feature.key]: !enabled };
+          renderCustomize();
+          send({ type: 'setFeature', key: feature.key, enabled: !enabled });
+        }));
+      }
+      const priority = settingRow('feature:processPriority', { icon: 'speed', title: 'Agent CPU priority', desc: 'How soon agents and every command they run (shells, builds, searches) get CPU time. High can make other programs, including the editor, feel slow during heavy builds. Applies to agents started after the change.' });
+      const priorityControl = document.createElement('div'); priorityControl.className = 'a11y-control';
+      priorityControl.appendChild(segmented('Agent CPU priority', [['normal', 'Normal'], ['aboveNormal', 'Above normal'], ['high', 'High']], state.processPriority || 'normal', picked => {
+        state.processPriority = picked;
+        renderCustomize();
+        send({ type: 'saveProcessPriority', priority: picked });
+      }));
+      priority.appendChild(priorityControl);
+      root.appendChild(priority);
     });
   }
 
@@ -2503,6 +2526,7 @@
         if (typeof message.autoCompactTokens === 'number') state.autoCompactTokens = message.autoCompactTokens;
         if (Array.isArray(message.voiceCommands)) state.voiceCommands = message.voiceCommands;
         if (typeof message.voiceAvailable === 'boolean') state.voiceAvailable = message.voiceAvailable;
+        if (message.processPriority) state.processPriority = message.processPriority;
         applyAccessibility(state.accessibility);
         break;
       case 'syncState': state.sync = message.sync || state.sync; break;

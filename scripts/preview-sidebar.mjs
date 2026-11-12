@@ -4,7 +4,8 @@ import { getSidebarHtml, initialSidebarState } from '../dist/sidebar/view.mjs';
 
 const state = initialSidebarState();
 const pickerPreview = process.argv[2] === 'picker';
-const page = process.argv[2] === 'chat' || pickerPreview ? 'chat' : 'accounts';
+// Usage: node scripts/preview-sidebar.mjs [picker | <page>], where <page> is any SidebarPage (default accounts).
+const page = pickerPreview ? 'chat' : process.argv[2] || 'accounts';
 state.page = page;
 state.models = [
   { id: 'Codex Default', name: 'Codex Default', provider: 'codex-cli', backend: 'default', configured: true,
