@@ -7,13 +7,13 @@ import { build } from 'esbuild';
 // Exercise the runtime wire protocol without starting CLI processes or model turns.
 const launches = [];
 let codexItems = [];
-globalThis.__dshDelegateTestSpawn = (command, args) => {
+globalThis.__dshDelegateTestSpawn = (command, args, options) => {
   const child = new EventEmitter();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   child.stdin = new PassThrough();
   child.kill = () => { child.killed = true; };
-  const launch = { command, args, requests: [], child };
+  const launch = { command, args, options, requests: [], child };
   launches.push(launch);
   if (command === 'codex-cli') {
     let buffer = '';
@@ -55,7 +55,7 @@ const bundled = await build({
       : 'export const cliCommand = provider => provider; export const cliEnv = () => ({});' }));
   } }],
 });
-const { OAuthCliRuntime } = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`);
+const { OAuthCliRuntime, IDLE_CLOSE_MS, NO_IDLE_LIMIT_MS } = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`);
 const delegate = { command: 'node', args: ['delegate-server.js'], env: { DSH_DELEGATE_OWNER: 'owner' } };
 const turn = (provider, extras = {}) => ({ account: { provider }, cwd: process.cwd(), backend: 'configured-model', prompt: 'Say hi', onText() {}, onTool() {}, ...extras });
 
@@ -153,6 +153,93 @@ test('Claude keeps stdin open after a result while background tasks can still as
   send({ type: 'system', subtype: 'task_notification', task_id: 'shell-1', status: 'completed' });
   send({ type: 'result', subtype: 'success', result: 'Done.' });
   await tick();
+  assert.equal(launch.child.stdin.writableEnded, true);
+  launch.child.emit('close', 0);
+  await result;
+});
+
+/** Starts a Claude turn whose fake CLI reports session state; collects the control responses DSH writes back. */
+const stateTurn = () => {
+  const result = new OAuthCliRuntime().prompt(turn('claude-cli', { onApproval: () => Promise.resolve(true) }));
+  const launch = launches.at(-1);
+  const responses = [];
+  launch.child.stdin.on('data', chunk => { for (const line of String(chunk).split('\n').filter(Boolean)) { const message = JSON.parse(line); if (message.type === 'control_response') responses.push(message); } });
+  const send = event => launch.child.stdout.write(JSON.stringify(event) + '\n');
+  const state = value => send({ type: 'system', subtype: 'session_state_changed', state: value });
+  const ask = id => send({ type: 'control_request', request_id: id, request: { subtype: 'can_use_tool', tool_name: 'PowerShell', input: { command: 'Get-Location' } } });
+  return { result, launch, responses, send, state, ask };
+};
+const tick = async () => { await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve)); };
+
+test('Claude asks for session state events so stdin is closed only once it is idle', async () => {
+  const { result, launch } = stateTurn();
+  assert.equal(launch.options.env.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS, '1');
+  launch.child.emit('close', 0);
+  await result;
+});
+
+test('Claude keeps stdin open after an early result until it reports idle', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { result, launch, responses, send, state, ask } = stateTurn();
+  await tick();
+  // A resumed session can report a result before it has read the new message.
+  state('running');
+  send({ type: 'result', subtype: 'success', result: 'Earlier work.' });
+  await tick();
+  assert.equal(launch.child.stdin.writableEnded, false);
+  ask('after-early-result');
+  await tick();
+  assert.equal(responses.at(-1).response.request_id, 'after-early-result');
+  assert.equal(responses.at(-1).response.response.behavior, 'allow');
+  send({ type: 'result', subtype: 'success', result: 'Done.' });
+  state('idle');
+  await tick();
+  assert.equal(launch.child.stdin.writableEnded, false);
+  t.mock.timers.tick(IDLE_CLOSE_MS);
+  assert.equal(launch.child.stdin.writableEnded, true);
+  launch.child.emit('close', 0);
+  await result;
+});
+
+test('Claude going back to running within the idle grace keeps stdin open', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { result, launch, send, state } = stateTurn();
+  await tick();
+  state('running');
+  send({ type: 'result', subtype: 'success', result: 'Done.' });
+  state('idle');
+  await tick();
+  t.mock.timers.tick(IDLE_CLOSE_MS - 1);
+  state('running');
+  await tick();
+  t.mock.timers.tick(NO_IDLE_LIMIT_MS - 1);
+  assert.equal(launch.child.stdin.writableEnded, false);
+  launch.child.emit('close', 0);
+  await result;
+});
+
+test('Claude keeps stdin open through a background wait longer than two minutes', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { result, launch, responses, send, state, ask } = stateTurn();
+  await tick();
+  state('running');
+  send({ type: 'system', subtype: 'task_started', task_id: 'sleep-1', description: 'Wait for the install' });
+  send({ type: 'result', subtype: 'success', result: 'Waiting on the install.' });
+  state('idle');
+  await tick();
+  t.mock.timers.tick(30 * 60_000);
+  assert.equal(launch.child.stdin.writableEnded, false);
+  assert.ok(!launch.child.killed);
+  send({ type: 'system', subtype: 'task_notification', task_id: 'sleep-1', status: 'completed' });
+  state('running');
+  ask('after-wait');
+  await tick();
+  assert.equal(responses.at(-1).response.request_id, 'after-wait');
+  assert.equal(responses.at(-1).response.response.behavior, 'allow');
+  send({ type: 'result', subtype: 'success', result: 'Screenshot taken.' });
+  state('idle');
+  await tick();
+  t.mock.timers.tick(IDLE_CLOSE_MS);
   assert.equal(launch.child.stdin.writableEnded, true);
   launch.child.emit('close', 0);
   await result;

@@ -145,10 +145,26 @@ export function claudeArgs(turn: CliTurn): string[] {
   ];
 }
 
+/**
+ * How long Claude Code must stay idle, with nothing left to run, before its input is closed. A queued message or a
+ * finished background task turns it back to running within this time.
+ */
+export const IDLE_CLOSE_MS = 1_500;
+
+/**
+ * Longest wait on background tasks DSH tracks before closing input anyway. Claude Code stops a background command
+ * after at most 2 hours, so a real task ends before this; the limit only covers a task whose end was never reported.
+ */
+export const BACKGROUND_WAIT_LIMIT_MS = 130 * 60_000;
+
+/** Claude Code that reports session state, after a result, has not gone idle within this time: input is closed anyway so the turn cannot hang. */
+export const NO_IDLE_LIMIT_MS = 10 * 60_000;
+
 /** Child environment for a Claude turn, with the prompt cache lifetime when the turn sets one. */
 function claudeEnv(turn: CliTurn): NodeJS.ProcessEnv {
   const ttl = turn.cacheTtl ?? (turn.lean ? '5m' : undefined);
-  const env = agentEnv(cliEnv(turn.account));
+  // Session state events (idle / running / requires_action) tell DSH when closing stdin can no longer cut off a permission request.
+  const env = { ...agentEnv(cliEnv(turn.account)), CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: '1' };
   return ttl ? { ...env, CLAUDE_CODE_PROMPT_CACHE_TTL: ttl } : env;
 }
 
@@ -180,13 +196,17 @@ export class ClaudeCliRuntime {
       const subagentTools = new Set<string>();
       const subagentText = new Map<string, string>();
       const subagentMessages = new Map<string, Map<string, string>>();
-      // Claude keeps working after its result while background tasks run, and asks permission over stdin.
-      // Ending stdin then fails those requests with "Stream closed", so it stays open until Claude goes quiet.
+      // Claude asks permission over stdin, and once stdin has ended every request fails with "Stream closed".
+      // It can keep working after a result: background tasks finish and continue the turn, and a resumed session
+      // can report a result before it reads the new message. So stdin stays open until Claude reports it is idle
+      // with no background task left (older CLIs without session state: until the result, or 5 s of quiet).
       // Background task id → description.
       const backgroundTasks = new Map<string, string>();
       let turnOver = false;
       let waitingForTasks = false;
       let idleTimer: NodeJS.Timeout | undefined;
+      // Latest session_state_changed state; undefined while this CLI has reported none.
+      let sessionState: string | undefined;
       const reportWait = (tasks: string[]): void => {
         try { turn.onBackgroundWait?.(tasks); } catch { /* Callback errors must not interrupt the turn. */ }
       };
@@ -207,7 +227,10 @@ export class ClaudeCliRuntime {
       const settleInput = (): void => {
         clearTimeout(idleTimer);
         if (!turnOver || child.stdin.writableEnded) return;
-        idleTimer = setTimeout(endInput, backgroundTasks.size ? 120_000 : 5_000);
+        const wait = backgroundTasks.size ? BACKGROUND_WAIT_LIMIT_MS
+          : sessionState === undefined ? 5_000
+          : sessionState === 'idle' ? IDLE_CLOSE_MS : NO_IDLE_LIMIT_MS;
+        idleTimer = setTimeout(endInput, wait);
       };
       const noteSubagentText = (agent: string, message: string, text: string, append: boolean): void => {
         const messages = subagentMessages.get(agent) || new Map<string, string>();
@@ -283,7 +306,9 @@ export class ClaudeCliRuntime {
             for (const id of [...backgroundTasks.keys()]) if (!running.has(id)) backgroundTasks.delete(id);
             if (waitingForTasks && backgroundTasks.size) reportWait([...backgroundTasks.values()]);
           }
-          if (event.type === 'assistant' || event.type === 'stream_event' || event.type === 'control_request') {
+          const stateChange = event.type === 'system' && event.subtype === 'session_state_changed' && typeof event.state === 'string' ? event.state : undefined;
+          if (stateChange) sessionState = stateChange;
+          if (event.type === 'assistant' || event.type === 'stream_event' || event.type === 'control_request' || (stateChange && stateChange !== 'idle')) {
             turnOver = false;
             if (waitingForTasks) {
               waitingForTasks = false;
@@ -292,7 +317,8 @@ export class ClaudeCliRuntime {
           }
           if (event.type === 'result') {
             turnOver = true;
-            if (!backgroundTasks.size) endInput();
+            // A CLI that reports session state is closed once it goes idle (settleInput); an older one right away.
+            if (!backgroundTasks.size) { if (sessionState === undefined) endInput(); }
             else {
               waitingForTasks = true;
               reportWait([...backgroundTasks.values()]);
