@@ -3,12 +3,20 @@ import { dirname, join } from 'node:path';
 
 /**
  * The OpenAI-compatible endpoint of each provider DSH routes through llm-pi-ai. OpenRouter's serves every model it
- * lists; OpenCode Go's serves its Chat Completions models, which are most of the Go lineup.
+ * lists; OpenCode Go's serves its Chat Completions models, which are most of the Go lineup. Mistral's catalog models
+ * use pi-ai's native Mistral adapter; only a model missing from the catalog falls back to its OpenAI-compatible endpoint.
+ * A Vibe (Le Chat Pro or student) subscription key and a La Plateforme API key both authenticate the same endpoint.
+ * ChatGPT (Codex) runs only catalog models on pi-ai's native Codex Responses adapter, with the account's access token as
+ * the key; it has no OpenAI-compatible fallback.
  */
 export const PI_AI_BASE_URLS: Readonly<Record<string, string>> = {
   openrouter: 'https://openrouter.ai/api/v1',
   'opencode-go': 'https://opencode.ai/zen/go/v1',
+  mistral: 'https://api.mistral.ai/v1',
+  'openai-codex': 'https://chatgpt.com/backend-api',
 };
+/** Providers whose models are only reachable through pi-ai's catalog adapter. */
+const CATALOG_ONLY = new Set(['openai-codex']);
 /** Effort levels pi-ai accepts as `reasoningEfforts` keys. */
 const PI_AI_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 const CATALOG_DIR = ['@earendil-works', 'pi-ai', 'dist', 'providers', 'data'];
@@ -47,7 +55,7 @@ export function piAiPatch(provider: string, envName: string, model: string, cata
   if (!isPiAiProvider(provider)) return '';
   const json = JSON.stringify;
   let text = `- id: llm-pi-ai\n  config:\n    providers:\n      ${provider}:\n        apiKeyEnv: ${json(envName)}\n`;
-  if (catalog?.has(model)) return text;
+  if (catalog?.has(model) || CATALOG_ONLY.has(provider)) return text;
   text += `        api: "openai-completions"\n        baseURL: ${json(PI_AI_BASE_URLS[provider])}\n        models:\n          - id: ${json(model)}\n`;
   const levels = efforts.filter(effort => PI_AI_LEVELS.has(effort));
   if (levels.length) text += `            reasoningEfforts:\n${levels.map(level => `              ${level}: ${level === 'off' ? 'null' : json(level)}\n`).join('')}`;

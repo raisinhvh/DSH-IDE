@@ -1,7 +1,6 @@
 import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process';
 import { dirname } from 'node:path';
 import { OAuthCliAccount, cliCommand, cliEnv } from '../accounts/oauthCli';
-import { CodexAppServerRuntime } from './codexAppServer';
 import { canDelegate, delegationInstructions, isNativeSubagentTool } from './delegation';
 import { terminateProcessTree } from './cancellation';
 import { claudeSpeedSettings } from './models';
@@ -19,17 +18,17 @@ export interface CliTurn {
   readOnly?: boolean;
   delegate?: { command: string; args: string[]; env: Record<string, string> };
   prompt: string;
-  /** Fixed instructions sent as system (Claude) or developer (Codex) text on every run, instead of the default delegation note. */
+  /** Fixed instructions sent as system text on every run, instead of the default delegation note. */
   system?: string;
   images?: { path: string; mimeType: string }[];
   sessionId?: string;
-  /** A one-shot helper call: no Claude Code system prompt, tools, MCP servers, rules or session. Claude only. */
+  /** A one-shot helper call: no Claude Code system prompt, tools, MCP servers, rules or session. */
   lean?: boolean;
-  /** Prompt cache lifetime for this run. Lean turns default to 5m, since a one-shot never reads its cache back. Claude only. */
+  /** Prompt cache lifetime for this run. Lean turns default to 5m, since a one-shot never reads its cache back. */
   cacheTtl?: '5m' | '1h';
   /** Reports Claude rate limit updates. */
   onRateLimit?: (info: unknown) => void;
-  /** Drop built-in Claude and Codex tools that cannot work inside DSH or that DSH replaces (TRIMMED_CLAUDE_TOOLS, Codex goals). */
+  /** Drop built-in Claude tools that cannot work inside DSH or that DSH replaces (TRIMMED_CLAUDE_TOOLS). */
   trimTools?: boolean;
   /** Reports token usage once per Claude result event. Errors thrown here are ignored. */
   onUsage?(usage: TurnUsage): void;
@@ -240,7 +239,7 @@ export class ClaudeCliRuntime {
       };
       let contextTokens: number | undefined;
       let lastContextRequest = '';
-      const child = spawn(cliCommand(turn.account.provider), args, {
+      const child = spawn(cliCommand('claude-cli'), args, {
         cwd: turn.cwd, env: claudeEnv(turn), windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'],
       });
       this.child = child;
@@ -446,15 +445,5 @@ export class ClaudeCliRuntime {
   }
 }
 
-/** Runs each OAuth-backed turn in the isolated review workspace: Codex turns on the app server, Claude turns on the Claude Code CLI. */
-export class OAuthCliRuntime extends ClaudeCliRuntime {
-  private readonly codexRuntime = new CodexAppServerRuntime();
-
-  override cancel(): void { super.cancel(); this.codexRuntime.cancel(); }
-
-  override say(text: string): boolean { return super.say(text) || this.codexRuntime.say(text); }
-
-  override prompt(turn: CliTurn): Promise<string | undefined> {
-    return turn.account.provider === 'codex-cli' ? this.codexRuntime.prompt(turn) : super.prompt(turn);
-  }
-}
+/** Runs each Claude subscription turn on the Claude Code CLI in the isolated review workspace. */
+export class OAuthCliRuntime extends ClaudeCliRuntime {}

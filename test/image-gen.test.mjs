@@ -1,8 +1,39 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { imageExtension, imageFileName, imageRequestBody, inputImageProblem, MAX_INPUT_BYTES, parseImageRequest, pngSize } from '../dist/runtime/imageGen.mjs';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { generateImage, imageExtension, imageFileName, imageRequestBody, inputImageProblem, MAX_INPUT_BYTES, parseImageRequest, pngSize } from '../dist/runtime/imageGen.mjs';
 
 const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+
+test('generates with the ChatGPT sign-in and refreshes once after a 401', async () => {
+  const jwt = name => `e30.${Buffer.from(JSON.stringify({ name, exp: Math.floor(Date.now() / 1000) + 3600,
+    'https://api.openai.com/auth': { chatgpt_account_id: 'acct-1' } })).toString('base64url')}.sig`;
+  const home = await mkdtemp(join(tmpdir(), 'dsh-image-'));
+  const realFetch = globalThis.fetch;
+  try {
+    await writeFile(join(home, 'auth.json'), JSON.stringify({ OPENAI_API_KEY: null, tokens: { access_token: jwt('old'), refresh_token: 'r1' } }));
+    const fresh = jwt('new');
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url: String(url), headers: init.headers });
+      if (String(url).endsWith('/oauth/token')) return new Response(JSON.stringify({ access_token: fresh, refresh_token: 'r2' }));
+      if (init.headers.Authorization !== `Bearer ${fresh}`) return new Response('{}', { status: 401 });
+      return new Response(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }));
+    };
+    const image = await generateImage({ home }, parseImageRequest({ prompt: 'fox' }));
+    assert.equal(image.extension, 'png');
+    assert.deepEqual(calls.map(call => call.url.split('/').pop()), ['generations', 'token', 'generations']);
+    assert.equal(calls[0].headers['ChatGPT-Account-ID'], 'acct-1');
+    assert.equal(calls[0].headers.originator, 'codex_cli_rs');
+    assert.match(calls[0].headers['User-Agent'], /^codex_cli_rs\/\d+\.\d+\.\d+ /);
+    assert.equal(JSON.parse(await readFile(join(home, 'auth.json'), 'utf8')).tokens.refresh_token, 'r2');
+  } finally {
+    globalThis.fetch = realFetch;
+    await rm(home, { recursive: true, force: true });
+  }
+});
 
 test('validates image generation options', () => {
   assert.deepEqual(parseImageRequest({ prompt: '  a red fox  ' }), { prompt: 'a red fox', size: 'auto', quality: 'auto', background: 'auto', images: [] });

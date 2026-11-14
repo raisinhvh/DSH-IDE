@@ -1,20 +1,28 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { agentModels, speedBackend, codexServiceTier, claudeSpeedSettings } from '../dist/runtime/models.mjs';
+import { agentModels, speedBackend, speedTier, claudeSpeedSettings, codexBackend } from '../dist/runtime/models.mjs';
 
-test('Codex speed uses the base model even with legacy suffixed routes', () => {
-  const model = { provider: 'codex-cli', backend: 'gpt-6.1-sol', speedOptions: [
-    { label: 'None', backend: 'gpt-6.1-sol' },
-    { label: 'Fast', backend: 'gpt-6.1-sol-fast' },
-    { label: 'Ultrafast', backend: 'gpt-6.1-sol-ultrafast' },
+test('native Codex has no speed tiers and maps legacy CLI backends to a catalog model', () => {
+  const model = { provider: 'codex-cli', backend: 'gpt-6-sol', speedOptions: [
+    { label: 'None', backend: 'gpt-6-sol' },
+    { label: 'Fast', backend: 'gpt-6-sol-fast' },
   ] };
-  for (const speed of ['None', 'Fast', 'Ultrafast']) assert.equal(speedBackend(model, speed), model.backend);
-  assert.equal(speedBackend({ ...model, provider: 'cursor-acp' }, 'Fast'), 'gpt-6.1-sol-fast');
-  assert.equal(codexServiceTier('Fast'), 'fast');
-  assert.equal(codexServiceTier('Ultrafast'), 'ultrafast');
-  assert.equal(codexServiceTier('None'), 'default');
-  assert.equal(codexServiceTier('Standard'), 'default');
-  assert.equal(codexServiceTier(undefined), undefined);
+  assert.equal(speedBackend(model, 'None'), 'gpt-6-sol');
+  assert.throws(() => speedBackend(model, 'Fast'), /does not expose speed tiers/);
+  assert.equal(speedBackend({ ...model, provider: 'cursor-acp' }, 'Fast'), 'gpt-6-sol-fast');
+  assert.equal(codexBackend('gpt-6-sol'), 'gpt-6-sol');
+  assert.equal(codexBackend('default'), 'gpt-6-sol');
+  assert.equal(codexBackend(''), 'gpt-6-sol');
+  assert.equal(codexBackend(undefined), 'gpt-6-sol');
+  assert.equal(codexBackend('gpt-6.1-sol'), 'gpt-6-sol');
+});
+
+test('speed labels map to tiers', () => {
+  assert.equal(speedTier('Fast'), 'fast');
+  assert.equal(speedTier('Ultrafast'), 'ultrafast');
+  assert.equal(speedTier('None'), 'default');
+  assert.equal(speedTier('Standard'), 'default');
+  assert.equal(speedTier(undefined), undefined);
 });
 
 test('Claude speed sets fastMode separately, including explicitly turning it off', () => {

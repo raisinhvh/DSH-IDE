@@ -2,7 +2,6 @@ import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
-export type ShareProvider = 'claude-cli' | 'codex-cli';
 export interface ShareRoots { dshHome: string; agentsHome: string }
 export interface ShareResult { rules: boolean; skills: string[] }
 
@@ -19,8 +18,8 @@ async function read(file: string): Promise<string | undefined> {
   }
 }
 
-async function rules(provider: ShareProvider, directory: string, roots: ShareRoots, enabled: boolean): Promise<boolean> {
-  const file = join(directory, provider === 'claude-cli' ? 'CLAUDE.md' : 'AGENTS.md');
+async function rules(directory: string, roots: ShareRoots, enabled: boolean): Promise<boolean> {
+  const file = join(directory, 'CLAUDE.md');
   const old = await read(file);
   const source = enabled ? await read(join(roots.dshHome, 'AGENTS.md')) : undefined;
   const body = source?.trimEnd();
@@ -88,7 +87,7 @@ async function scan(root: string): Promise<{ files: string[]; directories: strin
   return { files, directories, fingerprint: createHash('sha256').update(stamps.sort().join('\n')).digest('hex') };
 }
 
-async function skills(provider: ShareProvider, directory: string, roots: ShareRoots, enabled: boolean): Promise<string[]> {
+async function skills(directory: string, roots: ShareRoots, enabled: boolean): Promise<string[]> {
   const target = join(directory, 'skills');
   try {
     const stat = await fs.lstat(target);
@@ -101,8 +100,7 @@ async function skills(provider: ShareProvider, directory: string, roots: ShareRo
   const original = JSON.stringify(owned);
   const sources = new Map<string, string>();
   if (enabled) {
-    const homes = provider === 'claude-cli' ? [roots.agentsHome, roots.dshHome] : [roots.dshHome];
-    for (const home of homes) {
+    for (const home of [roots.agentsHome, roots.dshHome]) {
       const root = join(home, 'skills');
       if (!await directoryExists(root)) continue;
       try {
@@ -152,14 +150,14 @@ async function skills(provider: ShareProvider, directory: string, roots: ShareRo
   return present;
 }
 
-/** Shares global instructions into the CLI's private account directory. */
-export async function shareInstructions(provider: ShareProvider, directory: string, roots: ShareRoots, enabled: boolean): Promise<ShareResult> {
+/** Shares global instructions into a Claude account's private directory. */
+export async function shareInstructions(directory: string, roots: ShareRoots, enabled: boolean): Promise<ShareResult> {
   let sharedRules = false;
   let rulesError: unknown;
-  try { sharedRules = await rules(provider, directory, roots, enabled); }
+  try { sharedRules = await rules(directory, roots, enabled); }
   catch (error) { rulesError = error; }
   let sharedSkills: string[] = [];
-  try { sharedSkills = await skills(provider, directory, roots, enabled); }
+  try { sharedSkills = await skills(directory, roots, enabled); }
   catch { /* only rules failures propagate to the caller */ }
   if (rulesError) throw rulesError;
   return { rules: sharedRules, skills: sharedSkills };

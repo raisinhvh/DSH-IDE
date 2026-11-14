@@ -33,19 +33,19 @@ test('Claude preserves user rules, updates in place, avoids writes, and removes 
   const user = '# Private rules\r\nKeep these bytes.  ';
   await writeFile(file, user);
   await writeFile(join(r.dshHome, 'AGENTS.md'), '# Global\nBe brief. \n\n');
-  assert.deepEqual(await shareInstructions('claude-cli', r.directory, r, true), { rules: true, skills: [] });
+  assert.deepEqual(await shareInstructions(r.directory, r, true), { rules: true, skills: [] });
   const initial = `${user}\n\n${START}\n# Global\nBe brief.\n${END}`;
   assert.equal(await text(file), initial);
   await utimes(file, 1000000000, 1000000000);
   const before = (await stat(file)).mtimeMs;
-  await shareInstructions('claude-cli', r.directory, r, true);
+  await shareInstructions(r.directory, r, true);
   assert.equal((await stat(file)).mtimeMs, before);
   assert.equal(await text(file), initial);
   await writeFile(file, initial + '\r\nUser suffix.  \r\n');
   await writeFile(join(r.dshHome, 'AGENTS.md'), 'Updated');
-  await shareInstructions('claude-cli', r.directory, r, true);
+  await shareInstructions(r.directory, r, true);
   assert.equal(await text(file), `${user}\n\n${START}\nUpdated\n${END}\r\nUser suffix.  \r\n`);
-  assert.deepEqual(await shareInstructions('claude-cli', r.directory, r, false), { rules: false, skills: [] });
+  assert.deepEqual(await shareInstructions(r.directory, r, false), { rules: false, skills: [] });
   assert.equal(await text(file), user + '\r\nUser suffix.  \r\n');
 });
 
@@ -53,35 +53,24 @@ test('rules created solely by sharing are deleted on disable or a blank/missing 
   const r = await roots(t);
   const file = join(r.directory, 'CLAUDE.md');
   const source = join(r.dshHome, 'AGENTS.md');
-  await shareInstructions('claude-cli', r.directory, r, true);
+  await shareInstructions(r.directory, r, true);
   assert.equal(await exists(r.directory), false);
   await writeFile(source, 'Global');
-  await shareInstructions('claude-cli', r.directory, r, true);
+  await shareInstructions(r.directory, r, true);
   assert.equal(await text(file), `${START}\nGlobal\n${END}`);
-  await shareInstructions('claude-cli', r.directory, r, false);
+  await shareInstructions(r.directory, r, false);
   assert.equal(await exists(file), false);
   for (const missing of [false, true]) {
     await writeFile(source, 'Global');
-    await shareInstructions('claude-cli', r.directory, r, true);
+    await shareInstructions(r.directory, r, true);
     if (missing) await rm(source);
     else await writeFile(source, ' \n\t');
-    assert.equal((await shareInstructions('claude-cli', r.directory, r, true)).rules, false);
+    assert.equal((await shareInstructions(r.directory, r, true)).rules, false);
     assert.equal(await exists(file), false);
   }
   await writeFile(file, ' \n\t');
-  await shareInstructions('claude-cli', r.directory, r, false);
+  await shareInstructions(r.directory, r, false);
   assert.equal(await text(file), ' \n\t');
-});
-
-test('Codex writes AGENTS.md and only shares DSH skills', async t => {
-  const r = await roots(t);
-  await writeFile(join(r.dshHome, 'AGENTS.md'), 'Codex rules');
-  await skill(r.dshHome, 'dsh-skill');
-  await skill(r.agentsHome, 'agents-skill');
-  assert.deepEqual(await shareInstructions('codex-cli', r.directory, r, true), { rules: true, skills: ['dsh-skill'] });
-  assert.match(await text(join(r.directory, 'AGENTS.md')), /Codex rules/);
-  assert.equal(await exists(join(r.directory, 'CLAUDE.md')), false);
-  assert.equal(await exists(join(r.directory, 'skills', 'agents-skill')), false);
 });
 
 test('skills copy nested files, update and prune while preserving unmanaged CLI directories', async t => {
@@ -95,7 +84,7 @@ test('skills copy nested files, update and prune while preserving unmanaged CLI 
   await skill(r.directory, '.system', 'CLI system');
   const manifest = join(r.directory, 'skills', '.dsh-shared.json');
   const target = join(r.directory, 'skills', 'review');
-  assert.deepEqual((await shareInstructions('claude-cli', r.directory, r, true)).skills, ['review']);
+  assert.deepEqual((await shareInstructions(r.directory, r, true)).skills, ['review']);
   assert.equal(await text(join(target, 'references', 'old.txt')), 'old');
   const value = JSON.parse(await text(manifest));
   assert.equal(value.version, 1);
@@ -103,21 +92,21 @@ test('skills copy nested files, update and prune while preserving unmanaged CLI 
   await utimes(join(target, 'SKILL.md'), 1000000000, 1000000000);
   await utimes(manifest, 1000000000, 1000000000);
   const before = (await stat(join(target, 'SKILL.md'))).mtimeMs;
-  await shareInstructions('claude-cli', r.directory, r, true);
+  await shareInstructions(r.directory, r, true);
   assert.equal((await stat(join(target, 'SKILL.md'))).mtimeMs, before);
   assert.equal((await stat(manifest)).mtimeMs, 1000000000000);
   await rm(join(source, 'references', 'old.txt'));
   await writeFile(join(source, 'references', 'new.txt'), 'new');
-  await shareInstructions('claude-cli', r.directory, r, true);
+  await shareInstructions(r.directory, r, true);
   assert.equal(await exists(join(target, 'references', 'old.txt')), false);
   assert.equal(await text(join(target, 'references', 'new.txt')), 'new');
   await rm(source, { recursive: true });
-  assert.deepEqual((await shareInstructions('claude-cli', r.directory, r, true)).skills, []);
+  assert.deepEqual((await shareInstructions(r.directory, r, true)).skills, []);
   assert.equal(await exists(target), false);
   assert.equal(await exists(manifest), false);
   await skill(r.dshHome, 'review');
-  await shareInstructions('claude-cli', r.directory, r, true);
-  await shareInstructions('claude-cli', r.directory, r, false);
+  await shareInstructions(r.directory, r, true);
+  await shareInstructions(r.directory, r, false);
   assert.equal(await exists(target), false);
   assert.equal(await exists(manifest), false);
   for (const [name, body] of [['collision', 'user'], ['synced', 'CLI synced'], ['.system', 'CLI system']]) {
@@ -131,10 +120,10 @@ test('Claude gives agentsHome precedence and returns managed names sorted', asyn
   await skill(r.agentsHome, 'same', 'agents');
   await skill(r.dshHome, 'z-last');
   await skill(r.agentsHome, 'a-first');
-  assert.deepEqual((await shareInstructions('claude-cli', r.directory, r, true)).skills, ['a-first', 'same', 'z-last']);
+  assert.deepEqual((await shareInstructions(r.directory, r, true)).skills, ['a-first', 'same', 'z-last']);
   assert.equal(await text(join(r.directory, 'skills', 'same', 'SKILL.md')), 'agents');
   await rm(join(r.agentsHome, 'skills', 'same'), { recursive: true });
-  await shareInstructions('claude-cli', r.directory, r, true);
+  await shareInstructions(r.directory, r, true);
   assert.equal(await text(join(r.directory, 'skills', 'same', 'SKILL.md')), 'dsh');
 });
 
@@ -147,10 +136,10 @@ test('corrupt manifests protect existing copies and invalid names cannot escape 
   await skill(r.dshHome, 'valid');
   const manifest = join(r.directory, 'skills', '.dsh-shared.json');
   await writeFile(manifest, '{bad json');
-  assert.deepEqual((await shareInstructions('codex-cli', r.directory, r, true)).skills, ['valid']);
+  assert.deepEqual((await shareInstructions(r.directory, r, true)).skills, ['valid']);
   assert.equal(await text(join(r.directory, 'skills', 'existing', 'SKILL.md')), 'private');
   await writeFile(manifest, JSON.stringify({ version: 1, skills: { '../outside': { fingerprint: 'x' } } }));
-  await shareInstructions('codex-cli', r.directory, r, false);
+  await shareInstructions(r.directory, r, false);
   assert.equal(await text(join(r.directory, 'skills', 'existing', 'SKILL.md')), 'private');
   assert.equal(await exists(join(r.directory, 'skills', 'valid')), true);
 });
@@ -163,7 +152,7 @@ test('oversized skills are skipped without preventing other skills or rules', as
   const many = await skill(r.dshHome, 'many');
   for (let i = 0; i < 200; i++) await writeFile(join(many, `${i}.txt`), 'x');
   await skill(r.dshHome, 'okay');
-  assert.deepEqual(await shareInstructions('codex-cli', r.directory, r, true), { rules: true, skills: ['okay'] });
+  assert.deepEqual(await shareInstructions(r.directory, r, true), { rules: true, skills: ['okay'] });
   assert.equal(await exists(join(r.directory, 'skills', 'large')), false);
   assert.equal(await exists(join(r.directory, 'skills', 'many')), false);
 });
@@ -181,7 +170,7 @@ test('source junctions and nested symlinks are skipped', async t => {
     if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) { t.skip('Symlinks unavailable'); return; }
     throw error;
   }
-  assert.deepEqual((await shareInstructions('codex-cli', r.directory, r, true)).skills, ['real']);
+  assert.deepEqual((await shareInstructions(r.directory, r, true)).skills, ['real']);
   assert.equal(await exists(join(r.directory, 'skills', 'real', 'linked-folder')), false);
 });
 
@@ -189,6 +178,6 @@ test('rules errors propagate after skills still get a chance to share', async t 
   const r = await roots(t);
   await mkdir(join(r.dshHome, 'AGENTS.md'));
   await skill(r.dshHome, 'okay');
-  await assert.rejects(shareInstructions('codex-cli', r.directory, r, true));
+  await assert.rejects(shareInstructions(r.directory, r, true));
   assert.equal(await text(join(r.directory, 'skills', 'okay', 'SKILL.md')), 'okay');
 });

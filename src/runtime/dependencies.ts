@@ -11,7 +11,7 @@ import { Readable } from 'node:stream';
 const DOWNLOAD_LIMIT = 250 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT = 120_000;
 const PROCESS_TIMEOUT = 180_000;
-const PROVIDERS = new Set(['codex-cli', 'claude-cli', 'cursor-acp']);
+const PROVIDERS = new Set(['claude-cli', 'cursor-acp']);
 const WINDOWS = process.platform === 'win32';
 /** Folders a GUI-launched VS Code on macOS often lacks on PATH, where Homebrew, nvm-free installs and CLI installers put binaries. */
 function unixBinDirs(): string[] {
@@ -174,29 +174,6 @@ export class WindowsDependencies {
     if (!WINDOWS) return this.unixProviderCandidates(provider);
     const appData = process.env.APPDATA || join(homedir(), 'AppData', 'Roaming');
     const local = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
-    if (provider === 'codex-cli') {
-      const roots = [join(this.storage, 'dependencies', 'providers', 'codex', 'node_modules', '@openai', 'codex'), join(appData, 'npm', 'node_modules', '@openai', 'codex')];
-      const found: string[] = [];
-      for (const root of roots) {
-        for (const relative of ['vendor/x86_64-pc-windows-msvc/codex/codex.exe', 'vendor/aarch64-pc-windows-msvc/codex/codex.exe', 'bin/codex.exe', 'codex.exe']) found.push(join(root, relative));
-        try {
-          const walk = (directory: string, depth: number) => {
-            if (depth > 5) return;
-            for (const entry of readdirSync(directory, { withFileTypes: true })) {
-              const child = join(directory, entry.name);
-              if (entry.isFile() && entry.name.toLowerCase() === 'codex.exe') found.push(child);
-              else if (entry.isDirectory()) walk(child, depth + 1);
-            }
-          };
-          if (existsSync(root)) walk(root, 0);
-          const scope = dirname(root);
-          if (existsSync(scope)) for (const entry of readdirSync(scope, { withFileTypes: true })) {
-            if (entry.isDirectory() && /^codex-win32-/.test(entry.name)) walk(join(scope, entry.name), 0);
-          }
-        } catch { /* package may not be installed */ }
-      }
-      return [...found, join(local, 'Programs', 'codex', 'codex.exe'), 'codex.exe'];
-    }
     if (provider === 'claude-cli') return [join(homedir(), '.local', 'bin', 'claude.exe'), join(appData, 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe'), 'claude.exe'];
     const root = join(local, 'cursor-agent');
     const node = this.cursorNode(root);
@@ -206,7 +183,6 @@ export class WindowsDependencies {
   private unixProviderCandidates(provider: string): string[] {
     const home = homedir();
     const inDirs = (name: string) => unixBinDirs().map(dir => join(dir, name));
-    if (provider === 'codex-cli') return [join(this.storage, 'dependencies', 'providers', 'codex', 'bin', 'codex'), ...inDirs('codex'), 'codex'];
     if (provider === 'claude-cli') return [join(home, '.claude', 'local', 'claude'), ...inDirs('claude'), 'claude'];
     return [...inDirs('cursor-agent'), ...inDirs('agent'), 'cursor-agent'];
   }
@@ -248,16 +224,6 @@ export class WindowsDependencies {
   private async installProviderOnce(provider: string): Promise<void> {
     const configured = this.configuredProvider?.(provider)?.trim();
     if (configured && !(provider === 'cursor-acp' && configured === 'agent')) throw new Error(`Configured ${provider} executable '${configured}' was not found or could not run. Clear its custom path in Settings before installing.`);
-    if (provider === 'codex-cli') {
-      const node = await this.ensureNode();
-      const npm = npmCli(node);
-      const prefix = join(this.storage, 'dependencies', 'providers', 'codex');
-      await mkdir(prefix, { recursive: true });
-      const result = await run(node, [npm, 'install', '--prefix', prefix, '@openai/codex'], PROCESS_TIMEOUT);
-      if (result.code !== 0) throw new Error(`Codex installation failed: ${result.stderr.slice(-2000)}`);
-      if (!await this.providerCommand(provider)) throw new Error(WINDOWS ? 'Codex installed, but no native Windows codex.exe was found.' : 'Codex installed, but its codex executable was not found.');
-      return;
-    }
     const stage = await mkdtemp(join(tmpdir(), `dsh-${provider}-`));
     if (!WINDOWS) {
       try {

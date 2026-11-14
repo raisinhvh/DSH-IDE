@@ -7,7 +7,8 @@ import { homedir } from 'node:os';
 import * as vscode from 'vscode';
 import { AccountRegistry, ModelEntry, ModelRegistry, ResolvedModel } from './accounts';
 import { AccountUsageService, UsageTarget } from './accounts/usageService';
-import { cliCommand, cliEnv, OAuthCliAccount, OAuthCliAccounts, OAuthCliProvider, setDetectedCliCommand } from './accounts/oauthCli';
+import { OAuthCliAccount, OAuthCliAccounts, OAuthCliProvider, setDetectedCliCommand } from './accounts/oauthCli';
+import { freshCodexTokens } from './accounts/codexAuth';
 import { WindowsDependencies } from './runtime/dependencies';
 import { ReviewController, ReviewProposal } from './review/controller';
 import { DelegateAgentInfo, DelegateHost, DelegateResult, DelegateToolInfo } from './delegate/host';
@@ -35,6 +36,7 @@ import { AfterTurn, CANCEL_SUBAGENT, delegationInstructions, isDelegationTool, i
 import { editorContextDiff } from './runtime/editorContext';
 import { AcpRuntime, RuntimeEvent } from './runtime/acp';
 import { CliTurn, OAuthCliRuntime, TurnUsage } from './runtime/oauthCli';
+import { codexBackend } from './runtime/models';
 import { MirrorChange, mirrorPathExcluded, WorkspaceMirror } from './runtime/shadow';
 import { FileSummaries, readToolPath, SUMMARY_INSTRUCTIONS, SUMMARY_TOOL } from './summaries/store';
 import { setAgentPriority } from './runtime/priority';
@@ -125,6 +127,7 @@ const PROVIDER_USAGE_URLS = new Map([
   ['deepseek-official', 'https://platform.deepseek.com/usage'],
   ['openrouter', 'https://openrouter.ai/activity'],
   ['opencode-go', 'https://opencode.ai/console'],
+  ['mistral', 'https://console.mistral.ai/usage'],
 ]);
 const RISKY_ACTION = /\brm\s+-[a-z]*[rf]|\bsudo\b|\bchmod\b|\bchown\b|\bmkfs\b|\bdd\s+if=|\bformat\s+[a-z]:|\bdel\s+\/|Remove-Item|git\s+(push|reset\s+--hard|clean|checkout\s+--)|\b(curl|wget|iwr|Invoke-WebRequest)\b|\|\s*(sh|bash|iex)\b|\b(npm|pip|pnpm|yarn)\s+(publish|install\s+-g)|\bkill(all)?\b|\bshutdown\b|\.env\b|\.ssh|credentials|\.\.[\\/]|(^|\s)(\/|~|[A-Za-z]:[\\/])/i;
 const isRiskyAction = (description: string): boolean => RISKY_ACTION.test(description);
@@ -143,8 +146,11 @@ const FEATURE_SETTINGS: Record<SidebarFeatureKey, string> = {
 type ModelSettingKey = 'nameModel' | 'reviewModel' | 'summaryModel' | 'deciderModel' | 'explorerModel';
 type ResolvedRoute = ResolvedModel | { model: ModelEntry } | { model: ModelEntry; oauthAccount: OAuthCliAccount };
 
+/** Providers whose accounts are subscription sign-ins kept in OAuthCliAccounts: ChatGPT (Codex) and Claude. */
 function isOAuthProvider(value: string): value is OAuthCliProvider { return value === 'codex-cli' || value === 'claude-cli'; }
-function runtimeLabel(provider: string): string { return provider === 'cursor-acp' ? 'Cursor' : provider === 'codex-cli' ? 'Codex' : provider === 'claude-cli' ? 'Claude' : 'DSH'; }
+/** Providers that run on a CLI harness instead of the DSH runtime. Only Claude: ChatGPT (Codex) runs natively in DSH. */
+function isCliProvider(value: string): value is 'claude-cli' { return value === 'claude-cli'; }
+function runtimeLabel(provider: string): string { return provider === 'cursor-acp' ? 'Cursor' : provider === 'codex-cli' ? 'ChatGPT' : provider === 'claude-cli' ? 'Claude' : 'DSH'; }
 
 interface SubagentProfile { name: string; description?: string; model: string; effort?: string; speed?: string; mode: 'read-only' | 'edit'; tools?: boolean; enabled?: boolean }
 interface Actor { owner: string; label: string; readOnly: boolean }
@@ -171,6 +177,10 @@ const EDIT_TOOLS = /^(Edit|Write|MultiEdit|NotebookEdit)$/;
 const DELEGATE_SERVER = 'dsh-delegate';
 /** How long an account that reported a usage limit is tried after the others. */
 const LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
+/** A ChatGPT (Codex) runtime launches with at least this much token validity left, so long turns do not outlive it. */
+const CODEX_TOKEN_MARGIN_MS = 45 * 60 * 1000;
+/** Errors from a ChatGPT (Codex) turn that mean its access token was rejected. */
+const CODEX_AUTH_ERROR = /\b401\b|unauthori[sz]ed|invalid[^.\n]*token|token[^.\n]*expired/i;
 
 interface TurnOptions {
   shown?: string;
@@ -277,7 +287,7 @@ class ExtensionHost implements vscode.Disposable {
   public constructor(private readonly context: vscode.ExtensionContext) {
     this.dependencies = new WindowsDependencies(context.globalStorageUri.fsPath,
       () => vscode.workspace.getConfiguration('dsh').get<string>('runtime.nodePath'),
-      provider => vscode.workspace.getConfiguration('dsh').get<string>(provider === 'codex-cli' ? 'runtime.codexPath' : provider === 'claude-cli' ? 'runtime.claudePath' : 'runtime.cursorAgentPath'));
+      provider => vscode.workspace.getConfiguration('dsh').get<string>(provider === 'claude-cli' ? 'runtime.claudePath' : 'runtime.cursorAgentPath'));
     this.accounts = new AccountRegistry(context);
     this.oauthAccounts = new OAuthCliAccounts(context);
     this.models = new ModelRegistry(context, this.accounts);
@@ -385,12 +395,12 @@ class ExtensionHost implements vscode.Disposable {
   }
 
   private async refreshDependencies(): Promise<void> {
-    const providers = await Promise.all(['codex-cli', 'claude-cli', 'cursor-acp'].map(async provider => {
+    const providers = await Promise.all(['claude-cli', 'cursor-acp'].map(async provider => {
       let installed = false;
       try {
         const command = await this.dependencies.providerCommand(provider);
         installed = !!command;
-        if (command && isOAuthProvider(provider)) setDetectedCliCommand(provider, command);
+        if (command && isCliProvider(provider)) setDetectedCliCommand(provider, command);
       } catch (error) { this.providerErrors.set(provider, error instanceof Error ? error.message : String(error)); }
       return { provider, installed, installing: this.providerInstalls.has(provider), error: this.providerErrors.get(provider) };
     }));
@@ -398,7 +408,7 @@ class ExtensionHost implements vscode.Disposable {
   }
 
   private async installProvider(provider: string): Promise<void> {
-    if (!['codex-cli', 'claude-cli', 'cursor-acp'].includes(provider)) throw new Error('Unsupported provider installation.');
+    if (!['claude-cli', 'cursor-acp'].includes(provider)) throw new Error('Unsupported provider installation.');
     if (this.providerInstalls.has(provider)) return;
     this.providerInstalls.add(provider);
     this.providerErrors.delete(provider);
@@ -839,6 +849,7 @@ class ExtensionHost implements vscode.Disposable {
       openai: 'OPENAI_API_KEY',
       openrouter: 'OPENROUTER_API_KEY',
       'opencode-go': 'OPENCODE_API_KEY',
+      mistral: 'MISTRAL_API_KEY',
     };
     const name = configured[provider];
     if (!name) throw new Error(`Provider '${provider}' needs an explicit DSH adapter and credential mapping before it can run.`);
@@ -947,8 +958,10 @@ class ExtensionHost implements vscode.Disposable {
 
   private async ensureRuntime(route: ResolvedRoute, cwd: string, ownerId: string): Promise<{ runtime: AcpRuntime; key: string } | undefined> {
     await this.ensureNode();
-    if ('oauthAccount' in route) await this.refreshDependencies();
-    if ('oauthAccount' in route) return undefined;
+    if ('oauthAccount' in route && isCliProvider(route.model.provider)) {
+      await this.refreshDependencies();
+      return undefined;
+    }
     if (route.model.provider === 'cursor-acp') {
       const key = `cursor-acp:${ownerId}`;
       const runtime = this.runtimeFor(key);
@@ -961,19 +974,75 @@ class ExtensionHost implements vscode.Disposable {
       await this.refreshAccount();
       return { runtime, key };
     }
-    if (!('account' in route)) throw new Error('The selected API provider has no account.');
     const deepSeekAccount = this.accounts.getDefault('deepseek-official');
+    let start: { accountId: string; dshProvider: string; model: string; secret: string; envName: string; keyExtra: string };
+    if ('oauthAccount' in route) {
+      // The token is fixed when the runtime launches, so one close to expiry is refreshed first. Its expiry is part of
+      // the key: a refreshed token launches a new runtime, which resumes the chat's DSH session from the same home.
+      const tokens = await freshCodexTokens(route.oauthAccount.directory, { minValidityMs: CODEX_TOKEN_MARGIN_MS });
+      start = {
+        accountId: route.oauthAccount.id,
+        dshProvider: 'openai-codex',
+        model: codexBackend(route.model.backend),
+        secret: tokens.access,
+        envName: 'OPENAI_CODEX_ACCESS_TOKEN',
+        keyExtra: `:${tokens.expires}`,
+      };
+    } else if ('account' in route) {
+      start = {
+        accountId: route.account.id,
+        dshProvider: route.model.provider,
+        model: route.model.backend,
+        secret: route.secret,
+        envName: this.envName(route.model.provider),
+        keyExtra: '',
+      };
+    } else {
+      throw new Error('The selected API provider has no account.');
+    }
     // A forced cancellation must not terminate another chat or subagent.
-    const key = `${route.model.provider}:${route.account.id}:${route.model.backend}:${deepSeekAccount?.id || ''}:${ownerId}`;
+    const key = `${route.model.provider}:${start.accountId}:${start.model}:${deepSeekAccount?.id || ''}${start.keyExtra}:${ownerId}`;
     const runtime = this.runtimeFor(key);
-    const accountHash = createHash('sha256').update(route.account.id).digest('hex').slice(0, 16);
+    const accountHash = createHash('sha256').update(start.accountId).digest('hex').slice(0, 16);
     const providerHash = createHash('sha256').update(route.model.provider).digest('hex').slice(0, 16);
     const home = join(this.context.globalStorageUri.fsPath, 'runtime', providerHash, accountHash);
     const nodePath = await this.ensureNode();
     const webSearchKey = deepSeekAccount ? await this.accounts.getSecret(deepSeekAccount.id) : undefined;
-    await runtime.start({ kind: 'dsh', provider: route.model.provider, model: route.model.backend, apiKey: route.secret,
-      webSearchKey, envName: this.envName(route.model.provider), efforts: route.model.effortOptions, home, nodePath, dshRoot: await updatedRoot(this.context.globalStorageUri.fsPath) });
+    await runtime.start({ kind: 'dsh', provider: start.dshProvider, model: start.model, apiKey: start.secret,
+      webSearchKey, envName: start.envName, efforts: route.model.effortOptions, home, nodePath, dshRoot: await updatedRoot(this.context.globalStorageUri.fsPath) });
     return { runtime, key };
+  }
+
+  /**
+   * Moves a ChatGPT (Codex) chat onto a runtime with a valid access token when its token was refreshed (or `force`
+   * refreshes it after an auth error), resuming the chat's DSH session there. Resolves false when the session could not
+   * be resumed: the chat is then on a new session and its next prompt needs a handoff.
+   */
+  private async refreshCodexRuntime(chat: Chat, force = false): Promise<boolean> {
+    const record = chat.record;
+    const account = this.oauthAccounts.get(record.accountId);
+    if (!account) throw new Error('The ChatGPT account for this chat is missing. Connect it again in Accounts.');
+    if (force) await freshCodexTokens(account.directory, { force: true });
+    const model: ModelEntry = { name: record.modelName, provider: record.provider, backend: record.backend, account: account.id, enabled: true };
+    const slot = await this.ensureRuntime({ model, oauthAccount: account }, chat.mirror.cwd, chat.ownerId);
+    if (!slot) throw new Error('ChatGPT (Codex) could not start.');
+    if (slot.key === chat.runtimeKey && slot.runtime === chat.runtime && slot.runtime.isRunning) return true;
+    const previous = chat.runtimeKey;
+    chat.runtime = slot.runtime;
+    chat.runtimeKey = slot.key;
+    await this.releaseRuntime(previous);
+    let resumed = true;
+    try {
+      await slot.runtime.resumeSession(this.rid(record), chat.mirror.cwd, this.mcpServers(chat.ownerId));
+    } catch (error) {
+      this.output.appendLine(`Resuming "${record.name}" on a refreshed ChatGPT runtime failed; continuing in a new session: ${error instanceof Error ? error.message : String(error)}`);
+      record.runtimeId = await slot.runtime.newSession(chat.mirror.cwd, this.mcpServers(chat.ownerId));
+      this.freshSessions?.add(record.runtimeId);
+      record.explorerTokens = 0;
+      resumed = false;
+    }
+    if (record.effort) await slot.runtime.setConfigOption(this.rid(record), 'reasoning_effort', record.effort);
+    return resumed;
   }
 
   private readonly pendingApprovals = new Map<string, { sessionId: string; background: boolean; resolve: (allow: boolean) => void }>();
@@ -1042,7 +1111,7 @@ class ExtensionHost implements vscode.Disposable {
   }
 
   /**
-   * Tools every agent's bridge offers, subagents included: file summaries, media, image generation when a Codex account
+   * Tools every agent's bridge offers, subagents included: file summaries, media, image generation when a ChatGPT (Codex) account
    * is connected, and toolpacks listed one line per pack. Tools of packs turned on in the owner's chat are offered directly.
    */
   private bridgeTools(owner?: string): DelegateToolInfo[] {
@@ -1172,7 +1241,7 @@ class ExtensionHost implements vscode.Disposable {
     effort = effort ?? (override ? record.effort : this.choiceFor(this.availableModel(model.name)).effort);
     const accountId = 'oauthAccount' in route ? route.oauthAccount.id : 'account' in route ? route.account.id : 'cursor-login';
     const cwd = chat.mirror.cwd;
-    const oauth = isOAuthProvider(model.provider);
+    const oauth = isCliProvider(model.provider);
     const sameBackendSession = record.provider === model.provider && (oauth || model.provider === 'cursor-acp') && record.accountId === accountId;
     const slot = await this.ensureRuntime(route, cwd, chat.ownerId);
     const previous = { runtime: chat.runtime, key: chat.runtimeKey };
@@ -1319,11 +1388,25 @@ class ExtensionHost implements vscode.Disposable {
     if (holder.changes) holder.review.update(holder.changes);
     const ownerId = randomUUID();
     let slot: { runtime: AcpRuntime; key: string } | undefined;
+    let needsHandoff = false;
     try {
       if (this.deletedSessions.has(record.id)) throw new Error('This chat was deleted.');
       slot = await this.ensureRuntime(route, mirror.cwd, ownerId);
-      const runtimeId = fresh && slot ? await slot.runtime.newSession(mirror.cwd, this.mcpServers(ownerId)) : this.rid(record);
-      if (slot && !fresh) await slot.runtime.resumeSession(runtimeId, mirror.cwd, this.mcpServers(ownerId));
+      let runtimeId = fresh && slot ? await slot.runtime.newSession(mirror.cwd, this.mcpServers(ownerId)) : this.rid(record);
+      if (slot && !fresh) {
+        try {
+          await slot.runtime.resumeSession(runtimeId, mirror.cwd, this.mcpServers(ownerId));
+        } catch (error) {
+          // A ChatGPT (Codex) chat from the old Codex CLI route has no DSH session yet; it continues in a new one from a handoff.
+          if (record.provider !== 'codex-cli') throw error;
+          runtimeId = await slot.runtime.newSession(mirror.cwd, this.mcpServers(ownerId));
+          record.runtimeId = runtimeId;
+          record.cliSessionId = undefined;
+          record.explorerTokens = 0;
+          this.freshSessions?.add(runtimeId);
+          needsHandoff = true;
+        }
+      }
       if (fresh) record.runtimeId = slot ? runtimeId : undefined;
       if (fresh && slot) this.freshSessions?.add(runtimeId);
       if (slot && record.provider === 'cursor-acp') {
@@ -1347,6 +1430,7 @@ class ExtensionHost implements vscode.Disposable {
     }
     if (fresh) { record.mirrorId = mirror.id; record.pendingMirror = undefined; }
     const chat = this.addChat(record, mirror, holder.review, ownerId, slot);
+    if (needsHandoff) chat.handoffPending = true;
     await this.saveSession(record, false);
     this.trimChats();
     return chat;
@@ -1811,10 +1895,12 @@ class ExtensionHost implements vscode.Disposable {
         await this.smartAutoPick(chat, prompt, turnEntryId);
         if (chat.cancelRequested) return;
       }
-      if (!isOAuthProvider(record.provider) && !chat.runtime?.isRunning) {
+      if (!isCliProvider(record.provider) && !chat.runtime?.isRunning) {
         const configured = this.availableModel(record.modelName);
         if (!configured) throw new Error('The model for this chat is no longer configured.');
         await this.switchModel(chat, { ...configured, provider: record.provider, backend: record.backend, account: record.accountId });
+      } else if (record.provider === 'codex-cli' && !(await this.refreshCodexRuntime(chat))) {
+        chat.handoffPending = true;
       }
       if (chat.cancelRequested) return;
       const hint = vscode.workspace.getConfiguration('dsh').get<number>('checkpointHint', 80000);
@@ -1841,7 +1927,7 @@ class ExtensionHost implements vscode.Disposable {
       // from the transcript, which the agent can still read and search.
       const compactAt = this.autoCompactAt();
       const conversation = (record.contextTokens || 0) - (record.baseTokens || 0);
-      const live = isOAuthProvider(record.provider) ? !!record.cliSessionId : !!chat.sent;
+      const live = isCliProvider(record.provider) ? !!record.cliSessionId : !!chat.sent;
       if (!options.internal && compactAt && !chat.handoffPending && live && conversation >= compactAt) {
         this.output.appendLine(`Auto compaction: "${record.name}" reached about ${Math.round(conversation / 1000)}k tokens of conversation; continuing in a fresh session from a summary.`);
         await this.freshBackendSession(chat, 'auto compaction');
@@ -1876,14 +1962,14 @@ class ExtensionHost implements vscode.Disposable {
       history.push({ role: 'user', text: historyPrompt + (fileContext.length ? '\nContext files:\n' + fileContext.join('\n') : ''), ...(options.internal ? { internal: true } : {}) });
       chat.turnReply = '';
       const packsOn = this.turnOnPacks(chat, prompt);
-      // Claude and Codex take the fixed instructions as system/developer text on every run, so they never enter the
-      // conversation. Other runtimes get them once per session. Editor context is only resent when it changed.
-      const oauth = isOAuthProvider(record.provider);
+      // Claude takes the fixed instructions as system text on every run, so they never enter the conversation. Other
+      // runtimes get them once per session. Editor context is only resent when it changed.
+      const oauth = isCliProvider(record.provider);
       const instructions = this.agentInstructions(chat, bridged);
       const context = this.editorContext();
       const session = oauth ? record.cliSessionId : this.rid(record);
       const fresh = !session || chat.sent?.session !== session;
-      const sendInstructions = !oauth && (fresh || chat.sent?.instructions !== instructions);
+      let sendInstructions = !oauth && (fresh || chat.sent?.instructions !== instructions);
       const contextUpdate = editorContextDiff(fresh ? undefined : chat.sent?.context, context);
       // Background subagents that finished since the last turn ("hold" ones, or "resume" ones overtaken by this message).
       const background = this.takeBackgroundResults(chat);
@@ -1933,7 +2019,6 @@ class ExtensionHost implements vscode.Disposable {
           prompt: fullPrompt, sessionId: record.cliSessionId, effort: record.effort, readOnly: this.jobReadOnly(chat), fullAccess: this.approvalMode === 'full' && !this.jobReadOnly(chat),
           speed: record.smartAuto ? undefined : this.choiceFor(this.availableModel(record.modelName)).speed,
           onInit: info => {
-            if (record.provider !== 'claude-cli') return;
             record.initTools = info.tools;
             const hash = createHash('sha256').update(JSON.stringify([prefix?.system ?? instructions, info.tools])).digest('hex').slice(0, 16);
             if (record.prefixHash && record.prefixHash !== hash && record.cliSessionId) {
@@ -1944,13 +2029,11 @@ class ExtensionHost implements vscode.Disposable {
           onContext: tokens => this.noteContext(chat, tokens),
           onUsage: usage => {
             this.logUsage(record.id, 'main', record.modelName, usage);
-            if (record.provider === 'claude-cli') {
-              record.contextTokens = usage.context ?? usage.total.input + usage.total.cacheRead + usage.total.cacheWrite;
-              record.lastTurnAt = Date.now();
-              if (usage.total.cacheWrite1h > 0) record.shortCache = false;
-              else if (usage.total.cacheWrite5m > 0) record.shortCache = true;
-              this.refreshSessions();
-            }
+            record.contextTokens = usage.context ?? usage.total.input + usage.total.cacheRead + usage.total.cacheWrite;
+            record.lastTurnAt = Date.now();
+            if (usage.total.cacheWrite1h > 0) record.shortCache = false;
+            else if (usage.total.cacheWrite5m > 0) record.shortCache = true;
+            this.refreshSessions();
           },
           onBackgroundWait: tasks => {
             if (!tasks.length) this.postRun(record.id, 'thinking', 'Thinking…');
@@ -1976,13 +2059,27 @@ class ExtensionHost implements vscode.Disposable {
       } else {
         if (!chat.runtime) throw new Error('This chat has no running agent. Use "DSH: Restart Runtime" and try again.');
         try {
-          await chat.runtime.prompt(this.rid(record), fullPrompt, imageAttachments);
+          if (record.provider === 'codex-cli') {
+            await this.promptCodex(chat, fullPrompt, imageAttachments, async limited => {
+              // A new session has none of this chat's conversation, so it gets the conversation so far as a handoff.
+              chat.handoffPending = false;
+              sendInstructions = true;
+              if (limited) {
+                breakMessage();
+                postTool(`account:${randomUUID()}`, 'Account switch', `${limited.failed.label} hit its usage limit; continuing on ${limited.next.label}.`, 'complete');
+              }
+              return buildPrompt(await this.handoffText(record, history.slice(0, -1), bridged, chat.mirror.cwd), !!context, true);
+            });
+          } else {
+            await chat.runtime.prompt(this.rid(record), fullPrompt, imageAttachments);
+          }
           // Mid-turn compaction stopped the prompt to ask for a checkpoint; the request is this turn's next prompt.
           for (let ask = takeFollowUp(chat.compactWatch); ask && !chat.cancelRequested; ask = takeFollowUp(chat.compactWatch)) await chat.runtime.prompt(this.rid(record), ask);
         }
         finally { const accountId = record.accountId; if (accountId) setTimeout(() => this.refreshUsage(true, accountId), 1500); }
       }
-      const sentTo = oauth ? record.cliSessionId : session;
+      // A ChatGPT turn that changed accounts or refreshed its runtime may have ended on a new session.
+      const sentTo = oauth ? record.cliSessionId : this.rid(record);
       if (sentTo) chat.sent = { session: sentTo, instructions, context };
       completed = !chat.cancelRequested;
     } catch (error) {
@@ -2084,7 +2181,53 @@ class ExtensionHost implements vscode.Disposable {
   private readonly limitedAt = new Map<string, number>();
 
   /**
-   * Runs a Claude or Codex turn, moving on to the next account of the same provider each time one reports a usage limit.
+   * Runs a ChatGPT (Codex) turn on the chat's DSH runtime. An auth error forces a token refresh, relaunches the runtime
+   * and retries once; a usage limit moves the chat to the next ChatGPT account (a new runtime and session) and retries
+   * there. `reopen` rebuilds the prompt as a handoff for a new session, after `limited` changed accounts when given.
+   */
+  private async promptCodex(chat: Chat, prompt: string, images: { mimeType: string; data: string }[],
+    reopen: (limited?: { failed: OAuthCliAccount; next: OAuthCliAccount }) => Promise<string>): Promise<void> {
+    const record = chat.record;
+    const first = this.oauthAccounts.get(record.accountId);
+    if (!first) throw new Error('The ChatGPT account for this chat is missing. Connect it again in Accounts.');
+    const pool = this.accountPool(first);
+    const tried = new Set<string>();
+    let text = prompt;
+    let authRetried = false;
+    for (;;) {
+      const account = this.oauthAccounts.get(record.accountId) || first;
+      const runtime = chat.runtime;
+      if (!runtime) throw new Error('This chat has no running agent. Use "DSH: Restart Runtime" and try again.');
+      try {
+        await runtime.prompt(this.rid(record), text, images);
+        return;
+      } catch (error) {
+        if (chat.cancelRequested) throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        if (isUsageLimit(error)) {
+          tried.add(account.id);
+          this.limitedAt.set(account.id, Date.now());
+          setTimeout(() => this.refreshUsage(true, account.id), 1500);
+          this.output.appendLine(`ChatGPT account "${account.label}" hit its usage limit: ${message}`);
+          const next = pool.find(candidate => !tried.has(candidate.id));
+          if (!next) throw new Error(pool.length > 1 ? `All ${pool.length} ChatGPT accounts have hit their usage limits. ${message}` : message);
+          await this.switchModel(chat, { name: record.modelName, provider: record.provider, backend: record.backend, account: next.id, enabled: true });
+          if (chat.cancelRequested) throw error;
+          text = await reopen({ failed: account, next });
+          authRetried = false;
+          continue;
+        }
+        if (authRetried || !CODEX_AUTH_ERROR.test(message)) throw error;
+        authRetried = true;
+        this.output.appendLine(`ChatGPT rejected the access token of "${account.label}"; refreshing it and retrying: ${message}`);
+        if (!(await this.refreshCodexRuntime(chat, true))) text = await reopen();
+        if (chat.cancelRequested) throw error;
+      }
+    }
+  }
+
+  /**
+   * Runs a Claude turn, moving on to the next Claude account each time one reports a usage limit.
    * `retarget` adjusts the turn for the new account; the session id is always dropped because sessions belong to one account.
    */
   private async promptPooled(cli: OAuthCliRuntime, turn: CliTurn, cancelled: () => boolean,
@@ -2322,7 +2465,7 @@ class ExtensionHost implements vscode.Disposable {
     const watch = chat.running ? chat.compactWatch : undefined;
     const step = watch && compactStep(watch, tokens - (record.baseTokens || 0));
     if (!watch || !step) return;
-    const runtime = isOAuthProvider(record.provider) ? undefined : chat.runtime;
+    const runtime = isCliProvider(record.provider) ? undefined : chat.runtime;
     const turn: TurnChannel = runtime ? { interrupt: () => runtime.interrupt(this.rid(record)) } : chat.cli;
     if (!sendCompactRequest(watch, turn, chatCompactRequest(tokens, step === 'urge'))) {
       // The turn is already ending; the next message compacts between turns as before.
@@ -2682,11 +2825,11 @@ class ExtensionHost implements vscode.Disposable {
     this.refreshCustomize();
   }
 
-  /** Copies global rules and skills into a Claude/Codex account directory, or removes earlier copies when sharing is off. */
+  /** Copies global rules and skills into a Claude account directory, or removes earlier copies when sharing is off. */
   private async shareGlobalInstructions(account: OAuthCliAccount): Promise<void> {
     try {
       const { dshHome, agentsHome } = this.instructionRoots();
-      await shareInstructions(account.provider, account.directory, { dshHome, agentsHome }, this.feature('shareRules'));
+      await shareInstructions(account.directory, { dshHome, agentsHome }, this.feature('shareRules'));
     }
     catch (error) { this.output.appendLine(`Could not share global rules with ${runtimeLabel(account.provider)}: ${error instanceof Error ? error.message : String(error)}`); }
   }
@@ -2732,12 +2875,12 @@ class ExtensionHost implements vscode.Disposable {
     let timer: NodeJS.Timeout | undefined;
     const limit = (cancel: () => void): void => { timer = setTimeout(cancel, timeoutMs); onCancel?.(cancel); };
     try {
-      if ('oauthAccount' in route) {
+      if ('oauthAccount' in route && isCliProvider(route.model.provider)) {
         const cli = new OAuthCliRuntime();
         let timedOut = false;
         limit(() => { timedOut = true; cli.cancel(); });
         await this.promptPooled(cli, { account: route.oauthAccount, cwd, backend, effort: choice.effort, speed: choice.speed, readOnly: true, prompt,
-          lean: route.oauthAccount.provider === 'claude-cli',
+          lean: true,
           onUsage: usage => {
             const input = usage.total.input + usage.total.cacheRead + usage.total.cacheWrite;
             this.output.appendLine(`One-shot input: ${input} tokens`);
@@ -2939,7 +3082,7 @@ class ExtensionHost implements vscode.Disposable {
     return { text: `Shown to the user: ${items.map(item => item.name).join(', ')}.${problems.length ? ` Not sent: ${problems.join('; ')}` : ''}` };
   }
 
-  /** Generates an image with the chat's Codex account, or the default one, saves it under .dsh/images in the real workspace and shows it in the chat. */
+  /** Generates an image with the chat's ChatGPT (Codex) account, or the default one, saves it under .dsh/images in the real workspace and shows it in the chat. */
   private async generateImage(chat: Chat, args: Record<string, unknown>, from?: string): Promise<DelegateResult> {
     const request = parseImageRequest(args);
     if (typeof request === 'string') return { text: request, isError: true };
@@ -2968,7 +3111,7 @@ class ExtensionHost implements vscode.Disposable {
     if (!from && chat.running) chat.segment++;
     box('pending');
     try {
-      const image = await generateImage({ command: cliCommand('codex-cli'), env: cliEnv(account), home: account.directory }, request, inputs);
+      const image = await generateImage({ home: account.directory }, request, inputs);
       // The real workspace, not the chat's private copy: .dsh is outside the mirror's review scope.
       const dir = join(this.root().uri.fsPath, '.dsh', 'images');
       await mkdir(dir, { recursive: true });
@@ -3034,7 +3177,7 @@ class ExtensionHost implements vscode.Disposable {
     const explorerNote = explorer ? 'Answer in at most about 300 words. Include file paths with line numbers for every claim.\n\n' : '';
     const shell = [BACKGROUND_CLEANUP, shellInstructions()].filter(Boolean).join('\n');
     const intro = `You are a subagent working in a shared working copy on behalf of another agent. ${instructions}\n\n${shell}`;
-    // Claude and Codex already get the delegation note as system text.
+    // Claude already gets the delegation note as system text.
     const promptFor = (text: string, systemDelegation: boolean): string => `${intro}\n\n${systemDelegation ? '' : `${delegationInstructions(false)}\n\n`}${memory ? `${memory}\n\n` : ''}${summaries}Task:\n${explorerNote}${text}\n\n`
       + 'When you finish, reply with a concise final report of at most 300 words unless the task asks for more: findings, files changed, and anything the requester must still do.';
     // Where the reply of the session that finished the task starts; earlier sessions ended in checkpoints.
@@ -3087,7 +3230,7 @@ class ExtensionHost implements vscode.Disposable {
         this.output.appendLine(`Mid-turn compaction: asked subagent "${name}" to checkpoint at about ${Math.round(tokens / 1000)}k tokens${step === 'urge' ? ' (again)' : ''}.`);
       };
       let runSession: (sessionTask: string) => Promise<void>;
-      if ('oauthAccount' in route) {
+      if ('oauthAccount' in route && isCliProvider(route.model.provider)) {
         const account = route.oauthAccount;
         const cli = new OAuthCliRuntime();
         run.cancel = () => { cancelled = true; cli.cancel(); };
@@ -3096,7 +3239,7 @@ class ExtensionHost implements vscode.Disposable {
         turn = cli;
         runSession = async sessionTask => {
           await this.promptPooled(cli, { account, cwd: chat.mirror.cwd, backend, effort, speed, readOnly, fullAccess: this.approvalMode === 'full',
-            cacheTtl: explorer && account.provider === 'claude-cli' ? '5m' : undefined,
+            cacheTtl: explorer ? '5m' : undefined,
             onContext,
             onUsage: usage => {
               this.logUsage(chat.record.id, explorer ? 'explorer' : 'subagent', entry.name, usage);
@@ -3208,7 +3351,7 @@ class ExtensionHost implements vscode.Disposable {
       this.postRun(chat.record.id, 'cancelling', 'Cancelling…');
       chat.stopDecider?.();
       for (const child of [...chat.children]) if (!child.background) child.cancel();
-      if (isOAuthProvider(chat.record.provider)) chat.cli.cancel(); else chat.runtime?.cancel(this.rid(chat.record));
+      if (isCliProvider(chat.record.provider)) chat.cli.cancel(); else chat.runtime?.cancel(this.rid(chat.record));
     }
   }
 
@@ -3262,7 +3405,7 @@ class ExtensionHost implements vscode.Disposable {
   }
 
   private async saveModel(message: Extract<SidebarWebviewMessage, { type: 'saveModel' }>): Promise<void> {
-    const allowed = new Set(['deepseek-official', 'openai', 'anthropic', 'openrouter', 'opencode-go', 'cursor-acp', 'codex-cli', 'claude-cli']);
+    const allowed = new Set(['deepseek-official', 'openai', 'anthropic', 'openrouter', 'opencode-go', 'mistral', 'cursor-acp', 'codex-cli', 'claude-cli']);
     if (!allowed.has(message.provider)) throw new Error('Choose a supported model provider.');
     const name = message.name.trim();
     const backend = message.backend.trim();
@@ -3347,7 +3490,7 @@ class ExtensionHost implements vscode.Disposable {
     for (const chat of this.chats.values()) this.cancel(true, chat.record.id);
     const id = this.active?.id;
     for (const [key, runtime] of [...this.runtimes]) { this.runtimes.delete(key); await runtime.stop(); runtime.dispose(); }
-    for (const chat of [...this.chats.values()]) if (!chat.running || !isOAuthProvider(chat.record.provider)) { chat.runtime = undefined; chat.runtimeKey = undefined; await this.unloadChat(chat.record.id); }
+    for (const chat of [...this.chats.values()]) if (!chat.running || !isCliProvider(chat.record.provider)) { chat.runtime = undefined; chat.runtimeKey = undefined; await this.unloadChat(chat.record.id); }
     if (id) await this.continueChat(id);
   }
 
@@ -3671,7 +3814,7 @@ class ExtensionHost implements vscode.Disposable {
         case 'replaceAccountKey': {
           const account = this.accounts.get(message.accountId);
           if (!account) throw new Error('Account not found.');
-          if (!['deepseek-official', 'openrouter', 'opencode-go'].includes(account.provider)) throw new Error('Choose a supported API provider.');
+          if (!['deepseek-official', 'openrouter', 'opencode-go', 'mistral'].includes(account.provider)) throw new Error('Choose a supported API provider.');
           await this.accounts.replaceSecret(message.accountId, message.secret);
           await this.refreshAccounts(false);
           this.sidebar.postMessage({ type: 'accountSaved' });
@@ -3679,7 +3822,7 @@ class ExtensionHost implements vscode.Disposable {
           break;
         }
         case 'openCliSetting':
-          await vscode.commands.executeCommand('workbench.action.openSettings', message.provider === 'codex-cli' ? 'dsh.runtime.codexPath' : 'dsh.runtime.claudePath');
+          await vscode.commands.executeCommand('workbench.action.openSettings', 'dsh.runtime.claudePath');
           break;
         case 'viewProviderUsage': {
           const url = PROVIDER_USAGE_URLS.get(message.provider);
@@ -3687,7 +3830,7 @@ class ExtensionHost implements vscode.Disposable {
           break;
         }
         case 'addAccount': {
-          if (!['deepseek-official', 'openrouter', 'opencode-go'].includes(message.provider)) throw new Error('Choose a supported API provider.');
+          if (!['deepseek-official', 'openrouter', 'opencode-go', 'mistral'].includes(message.provider)) throw new Error('Choose a supported API provider.');
           await this.accounts.add({ provider: message.provider, label: message.label, email: message.email, secret: message.secret });
           await this.refreshAccounts(false);
           this.sidebar.postMessage({ type: 'accountSaved' });

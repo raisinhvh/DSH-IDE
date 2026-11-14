@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 import * as vscode from 'vscode';
+import { loginCodex } from './codexAuth';
 
 export type OAuthCliProvider = 'codex-cli' | 'claude-cli';
 export interface OAuthCliAccount {
@@ -22,35 +23,29 @@ export function setDetectedCliCommand(provider: string, command: string): void {
   detectedCommands.set(provider, command);
 }
 
-export function cliCommand(provider: OAuthCliProvider): string {
-  const setting = vscode.workspace.getConfiguration('dsh').get<string>(provider === 'codex-cli' ? 'runtime.codexPath' : 'runtime.claudePath')?.trim();
+/** The Claude Code CLI command. ChatGPT (Codex) accounts run natively and need no CLI. */
+export function cliCommand(provider: 'claude-cli'): string {
+  const setting = vscode.workspace.getConfiguration('dsh').get<string>('runtime.claudePath')?.trim();
   if (setting) return setting;
   const detected = detectedCommands.get(provider);
   if (detected) return detected;
-  if (provider === 'claude-cli' && process.platform === 'win32') {
+  if (process.platform === 'win32') {
     const installed = join(process.env.APPDATA || '', 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
     if (existsSync(installed)) return installed;
   }
-  return provider === 'codex-cli' ? 'codex' : 'claude';
+  return 'claude';
 }
 
+/** The environment for a Claude Code CLI child, pointed at the account's isolated config directory. */
 export function cliEnv(account: OAuthCliAccount): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  if (account.provider === 'codex-cli') {
-    env.CODEX_HOME = account.directory;
-    delete env.OPENAI_API_KEY;
-    delete env.CODEX_ACCESS_TOKEN;
-    delete env.CODEX_API_KEY;
-    delete env.OPENAI_BASE_URL;
-  } else {
-    env.CLAUDE_CONFIG_DIR = account.directory;
-    delete env.ANTHROPIC_API_KEY;
-    delete env.ANTHROPIC_AUTH_TOKEN;
-    delete env.ANTHROPIC_BASE_URL;
-    delete env.CLAUDE_CODE_USE_BEDROCK;
-    delete env.CLAUDE_CODE_USE_VERTEX;
-    delete env.CLAUDE_CODE_USE_FOUNDRY;
-  }
+  env.CLAUDE_CONFIG_DIR = account.directory;
+  delete env.ANTHROPIC_API_KEY;
+  delete env.ANTHROPIC_AUTH_TOKEN;
+  delete env.ANTHROPIC_BASE_URL;
+  delete env.CLAUDE_CODE_USE_BEDROCK;
+  delete env.CLAUDE_CODE_USE_VERTEX;
+  delete env.CLAUDE_CODE_USE_FOUNDRY;
   return env;
 }
 
@@ -58,7 +53,7 @@ function execute(account: OAuthCliAccount, args: string[], timeoutMs: number): P
   return new Promise((resolve, reject) => {
     let output = '';
     let done = false;
-    const child = spawn(cliCommand(account.provider), args, { env: cliEnv(account), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(cliCommand('claude-cli'), args, { env: cliEnv(account), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const timer = setTimeout(() => { child.kill(); finish(new Error('Browser sign-in timed out.')); }, timeoutMs);
     const finish = (error?: Error): void => {
       if (done) return;
@@ -69,12 +64,15 @@ function execute(account: OAuthCliAccount, args: string[], timeoutMs: number): P
     const read = (data: Buffer): void => { output = (output + data.toString('utf8')).slice(-32768); };
     child.stdout.on('data', read);
     child.stderr.on('data', read);
-    child.on('error', () => finish(new Error(`${account.provider === 'codex-cli' ? 'Codex' : 'Claude Code'} CLI could not start. Check its path in Settings.`)));
-    child.on('close', code => finish(code === 0 ? undefined : new Error(`Sign-in command failed. Check the ${account.provider === 'codex-cli' ? 'Codex' : 'Claude Code'} login in a terminal.`)));
+    child.on('error', () => finish(new Error('Claude Code CLI could not start. Check its path in Settings.')));
+    child.on('close', code => finish(code === 0 ? undefined : new Error('Sign-in command failed. Check the Claude Code login in a terminal.')));
   });
 }
 
-/** OAuth credentials remain in isolated directories owned by the official CLIs. */
+/**
+ * OAuth credentials live in one isolated directory per account: Claude Code's config directory, or the ChatGPT
+ * (Codex) auth.json that DSH signs in to natively.
+ */
 export class OAuthCliAccounts {
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -120,16 +118,20 @@ export class OAuthCliAccounts {
   }
 
   private async login(account: OAuthCliAccount): Promise<void> {
-    const provider = account.provider;
-    await execute(account, provider === 'codex-cli' ? ['login'] : ['auth', 'login', '--claudeai', ...(account.email ? ['--email', account.email] : [])], 300000);
-    const status = await execute(account, provider === 'codex-cli' ? ['login', 'status'] : ['auth', 'status', '--json'], 15000);
-    if (provider === 'codex-cli') {
-      if (!/logged in.*chatgpt|chatgpt.*logged in/i.test(status)) throw new Error('Codex did not report a ChatGPT sign-in.');
-    } else {
-      const info = JSON.parse(status) as { loggedIn?: boolean; email?: string; authMethod?: string };
-      if (!info.loggedIn || info.authMethod !== 'claude.ai') throw new Error('Claude Code did not report a subscription sign-in.');
-      account.email = info.email || account.email;
+    if (account.provider === 'codex-cli') {
+      const tokens = await loginCodex(account.directory, {
+        openUrl: async url => {
+          await vscode.env.openExternal(vscode.Uri.parse(url));
+        },
+      });
+      account.email = tokens.email || account.email;
+      return;
     }
+    await execute(account, ['auth', 'login', '--claudeai', ...(account.email ? ['--email', account.email] : [])], 300000);
+    const status = await execute(account, ['auth', 'status', '--json'], 15000);
+    const info = JSON.parse(status) as { loggedIn?: boolean; email?: string; authMethod?: string };
+    if (!info.loggedIn || info.authMethod !== 'claude.ai') throw new Error('Claude Code did not report a subscription sign-in.');
+    account.email = info.email || account.email;
   }
 
   async setDefault(provider: OAuthCliProvider, id: string): Promise<void> {
@@ -144,7 +146,7 @@ export class OAuthCliAccounts {
     const base = resolve(this.context.globalStorageUri.fsPath, 'oauth', account.provider);
     const child = relative(base, resolve(account.directory));
     if (!child || child.startsWith('..') || child.includes(':')) throw new Error('Account storage path is invalid.');
-    await execute(account, account.provider === 'codex-cli' ? ['logout'] : ['auth', 'logout'], 15000).catch(() => undefined);
+    if (account.provider === 'claude-cli') await execute(account, ['auth', 'logout'], 15000).catch(() => undefined);
     await rm(account.directory, { recursive: true, force: true });
     const remaining = this.list().filter(item => item.id !== id);
     await this.context.globalState.update(KEY, remaining);

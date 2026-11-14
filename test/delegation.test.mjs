@@ -6,42 +6,14 @@ import { build } from 'esbuild';
 
 // Exercise the runtime wire protocol without starting CLI processes or model turns.
 const launches = [];
-let codexItems = [];
 globalThis.__dshDelegateTestSpawn = (command, args, options) => {
   const child = new EventEmitter();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   child.stdin = new PassThrough();
   child.kill = () => { child.killed = true; };
-  const launch = { command, args, options, requests: [], child };
+  const launch = { command, args, options, child };
   launches.push(launch);
-  if (command === 'codex-cli') {
-    let buffer = '';
-    child.stdin.on('data', chunk => {
-      buffer += chunk;
-      let end;
-      while ((end = buffer.indexOf('\n')) >= 0) {
-        const request = JSON.parse(buffer.slice(0, end));
-        buffer = buffer.slice(end + 1);
-        launch.requests.push(request);
-        if (request.id === undefined) continue;
-        const result = request.method === 'windowsSandbox/readiness' ? { status: 'ready' }
-          : request.method.startsWith('thread/') ? { thread: { id: 'thread-1' } }
-          : request.method === 'turn/start' ? { turn: { id: 'turn-1' } } : {};
-        queueMicrotask(() => {
-          child.stdout.write(JSON.stringify({ id: request.id, result }) + '\n');
-          if (request.method === 'turn/start') {
-            for (const item of codexItems) {
-              child.stdout.write(JSON.stringify({ method: 'item/started', params: { item } }) + '\n');
-              if (item.type === 'agentMessage') child.stdout.write(JSON.stringify({ method: 'item/agentMessage/delta', params: { delta: item.text } }) + '\n');
-              child.stdout.write(JSON.stringify({ method: 'item/completed', params: { item } }) + '\n');
-            }
-            child.stdout.write(JSON.stringify({ method: 'turn/completed', params: { turn: { id: 'turn-1' } } }) + '\n');
-          }
-        });
-      }
-    });
-  }
   return child;
 };
 
@@ -67,40 +39,6 @@ test('Claude CLI speed is passed through settings without changing the model arg
     assert.equal(launch.args[launch.args.indexOf('--model') + 1], 'configured-model');
     launch.child.emit('close', 0);
     await result;
-  }
-});
-
-test('Codex preserves MCP tool names so delegation can be excluded from tool counts', async () => {
-  const tools = [];
-  codexItems = [{ id: 'delegate', type: 'mcpToolCall', server: 'dsh-delegate', tool: 'delegate_task', error: { message: 'failed' } }];
-  try {
-    await new OAuthCliRuntime().prompt(turn('codex-cli', { onTool: (...args) => tools.push(args) }));
-    assert.equal(tools.length, 2);
-    assert.ok(tools.every(tool => tool[1] === 'delegate_task'));
-    assert.equal(tools[0][2], 'failed');
-  } finally { codexItems = []; }
-});
-
-test('Codex disables native subagents on new and resumed threads, including delegated children', async () => {
-  for (const sessionId of [undefined, 'existing-thread']) {
-    for (const bridge of [undefined, delegate]) {
-      await new OAuthCliRuntime().prompt(turn('codex-cli', { sessionId, delegate: bridge }));
-      const launch = launches.at(-1);
-      assert.equal(launch.args[launch.args.indexOf('--disable') + 1], 'multi_agent');
-      assert.ok(!launch.args.includes('--enable'));
-      const thread = launch.requests.find(request => request.method === (sessionId ? 'thread/resume' : 'thread/start'));
-      assert.equal(thread.params.config['features.multi_agent'], false);
-      assert.match(thread.params.developerInstructions, bridge ? /exact names/ : /no delegate tool/);
-      if (bridge) {
-        assert.ok(launch.args.includes('mcp_servers.dsh-delegate.default_tools_approval_mode="approve"'));
-        assert.equal(thread.params.config['mcp_servers.dsh-delegate.default_tools_approval_mode'], 'approve');
-        assert.equal(thread.params.config['mcp_servers.dsh-delegate.enabled'], true);
-        assert.ok(launch.args.includes('mcp_servers.dsh-delegate.supports_parallel_tool_calls=true'));
-        assert.equal(thread.params.config['mcp_servers.dsh-delegate.supports_parallel_tool_calls'], true);
-      }
-      assert.equal(thread.params.approvalPolicy, 'on-request');
-      assert.equal(thread.params.sandbox, 'workspace-write');
-    }
   }
 });
 
@@ -271,20 +209,7 @@ test('Claude AskUserQuestion is answered in the chat instead of as a permission 
   }
 });
 
-test('Codex marks each agent message so text around hidden tool lookups is never joined', async () => {
-  const events = [];
-  codexItems = [
-    { id: 'm1', type: 'agentMessage', text: 'I will check.' },
-    { id: 'lookup', type: 'toolSearchCall' },
-    { id: 'm2', type: 'agentMessage', text: 'Yes.' },
-  ];
-  try {
-    await new OAuthCliRuntime().prompt(turn('codex-cli', { onText: text => events.push(`text:${text}`), onMessageBreak: () => events.push('break') }));
-    assert.deepEqual(events, ['break', 'text:I will check.', 'break', 'text:Yes.']);
-  } finally { codexItems = []; }
-});
-
-test('trimming built-in tools drops unusable Claude tools and Codex goals, and never touches core tools', async () => {
+test('trimming built-in tools drops unusable Claude tools and never touches core tools', async () => {
   const claude = new OAuthCliRuntime().prompt(turn('claude-cli', { trimTools: true }));
   const claudeLaunch = launches.at(-1);
   const denied = claudeLaunch.args[claudeLaunch.args.indexOf('--disallowedTools') + 1].split(',');
@@ -292,12 +217,4 @@ test('trimming built-in tools drops unusable Claude tools and Codex goals, and n
   for (const tool of ['Bash', 'Read', 'Edit', 'Write', 'Skill', 'ToolSearch', 'WebFetch', 'WebSearch', 'AskUserQuestion', 'TaskStop', 'Monitor', 'TodoWrite']) assert.ok(!denied.includes(tool), tool);
   claudeLaunch.child.emit('close', 0);
   await claude;
-
-  await new OAuthCliRuntime().prompt(turn('codex-cli', { trimTools: true }));
-  const trimmed = launches.at(-1).args;
-  assert.equal(trimmed[trimmed.indexOf('features.goals=false') - 1], '-c');
-  // --disable would fail outright on a Codex that does not know the feature.
-  assert.ok(!trimmed.includes('goals'));
-  await new OAuthCliRuntime().prompt(turn('codex-cli'));
-  assert.ok(!launches.at(-1).args.includes('features.goals=false'));
 });

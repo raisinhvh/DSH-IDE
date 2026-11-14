@@ -1,7 +1,5 @@
-import { execFile, spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
-import { arch, release, type } from 'node:os';
-import { join } from 'node:path';
+import { CODEX_CLIENT_VERSION, codexHeaders, freshCodexTokens } from '../accounts/codexAuth';
+import type { CodexTokens } from '../accounts/codexAuth';
 import type { DelegateToolInfo } from '../delegate/host';
 import { SEND_MEDIA } from './media';
 
@@ -12,7 +10,6 @@ export const GENERATE_IMAGE = 'generate_image';
 const BASE_URL = 'https://chatgpt.com/backend-api/codex/images';
 // The request model Codex sends; the backend does not report which image model ran.
 const MODEL = 'gpt-image-2';
-const ORIGINATOR = 'codex_cli_rs';
 const SIZES = ['auto', '1024x1024', '1536x1024', '1024x1536'];
 const QUALITIES = ['auto', 'low', 'medium', 'high'];
 const BACKGROUNDS = ['auto', 'opaque', 'transparent'];
@@ -26,8 +23,8 @@ const TIMEOUT_MS = 300000;
 
 /** images are the agent's input image paths, unresolved. */
 export interface ImageRequest { prompt: string; size: string; quality: string; background: string; images: string[] }
-/** How to reach one Codex account: its CLI command, environment (CODEX_HOME set) and config directory. */
-export interface CodexAuth { command: string; env: NodeJS.ProcessEnv; home: string }
+/** One Codex account: the directory holding its ChatGPT sign-in (auth.json). */
+export interface CodexAuth { home: string }
 export interface GeneratedImage { bytes: Buffer; extension: string }
 
 export const GENERATE_IMAGE_TOOL: DelegateToolInfo = {
@@ -112,10 +109,8 @@ export function pngSize(bytes: Buffer): string | undefined {
 /** Generates one image with a Codex account's ChatGPT sign-in, from the prompt alone or from input image bytes too. */
 export async function generateImage(auth: CodexAuth, request: ImageRequest, inputs: Buffer[] = []): Promise<GeneratedImage> {
   const target = imageRequestBody(request, inputs);
-  let tokens = await readTokens(auth.home);
-  if (expiring(tokens.access)) { await refreshTokens(auth); tokens = await readTokens(auth.home); }
-  let response = await post(auth, tokens, target);
-  if (response.status === 401) { await refreshTokens(auth); response = await post(auth, await readTokens(auth.home), target); }
+  let response = await post(await freshCodexTokens(auth.home), target);
+  if (response.status === 401) response = await post(await freshCodexTokens(auth.home, { force: true }), target);
   const body = await response.text();
   if (!response.ok) throw new Error(`Image generation failed (HTTP ${response.status}): ${errorText(body)}`);
   let parsed: Json;
@@ -130,44 +125,15 @@ export async function generateImage(auth: CodexAuth, request: ImageRequest, inpu
   return { bytes, extension };
 }
 
-interface Tokens { access: string; accountId?: string; fedramp: boolean }
-
-async function readTokens(home: string): Promise<Tokens> {
-  let auth: Json;
-  try { auth = JSON.parse(await readFile(join(home, 'auth.json'), 'utf8')) as Json; } catch { throw new Error('This Codex account has no ChatGPT sign-in file. Sign in again in Accounts.'); }
-  const tokens = auth.tokens && typeof auth.tokens === 'object' ? auth.tokens as Json : {};
-  if (typeof tokens.access_token !== 'string' || !tokens.access_token) throw new Error('This Codex account is not signed in with ChatGPT. Sign in again in Accounts.');
-  const claims = jwtClaims(tokens.id_token)['https://api.openai.com/auth'];
-  const info = claims && typeof claims === 'object' ? claims as Json : {};
-  const accountId = typeof tokens.account_id === 'string' && tokens.account_id ? tokens.account_id
-    : typeof info.chatgpt_account_id === 'string' ? info.chatgpt_account_id : undefined;
-  return { access: tokens.access_token, accountId, fedramp: info.chatgpt_account_is_fedramp === true };
-}
-
-function jwtClaims(token: unknown): Json {
-  if (typeof token !== 'string') return {};
-  try { return JSON.parse(Buffer.from(token.split('.')[1] || '', 'base64url').toString('utf8')) as Json; } catch { return {}; }
-}
-
-function expiring(access: string): boolean {
-  const exp = jwtClaims(access).exp;
-  return typeof exp === 'number' && exp * 1000 < Date.now() + 5 * 60 * 1000;
-}
-
-async function post(auth: CodexAuth, tokens: Tokens, target: { url: string; body: Json }): Promise<Response> {
-  const version = await codexVersion(auth);
+async function post(tokens: CodexTokens, target: { url: string; body: Json }): Promise<Response> {
   return fetch(target.url, {
     method: 'POST',
     signal: AbortSignal.timeout(TIMEOUT_MS),
     headers: {
-      Authorization: `Bearer ${tokens.access}`,
+      ...codexHeaders(tokens),
       Accept: 'application/json',
       'Content-Type': 'application/json',
-      originator: ORIGINATOR,
-      'User-Agent': `${ORIGINATOR}/${version} (${type()} ${release()}; ${arch()}) dsh-ide`,
-      version,
-      ...(tokens.accountId ? { 'ChatGPT-Account-ID': tokens.accountId } : {}),
-      ...(tokens.fedramp ? { 'X-OpenAI-Fedramp': 'true' } : {}),
+      version: CODEX_CLIENT_VERSION,
     },
     body: JSON.stringify(target.body),
   });
@@ -182,57 +148,4 @@ function errorText(body: string): string {
     if (message) return message.slice(0, 500);
   } catch { /* not JSON */ }
   return body.trim().slice(0, 300) || '(empty response)';
-}
-
-let version: Promise<string> | undefined;
-
-function codexVersion(auth: CodexAuth): Promise<string> {
-  version ??= new Promise(resolve => {
-    execFile(auth.command, ['--version'], { env: auth.env, windowsHide: true, timeout: 5000 }, (error, stdout) => {
-      resolve(/(\d+\.\d+\.\d+)/.exec(error ? '' : stdout)?.[1] || '0.0.0');
-    });
-  });
-  return version;
-}
-
-/** Asks Codex to refresh its own ChatGPT tokens, so the CLI stays the only writer of auth.json. */
-function refreshTokens(auth: CodexAuth): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(auth.command, ['app-server', '--listen', 'stdio://'], { env: auth.env, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
-    let buffer = '';
-    let done = false;
-    const finish = (error?: Error): void => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      child.kill();
-      if (error) reject(error); else resolve();
-    };
-    const timer = setTimeout(() => finish(new Error('Refreshing the Codex sign-in timed out.')), 20000);
-    const send = (message: Json): void => { child.stdin.write(JSON.stringify(message) + '\n'); };
-    child.on('error', () => finish(new Error('Codex CLI could not start. Check its path in Settings.')));
-    child.on('close', () => finish(new Error('Codex exited before refreshing its sign-in.')));
-    child.stdin.on('error', () => undefined);
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => {
-      buffer += chunk;
-      if (buffer.length > 1024 * 1024) { finish(new Error('Codex app-server output was too large.')); return; }
-      let end: number;
-      while ((end = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, end).trim();
-        buffer = buffer.slice(end + 1);
-        let message: Json;
-        try { message = JSON.parse(line) as Json; } catch { continue; }
-        if (message.id === 1) {
-          if (message.error) { finish(new Error('Codex app-server rejected the connection.')); return; }
-          send({ method: 'initialized' });
-          send({ id: 2, method: 'account/read', params: { refreshToken: true } });
-        } else if (message.id === 2) {
-          finish(message.error ? new Error('Codex could not refresh its ChatGPT sign-in. Sign in again in Accounts.') : undefined);
-          return;
-        }
-      }
-    });
-    send({ id: 1, method: 'initialize', params: { clientInfo: { name: 'dsh-ide', title: 'DSH IDE', version: '0.4.6' }, capabilities: null } });
-  });
 }

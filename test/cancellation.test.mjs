@@ -7,7 +7,6 @@ import { resolve } from 'node:path';
 
 const bundle = await build({
   stdin: { contents: `export { AcpRuntime } from './runtime/acp';
-    export { CodexAppServerRuntime } from './runtime/codexAppServer';
     export { OAuthCliRuntime } from './runtime/oauthCli';
     export { terminateProcessTree } from './runtime/cancellation';
     export { WorkspaceMirror } from './runtime/shadow';`, resolveDir: resolve('src'), loader: 'ts' },
@@ -34,7 +33,7 @@ const bundle = await build({
     }[args.path] }));
   } }],
 });
-const { AcpRuntime, CodexAppServerRuntime, OAuthCliRuntime, WorkspaceMirror, terminateProcessTree } = await import(
+const { AcpRuntime, OAuthCliRuntime, WorkspaceMirror, terminateProcessTree } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
 
 function fakeChild(respond = () => undefined) {
@@ -47,7 +46,7 @@ function fakeChild(respond = () => undefined) {
     for (const line of chunk.toString().trim().split('\n')) {
       const frame = JSON.parse(line);
       child.frames.push(frame);
-      const result = frame.method === 'windowsSandbox/readiness' ? { status: 'ready' } : respond(frame);
+      const result = respond(frame);
       if (result !== undefined) queueMicrotask(() => { if (!child.stdout.destroyed) child.message({ id: frame.id, result }); });
     }
   });
@@ -68,34 +67,6 @@ test('Windows cancellation kills the process tree once, including descendants', 
   assert.deepEqual(calls[0][1], ['/pid', '12345', '/T', '/F']);
   assert.equal(calls[0][2].windowsHide, true);
   assert.equal(child.stdout.destroyed, true);
-});
-
-for (const acknowledge of [false, true]) {
-  test(`Codex cancellation finishes even when interrupt ${acknowledge ? 'is acknowledged without completion' : 'never responds'}`, async t => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
-    const child = fakeChild(frame => ({ initialize: {}, 'thread/start': { thread: { id: 'thread' } },
-      'turn/start': { turn: { id: 'turn' } }, ...(acknowledge ? { 'turn/interrupt': {} } : {}) })[frame.method]);
-    globalThis.__dshCancellationSpawn = () => child;
-    const runtime = new CodexAppServerRuntime();
-    const result = runtime.prompt(turn('codex-cli'));
-    await flush();
-    runtime.cancel(); runtime.cancel();
-    assert.equal(child.frames.filter(frame => frame.method === 'turn/interrupt').length, 1);
-    t.mock.timers.tick(2000);
-    assert.equal(await result, 'thread');
-    assert.equal(child.stdout.destroyed, true);
-  });
-}
-
-test('Codex cancellation settles a stuck initialization RPC without a close event', async t => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  const child = fakeChild();
-  globalThis.__dshCancellationSpawn = () => child;
-  const runtime = new CodexAppServerRuntime();
-  const result = assert.rejects(runtime.prompt(turn('codex-cli')), /Cancelled/);
-  runtime.cancel();
-  await result;
-  assert.equal(child.stdin.destroyed, true);
 });
 
 test('Claude cancellation releases the caller without waiting for inherited pipes to close', async () => {

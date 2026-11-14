@@ -11,7 +11,7 @@ const catalogPath = ['@earendil-works', 'pi-ai', 'dist', 'providers', 'data', 'o
 test('only OpenRouter and OpenCode Go get an llm-pi-ai entry', () => {
   assert.equal(piAiPatch('deepseek-official', 'DEEPSEEK_API_KEY', 'deepseek-v4-flash', undefined), '');
   assert.equal(isPiAiProvider('constructor'), false);
-  assert.ok(isPiAiProvider('openrouter') && isPiAiProvider('opencode-go'));
+  assert.ok(isPiAiProvider('openrouter') && isPiAiProvider('opencode-go') && isPiAiProvider('mistral'));
 });
 
 test('a catalog model gets the provider entry alone', () => {
@@ -52,7 +52,7 @@ test('the catalog is read from the pi-ai copy DSH resolves, preferring the one n
 
 test('the bundled DSH ships OpenRouter and OpenCode Go catalogs the extension can read', async () => {
   const bin = createRequire(import.meta.url).resolve('@deepseek-ai/dsh/lib/bin.js');
-  for (const provider of ['openrouter', 'opencode-go']) {
+  for (const provider of ['openrouter', 'opencode-go', 'mistral']) {
     const catalog = await piAiCatalog(provider, bin);
     assert.ok(catalog && catalog.size > 0, provider);
   }

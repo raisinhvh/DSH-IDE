@@ -138,7 +138,7 @@ export type SidebarWebviewMessage =
   | { type: 'refreshUsage'; accountId?: string }
   | { type: 'reauthAccount'; accountId: string }
   | { type: 'replaceAccountKey'; accountId: string; secret: string }
-  | { type: 'openCliSetting'; provider: 'codex-cli' | 'claude-cli' }
+  | { type: 'openCliSetting'; provider: 'claude-cli' }
   | { type: 'checkDependencies' }
   | { type: 'installProvider'; provider: string }
   | { type: 'viewProviderUsage'; provider: string }
@@ -501,7 +501,7 @@ export function getSidebarHtml(
   <form id="model-form" class="inline-form" hidden>
     <h2 id="model-form-title">Add model</h2>
     <label>Name<input id="model-name" maxlength="80" required placeholder="My model"></label>
-    <label>Provider<select id="model-provider" required><option value="">Select a provider</option><option value="codex-cli">Codex (ChatGPT)</option><option value="claude-cli">Claude Code</option><option value="cursor-acp">Cursor</option><option value="deepseek-official">DeepSeek</option><option value="openrouter">OpenRouter</option><option value="opencode-go">OpenCode Go</option></select></label>
+    <label>Provider<select id="model-provider" required><option value="">Select a provider</option><option value="codex-cli">ChatGPT (Codex)</option><option value="claude-cli">Claude Code</option><option value="cursor-acp">Cursor</option><option value="deepseek-official">DeepSeek</option><option value="openrouter">OpenRouter</option><option value="opencode-go">OpenCode Go</option><option value="mistral">Mistral</option></select></label>
     <label id="model-backend-field">Model ID<input id="model-backend" placeholder="Provider model ID"></label>
     <label id="model-cursor-field" hidden>Cursor model<input id="model-cursor-backend" list="model-cursor-options" maxlength="120" spellcheck="false" autocomplete="off" placeholder="auto, or a model slug such as gpt-5"><datalist id="model-cursor-options"></datalist></label>
     <label>Account<select id="model-account"></select></label>
@@ -531,7 +531,7 @@ export function getSidebarHtml(
 </section>
 <section id="instructions-page" class="page settings-page" hidden>
   <div class="page-heading"><button class="icon-button back" data-page="chat" title="Back to chat" aria-label="Back to chat"><span class="symbol">arrow_back</span></button><div><h1>Behavior</h1></div></div>
-  <p class="helper">Rules are standing instructions the agent always follows. Skills are reusable playbooks it loads when they match the task. Rules and skills saved for all workspaces are also shared with Claude and Codex when that option is on in Customize.</p>
+  <p class="helper">Rules are standing instructions the agent always follows. Skills are reusable playbooks it loads when they match the task. Rules and skills saved for all workspaces are also shared with Claude when that option is on in Customize.</p>
   <div id="memory-settings" class="memory-settings"></div>
   <div class="settings-toolbar toolbar-pair"><button id="add-rule" class="secondary-button" type="button"><span class="symbol small">add</span> Add rule</button><button id="add-skill" class="secondary-button" type="button"><span class="symbol small">add</span> Add skill</button></div>
   <div id="instruction-list" class="scroll-content"></div>
