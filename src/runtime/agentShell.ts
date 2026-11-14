@@ -32,5 +32,5 @@ export const BACKGROUND_CLEANUP = 'Stop servers, watchers and other background c
 
 /** Shell guidance for agents, following the current settings. */
 export function shellInstructions(): string {
-  return [rustToolsInstructions(), powershellSpeedups ? POWERSHELL_SPEEDUPS : ''].filter(Boolean).join('\n');
+  return [rustToolsInstructions(), powershellSpeedups && process.platform === 'win32' ? POWERSHELL_SPEEDUPS : ''].filter(Boolean).join('\n');
 }
