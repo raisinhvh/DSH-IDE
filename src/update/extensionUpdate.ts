@@ -9,7 +9,13 @@ import { compareVersions, isVersion } from './version';
 
 export interface ExtensionRelease { version: string; downloadUrl: string; digest?: string }
 
-export function parseRelease(value: unknown, repository: string, current: string): ExtensionRelease | undefined {
+/** Release asset name for a platform: Windows keeps the plain name older releases look for; others get a per-platform build. */
+export function assetName(version: string, platform: string, arch: string): string {
+  return platform === 'win32' ? `dsh-ide-${version}.vsix` : `dsh-ide-${version}-${platform}-${arch}.vsix`;
+}
+
+export function parseRelease(value: unknown, repository: string, current: string,
+  platform: string = process.platform, arch: string = process.arch): ExtensionRelease | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const release = value as Record<string, unknown>;
   if (release.draft || release.prerelease || typeof release.tag_name !== 'string') return undefined;
@@ -17,8 +23,10 @@ export function parseRelease(value: unknown, repository: string, current: string
   if (!isVersion(version) || !isVersion(current) || compareVersions(version, current) <= 0) return undefined;
   if (!Array.isArray(release.assets)) return undefined;
   const assets = release.assets.filter((asset): asset is Record<string, unknown> => !!asset && typeof asset === 'object');
-  // A single, universal VSIX avoids choosing an unrelated extension or the wrong platform.
-  const matches = assets.filter(asset => asset.name === `dsh-ide-${version}.vsix`);
+  // Native packages (esbuild, node-addon-system) differ per platform, so only this platform's exact asset is accepted.
+  // A release without one is skipped rather than installing another platform's build.
+  const name = assetName(version, platform, arch);
+  const matches = assets.filter(asset => asset.name === name);
   if (matches.length !== 1) return undefined;
   const asset = matches[0];
   if (typeof asset.browser_download_url !== 'string') return undefined;
