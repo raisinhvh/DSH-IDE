@@ -12,7 +12,7 @@ import shutil
 import tempfile
 import zipfile
 
-from package_mac import COPIED, ROOT, VERSION, build, command, run
+from package_mac import COPIED, ROOT, VERSION, build, command, run, verify_platform_dependencies
 
 
 def build_windows() -> Path:
@@ -29,6 +29,7 @@ def build_windows() -> Path:
             command("npm"), "ci", "--os=win32", "--cpu=x64", "--omit=dev",
             "--ignore-scripts", "--no-audit", "--no-fund",
         ], stage)
+        verify_platform_dependencies(stage, "win32", "x64")
         vsce = ROOT / "node_modules" / "@vscode" / "vsce" / "vsce"
         # Keep the historical Windows asset name/manifest for the built-in updater.
         run(["node", str(vsce), "package", "--allow-missing-repository", "-o", str(target)], stage)

@@ -62,6 +62,19 @@ def stage_extension(stage: Path, arch: str) -> None:
             shutil.copy2(source, stage / name)
     # Install scripts are skipped: they would run for this machine, not the Mac. The packages ship prebuilt binaries.
     run([command("npm"), "ci", "--os=darwin", f"--cpu={arch}", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], stage)
+    verify_platform_dependencies(stage, "darwin", arch)
+
+
+def verify_platform_dependencies(stage: Path, platform: str, arch: str) -> None:
+    """npm silently skips optional native packages when their downloads fail."""
+    lock = json.loads((stage / "package-lock.json").read_text(encoding="utf-8"))
+    for name, package in lock["packages"].items():
+        if package.get("dev") or platform not in package.get("os", []):
+            continue
+        if package.get("cpu") and arch not in package["cpu"]:
+            continue
+        if not (stage / name / "package.json").is_file():
+            raise RuntimeError(f"Missing native dependency {name} for {platform}-{arch}; check npm downloads/cache")
 
 
 def needs_executable_bit(header: bytes) -> bool:
