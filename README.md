@@ -33,7 +33,7 @@ To publish an extension update, increase `package.json`'s version, run `npm run 
 - Or macOS (Apple silicon or Intel), using the matching `darwin-arm64` or `darwin-x64` VSIX. Node.js 22.19+ or 24+ with npm must already be installed (for example `brew install node`); DSH looks on PATH and in `/opt/homebrew/bin`, `/usr/local/bin` and `~/.local/bin`. Claude Code and Cursor Agent install with their official shell installers.
 - Internet access for first-time dependency downloads and provider installation.
 - VS Code `1.96.0` or newer, or a compatible Cursor release.
-- A DeepSeek API key for the default direct route, an OpenRouter, OpenCode Go, or Mistral API key, a ChatGPT subscription, or a Claude Code or Cursor Agent account for its corresponding route. Missing Claude Code and Cursor CLIs can be installed from the model configuration form; ChatGPT needs no CLI.
+- A DeepSeek API key for the default direct route, an OpenRouter, OpenCode Go, Mistral, or self-hosted API key, a ChatGPT subscription, or a Claude Code or Cursor Agent account for its corresponding route. Missing Claude Code and Cursor CLIs can be installed from the model configuration form; ChatGPT needs no CLI.
 - A trusted, local file workspace. DSH refuses to start without a local workspace folder and workspace trust.
 
 ## Setup
@@ -54,7 +54,7 @@ Open this project in VS Code or Cursor after building the extension. For develop
 4. Enter an account name, optional email, and DeepSeek API key in the inline form.
 5. Start a new chat.
 
-Account labels and provider metadata are stored in VS Code global state. DeepSeek, OpenRouter, OpenCode Go, and Mistral API keys are stored in VS Code `SecretStorage`. A Mistral account takes either an API key or a Le Chat/Vibe subscription key; both are bearer keys on `api.mistral.ai`. The Accounts page groups ChatGPT (Codex), Claude, Cursor, DeepSeek, OpenRouter, OpenCode Go, and Mistral accounts. If a selected model needs an account, the sidebar opens Accounts.
+Account labels and provider metadata are stored in VS Code global state. DeepSeek, OpenRouter, OpenCode Go, Mistral, and self-hosted API keys are stored in VS Code `SecretStorage`. A Mistral account takes either an API key or a Le Chat/Vibe subscription key; both are bearer keys on `api.mistral.ai`. The Accounts page groups ChatGPT (Codex), Claude, Cursor, DeepSeek, OpenRouter, OpenCode Go, Mistral, and Self-hosted accounts. If a selected model needs an account, the sidebar opens Accounts.
 
 Each provider has its own tab on the Accounts page, and each account shows its usage windows with reset times. The usage button in the top bar opens a summary of every account. When usage can't be read, the account shows why, with a button that fixes it: try again, sign in again, replace the API key, set the CLI path, or view usage in the browser. ChatGPT (Codex) usage comes from ChatGPT's usage endpoint, read with the account's sign-in. Claude usage comes from Anthropic's undocumented OAuth usage endpoint, read with the account's saved Claude Code login, and from the rate-limit updates Claude Code reports during turns; DSH never refreshes that login itself. OpenRouter shows credit used against the key's limit, and DeepSeek shows its balance. Cursor, OpenCode Go, and Mistral do not report usage yet. Usage refreshes when the sidebar loads, when Accounts opens, from the refresh button, and after each turn.
 
@@ -74,6 +74,21 @@ Each account's OAuth login lives in its own directory below VS Code extension st
 3. Select **Cursor Auto** in the sidebar and start a chat. The session returns Cursor's available model names; pick a specific model in the same sidebar.
 
 Cursor's [ACP interface](https://prod.cursor.com/docs/cli/acp) supplies authentication, sessions, prompts, model configuration, and permissions. The extension runs the Cursor agent against the same staged workspace copy used for review.
+
+## Use a self-hosted model (OpenAI-compatible)
+
+Point DSH at your own OpenAI-compatible server, such as a vLLM endpoint serving Qwen with LoRA adapters, for example through the separate `dsh-gpu-manager` gateway.
+
+1. Open **Accounts** in the sidebar and choose **Add API key** under **Self-hosted Accounts**.
+2. Enter an account name, optional email, the base URL (for example `http://127.0.0.1:8787/v1`), and the API key.
+3. Open **Manage models**, add a model with provider **Self-hosted**, and enter the served model ID as the backend. **Load models** lists the IDs the server reports.
+4. Each LoRA adapter served under its own ID becomes its own model route, so a subagent can use it by choosing that model.
+
+Notes:
+- The base URL must be `https`. Plain `http` is accepted only for localhost, 127.0.0.1, `::1`, private LAN addresses, and `*.local` hosts.
+- Self-hosted accounts do not report usage.
+- Speed tiers are separate model IDs, not request settings.
+- Tool calling depends on the server. vLLM needs automatic tool choice enabled for the model (`--enable-auto-tool-choice` with a `--tool-call-parser`).
 
 ## Models
 
@@ -112,7 +127,7 @@ Cursor's [ACP interface](https://prod.cursor.com/docs/cli/acp) supplies authenti
 ]
 ```
 
-`account: "default"` resolves the selected account for that provider. An explicit account value resolves that account ID. `cursor-acp` uses the active Cursor CLI login. Use **DSH: Pick Model** or the sidebar model selector to change the active route. Choose the **Manage models** icon to add or edit a route, including its provider and account. Cursor model choices are loaded from its ACP session. The direct API mapping supports `deepseek-official`, `openrouter`, `opencode-go`, and `mistral`. Older OpenAI and Anthropic API routes remain readable for existing configurations; their saved keys appear under **Previous API accounts** for removal. New ChatGPT and Claude accounts use browser OAuth sign-in.
+`account: "default"` resolves the selected account for that provider. An explicit account value resolves that account ID. `cursor-acp` uses the active Cursor CLI login. Use **DSH: Pick Model** or the sidebar model selector to change the active route. Choose the **Manage models** icon to add or edit a route, including its provider and account. Cursor model choices are loaded from its ACP session. The direct API mapping supports `deepseek-official`, `openrouter`, `opencode-go`, `mistral`, and `self-hosted`. Older OpenAI and Anthropic API routes remain readable for existing configurations; their saved keys appear under **Previous API accounts** for removal. New ChatGPT and Claude accounts use browser OAuth sign-in.
 
 The model editor also accepts speed routes such as `Fast=provider-model-id, Ultrafast=another-model-id`; **None** uses the base model ID. These are explicit model routes, so they only change speed when the chosen provider exposes a corresponding faster model. Effort choices such as `low, medium, high, xhigh` appear under the model selector. Claude receives the selected effort through its CLI options. DSH (ChatGPT included) and Cursor receive it through ACP when the live model advertises that value; an unsupported choice produces a clear error. The default effort leaves the provider's setting unchanged.
 

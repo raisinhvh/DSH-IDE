@@ -554,6 +554,7 @@ body.a11y-targets .voice-button { width: calc(34px * var(--text-scale, 1)); min-
 .inline-form label input, .inline-form label select { display: block; margin-top: 4px; font-weight: 400; }
 .inline-form label.check-row { display: flex; align-items: center; gap: 6px; }
 .inline-form label.check-row input { width: auto; min-height: 0; margin: 0; padding: 0; accent-color: var(--accent); }
+.self-hosted-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
 .optional, .helper { color: var(--muted); font-weight: 400; }
 .helper { margin: 4px 0; line-height: calc(1.4 * var(--line-scale, 1)); }
 .provider-install { margin-top: 6px; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--quiet-surface); }

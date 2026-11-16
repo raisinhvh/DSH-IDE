@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { SELF_HOSTED } from './selfHosted';
 
 /**
  * The OpenAI-compatible endpoint of each provider DSH routes through llm-pi-ai. OpenRouter's serves every model it
@@ -14,6 +15,8 @@ export const PI_AI_BASE_URLS: Readonly<Record<string, string>> = {
   'opencode-go': 'https://opencode.ai/zen/go/v1',
   mistral: 'https://api.mistral.ai/v1',
   'openai-codex': 'https://chatgpt.com/backend-api',
+  // The self-hosted base URL is per account and passed to piAiPatch; this entry only marks the provider as a pi-ai one.
+  [SELF_HOSTED]: '',
 };
 /** Providers whose models are only reachable through pi-ai's catalog adapter. */
 const CATALOG_ONLY = new Set(['openai-codex']);
@@ -30,7 +33,7 @@ export function isPiAiProvider(provider: string): boolean {
  * (dsh-llm-pi-ai's own node_modules first, then each ancestor's). Undefined when no catalog can be read.
  */
 export async function piAiCatalog(provider: string, dshBin: string): Promise<Set<string> | undefined> {
-  if (!isPiAiProvider(provider)) return undefined;
+  if (!isPiAiProvider(provider) || provider === SELF_HOSTED) return undefined;
   for (let dir = dirname(dshBin); ; dir = dirname(dir)) {
     for (const base of [join(dir, 'node_modules', '@deepseek-ai', 'dsh-llm-pi-ai', 'node_modules'), join(dir, 'node_modules')]) {
       let text: string;
@@ -51,12 +54,13 @@ export async function piAiCatalog(provider: string, dshBin: string): Promise<Set
  * is declared by hand on the provider's OpenAI-compatible endpoint, with the model's effort choices as its reasoning
  * levels.
  */
-export function piAiPatch(provider: string, envName: string, model: string, catalog: Set<string> | undefined, efforts: readonly string[] = []): string {
+export function piAiPatch(provider: string, envName: string, model: string, catalog: Set<string> | undefined, efforts: readonly string[] = [], baseURL?: string): string {
   if (!isPiAiProvider(provider)) return '';
   const json = JSON.stringify;
+  if (provider === SELF_HOSTED && !baseURL) throw new Error('A self-hosted model needs a base URL.');
   let text = `- id: llm-pi-ai\n  config:\n    providers:\n      ${provider}:\n        apiKeyEnv: ${json(envName)}\n`;
-  if (catalog?.has(model) || CATALOG_ONLY.has(provider)) return text;
-  text += `        api: "openai-completions"\n        baseURL: ${json(PI_AI_BASE_URLS[provider])}\n        models:\n          - id: ${json(model)}\n`;
+  if ((provider !== SELF_HOSTED && catalog?.has(model)) || CATALOG_ONLY.has(provider)) return text;
+  text += `        api: "openai-completions"\n        baseURL: ${json(provider === SELF_HOSTED ? baseURL : PI_AI_BASE_URLS[provider])}\n        models:\n          - id: ${json(model)}\n`;
   const levels = efforts.filter(effort => PI_AI_LEVELS.has(effort));
   if (levels.length) text += `            reasoningEfforts:\n${levels.map(level => `              ${level}: ${level === 'off' ? 'null' : json(level)}\n`).join('')}`;
   return text;

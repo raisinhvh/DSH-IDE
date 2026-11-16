@@ -49,3 +49,4 @@ await import('./explorer.test.mjs');
 await import('./prompt-prefix.test.mjs');
 await import('./rust-tools.test.mjs');
 await import('./tool-display.test.mjs');
+await import('./self-hosted.test.mjs');
