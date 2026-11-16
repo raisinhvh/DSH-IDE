@@ -57,3 +57,17 @@ test('the bundled DSH ships OpenRouter and OpenCode Go catalogs the extension ca
     assert.ok(catalog && catalog.size > 0, provider);
   }
 });
+
+test('self-hosted is declared by hand on openai-completions with the account base URL', () => {
+  assert.equal(isPiAiProvider('self-hosted'), true);
+  const patch = piAiPatch('self-hosted', 'SELF_HOSTED_API_KEY', 'roblox-gui', new Set(['roblox-gui']), [], 'https://gw.example.com/v1');
+  assert.match(patch, /self-hosted:/);
+  assert.match(patch, /api: "openai-completions"/);
+  assert.match(patch, /baseURL: "https:\/\/gw\.example\.com\/v1"/);
+  assert.match(patch, /apiKeyEnv: "SELF_HOSTED_API_KEY"/);
+  assert.match(patch, /id: "roblox-gui"/);
+});
+
+test('self-hosted needs a base URL', () => {
+  assert.throws(() => piAiPatch('self-hosted', 'SELF_HOSTED_API_KEY', 'm', undefined), /base URL/);
+});

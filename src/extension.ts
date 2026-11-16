@@ -16,6 +16,7 @@ import { InstructionItem, InstructionRoots, listInstructions, locateInstruction,
 import { shareInstructions } from './instructions/share';
 import { chatTitlePrompt, firstMessageTitle, parseChatName, uniqueChatIcon } from './runtime/naming';
 import { isUsageLimit } from './runtime/limits';
+import { SELF_HOSTED, SELF_HOSTED_ENV, normalizeBaseURL, parseModelIds } from './runtime/selfHosted';
 import { MAX_MEDIA_BYTES, MAX_MEDIA_FILES, MEDIA_INSTRUCTIONS, mediaType, SEND_MEDIA, SEND_MEDIA_TOOL } from './runtime/media';
 import { GENERATE_IMAGE, GENERATE_IMAGE_TOOL, generateImage, IMAGE_INSTRUCTIONS, imageFileName, inputImageProblem, MAX_INPUT_BYTES, parseImageRequest, pngSize } from './runtime/imageGen';
 import { ToolpackRegistry } from './toolpacks/registry';
@@ -774,7 +775,8 @@ class ExtensionHost implements vscode.Disposable {
       ...this.oauthAccounts.list().map(account => ({ id: account.id, provider: account.provider, label: account.label,
         email: account.email, isDefault: this.oauthAccounts.getDefault(account.provider)?.id === account.id, authType: 'oauth' as const })),
       ...this.accounts.list().map(account => ({ id: account.id, provider: account.provider, label: account.label, email: account.email,
-        isDefault: this.accounts.getDefault(account.provider)?.id === account.id, authType: 'api-key' as const })),
+        isDefault: this.accounts.getDefault(account.provider)?.id === account.id, authType: 'api-key' as const,
+        ...(account.provider === SELF_HOSTED && typeof account.metadata?.baseURL === 'string' ? { baseURL: account.metadata.baseURL } : {}) })),
     ], cursor: this.cursorAccount });
     await this.refreshAccount();
     this.refreshUsage();
@@ -842,6 +844,32 @@ class ExtensionHost implements vscode.Disposable {
     return { ...route, model };
   }
 
+  private selfHostedBaseURL(account: { metadata?: Record<string, unknown> }): string {
+    const baseURL = account.metadata?.baseURL;
+    if (typeof baseURL !== 'string' || !baseURL) throw new Error('This self-hosted account has no base URL. Remove it and add it again.');
+    return baseURL;
+  }
+
+  /** Asks a self-hosted account's server which models it serves. Errors never include the key. */
+  private async listProviderModels(accountId: string): Promise<void> {
+    const post = (models: string[], error?: string) => this.sidebar.postMessage({ type: 'providerModels', accountId, models, ...(error ? { error } : {}) });
+    try {
+      const account = this.accounts.get(accountId);
+      if (!account || account.provider !== SELF_HOSTED) throw new Error('Choose a self-hosted account.');
+      const baseURL = this.selfHostedBaseURL(account);
+      const secret = await this.accounts.getSecret(accountId);
+      if (!secret) throw new Error('This account has no API key. Replace the key and try again.');
+      const response = await fetch(`${baseURL}/models`, { headers: { Authorization: `Bearer ${secret}`, Accept: 'application/json' }, signal: AbortSignal.timeout(20000) });
+      if (!response.ok) throw new Error(`The server answered ${response.status}${response.status === 401 || response.status === 403 ? ' (check the API key)' : ''}.`);
+      post(parseModelIds(await response.json()));
+    } catch (error) {
+      const raw = error instanceof Error ? (error.name === 'TimeoutError' ? 'The server did not answer within 20 seconds.' : error.message) : String(error);
+      let text = raw;
+      try { const key = await this.accounts.getSecret(accountId); if (key) text = text.split(key).join('[key]'); } catch { /* keep text */ }
+      post([], text || 'Could not load models.');
+    }
+  }
+
   private envName(provider: string): string {
     const configured: Record<string, string> = {
       'deepseek-official': 'DEEPSEEK_API_KEY',
@@ -850,6 +878,7 @@ class ExtensionHost implements vscode.Disposable {
       openrouter: 'OPENROUTER_API_KEY',
       'opencode-go': 'OPENCODE_API_KEY',
       mistral: 'MISTRAL_API_KEY',
+      [SELF_HOSTED]: SELF_HOSTED_ENV,
     };
     const name = configured[provider];
     if (!name) throw new Error(`Provider '${provider}' needs an explicit DSH adapter and credential mapping before it can run.`);
@@ -975,7 +1004,7 @@ class ExtensionHost implements vscode.Disposable {
       return { runtime, key };
     }
     const deepSeekAccount = this.accounts.getDefault('deepseek-official');
-    let start: { accountId: string; dshProvider: string; model: string; secret: string; envName: string; keyExtra: string };
+    let start: { accountId: string; dshProvider: string; model: string; secret: string; envName: string; keyExtra: string; baseURL?: string };
     if ('oauthAccount' in route) {
       // The token is fixed when the runtime launches, so one close to expiry is refreshed first. Its expiry is part of
       // the key: a refreshed token launches a new runtime, which resumes the chat's DSH session from the same home.
@@ -996,12 +1025,13 @@ class ExtensionHost implements vscode.Disposable {
         secret: route.secret,
         envName: this.envName(route.model.provider),
         keyExtra: '',
+        ...(route.model.provider === SELF_HOSTED ? { baseURL: this.selfHostedBaseURL(route.account) } : {}),
       };
     } else {
       throw new Error('The selected API provider has no account.');
     }
     // A forced cancellation must not terminate another chat or subagent.
-    const key = `${route.model.provider}:${start.accountId}:${start.model}:${deepSeekAccount?.id || ''}${start.keyExtra}:${ownerId}`;
+    const key = `${route.model.provider}:${start.accountId}:${start.model}:${deepSeekAccount?.id || ''}${start.keyExtra}${start.baseURL ? `:${start.baseURL}` : ''}:${ownerId}`;
     const runtime = this.runtimeFor(key);
     const accountHash = createHash('sha256').update(start.accountId).digest('hex').slice(0, 16);
     const providerHash = createHash('sha256').update(route.model.provider).digest('hex').slice(0, 16);
@@ -1009,7 +1039,7 @@ class ExtensionHost implements vscode.Disposable {
     const nodePath = await this.ensureNode();
     const webSearchKey = deepSeekAccount ? await this.accounts.getSecret(deepSeekAccount.id) : undefined;
     await runtime.start({ kind: 'dsh', provider: start.dshProvider, model: start.model, apiKey: start.secret,
-      webSearchKey, envName: start.envName, efforts: route.model.effortOptions, home, nodePath, dshRoot: await updatedRoot(this.context.globalStorageUri.fsPath) });
+      webSearchKey, envName: start.envName, efforts: route.model.effortOptions, baseURL: start.baseURL, home, nodePath, dshRoot: await updatedRoot(this.context.globalStorageUri.fsPath) });
     return { runtime, key };
   }
 
@@ -3405,7 +3435,7 @@ class ExtensionHost implements vscode.Disposable {
   }
 
   private async saveModel(message: Extract<SidebarWebviewMessage, { type: 'saveModel' }>): Promise<void> {
-    const allowed = new Set(['deepseek-official', 'openai', 'anthropic', 'openrouter', 'opencode-go', 'mistral', 'cursor-acp', 'codex-cli', 'claude-cli']);
+    const allowed = new Set(['deepseek-official', 'openai', 'anthropic', 'openrouter', 'opencode-go', 'mistral', SELF_HOSTED, 'cursor-acp', 'codex-cli', 'claude-cli']);
     if (!allowed.has(message.provider)) throw new Error('Choose a supported model provider.');
     const name = message.name.trim();
     const backend = message.backend.trim();
@@ -3814,13 +3844,14 @@ class ExtensionHost implements vscode.Disposable {
         case 'replaceAccountKey': {
           const account = this.accounts.get(message.accountId);
           if (!account) throw new Error('Account not found.');
-          if (!['deepseek-official', 'openrouter', 'opencode-go', 'mistral'].includes(account.provider)) throw new Error('Choose a supported API provider.');
+          if (!['deepseek-official', 'openrouter', 'opencode-go', 'mistral', SELF_HOSTED].includes(account.provider)) throw new Error('Choose a supported API provider.');
           await this.accounts.replaceSecret(message.accountId, message.secret);
           await this.refreshAccounts(false);
           this.sidebar.postMessage({ type: 'accountSaved' });
           this.refreshUsage(true, message.accountId);
           break;
         }
+        case 'listProviderModels': await this.listProviderModels(message.accountId); break;
         case 'openCliSetting':
           await vscode.commands.executeCommand('workbench.action.openSettings', 'dsh.runtime.claudePath');
           break;
@@ -3830,8 +3861,10 @@ class ExtensionHost implements vscode.Disposable {
           break;
         }
         case 'addAccount': {
-          if (!['deepseek-official', 'openrouter', 'opencode-go', 'mistral'].includes(message.provider)) throw new Error('Choose a supported API provider.');
-          await this.accounts.add({ provider: message.provider, label: message.label, email: message.email, secret: message.secret });
+          if (!['deepseek-official', 'openrouter', 'opencode-go', 'mistral', SELF_HOSTED].includes(message.provider)) throw new Error('Choose a supported API provider.');
+          const baseURL = message.provider === SELF_HOSTED ? normalizeBaseURL(message.baseURL ?? '') : undefined;
+          await this.accounts.add({ provider: message.provider, label: message.label, email: message.email, secret: message.secret,
+            ...(baseURL ? { metadata: { baseURL } } : {}) });
           await this.refreshAccounts(false);
           this.sidebar.postMessage({ type: 'accountSaved' });
           break;

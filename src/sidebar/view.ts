@@ -142,7 +142,8 @@ export type SidebarWebviewMessage =
   | { type: 'checkDependencies' }
   | { type: 'installProvider'; provider: string }
   | { type: 'viewProviderUsage'; provider: string }
-  | { type: 'addAccount'; provider: string; label: string; email?: string; secret: string }
+  | { type: 'addAccount'; provider: string; label: string; email?: string; secret: string; /** Required for `self-hosted`: the OpenAI-compatible base URL. */ baseURL?: string }
+  | { type: 'listProviderModels'; accountId: string }
   | { type: 'addOAuthAccount'; provider: 'codex-cli' | 'claude-cli'; label: string; email?: string }
   | { type: 'setDefaultAccount'; provider: string; accountId: string }
   | { type: 'removeAccount'; accountId: string }
@@ -237,6 +238,8 @@ export interface SidebarAccount {
   email?: string;
   isDefault: boolean;
   authType?: 'oauth' | 'api-key';
+  /** Self-hosted accounts: the OpenAI-compatible base URL the account points at. */
+  baseURL?: string;
 }
 
 export interface SidebarDependency {
@@ -316,6 +319,7 @@ export type SidebarHostMessage =
   | { type: 'modelState'; models: SidebarModel[]; cursorBackends?: { value: string; name: string }[]; selectedModelId?: string; selectedSpeed?: string; selectedEffort?: string }
   | { type: 'accountState'; provider: string; label: string; connected: boolean }
   | { type: 'accountsState'; accounts: SidebarAccount[]; cursor: CursorAccountState }
+  | { type: 'providerModels'; accountId: string; models: string[]; error?: string }
   | { type: 'usageState'; usage: Record<string, SidebarAccountUsage> }
   | { type: 'accountSaved' }
   | { type: 'dependencyState'; providers: SidebarDependency[] }
@@ -491,6 +495,7 @@ export function getSidebarHtml(
     <label>Account name<input id="account-name" maxlength="80" autocomplete="off" required placeholder="Personal or work"></label>
     <label>Email <span class="optional">optional</span><input id="account-email" type="email" autocomplete="off" placeholder="name@example.com"></label>
     <label id="account-key-field">API key<input id="account-key" type="password" autocomplete="off" required placeholder="Paste an API key"></label>
+    <label id="account-base-url-field" hidden>Base URL<input id="account-base-url" type="url" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:8787/v1"><span class="helper">OpenAI-compatible endpoint, e.g. your dsh-gpu-manager gateway. The key is stored in VS Code SecretStorage; the URL is not secret.</span></label>
     <div class="form-actions"><button type="button" class="text-button" id="account-cancel">Cancel</button><button type="submit" class="primary-button" id="account-submit">Save account</button></div>
   </form>
 </section>
@@ -501,8 +506,9 @@ export function getSidebarHtml(
   <form id="model-form" class="inline-form" hidden>
     <h2 id="model-form-title">Add model</h2>
     <label>Name<input id="model-name" maxlength="80" required placeholder="My model"></label>
-    <label>Provider<select id="model-provider" required><option value="">Select a provider</option><option value="codex-cli">ChatGPT (Codex)</option><option value="claude-cli">Claude Code</option><option value="cursor-acp">Cursor</option><option value="deepseek-official">DeepSeek</option><option value="openrouter">OpenRouter</option><option value="opencode-go">OpenCode Go</option><option value="mistral">Mistral</option></select></label>
-    <label id="model-backend-field">Model ID<input id="model-backend" placeholder="Provider model ID"></label>
+    <label>Provider<select id="model-provider" required><option value="">Select a provider</option><option value="codex-cli">ChatGPT (Codex)</option><option value="claude-cli">Claude Code</option><option value="cursor-acp">Cursor</option><option value="deepseek-official">DeepSeek</option><option value="openrouter">OpenRouter</option><option value="opencode-go">OpenCode Go</option><option value="mistral">Mistral</option><option value="self-hosted">Self-hosted</option></select></label>
+    <label id="model-backend-field">Model ID<input id="model-backend" list="model-backend-options" maxlength="120" spellcheck="false" autocomplete="off" placeholder="Provider model ID"><datalist id="model-backend-options"></datalist></label>
+    <div id="model-self-hosted-row" class="self-hosted-row" hidden><button type="button" class="secondary-button" id="model-load-models">Load models</button><span id="model-models-status" class="helper"></span></div>
     <label id="model-cursor-field" hidden>Cursor model<input id="model-cursor-backend" list="model-cursor-options" maxlength="120" spellcheck="false" autocomplete="off" placeholder="auto, or a model slug such as gpt-5"><datalist id="model-cursor-options"></datalist></label>
     <label>Account<select id="model-account"></select></label>
     <label>Speed options<input id="model-speed-options" placeholder="Choose a provider first"></label>

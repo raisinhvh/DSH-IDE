@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 import * as vscode from 'vscode';
 import { AgentModel, agentModels } from './models';
 import { cancellationDeadline, terminateProcessTree } from './cancellation';
+import { SELF_HOSTED } from './selfHosted';
 import { isPiAiProvider, piAiCatalog, piAiPatch } from './piAi';
 import { applyAgentPriority } from './priority';
 import { agentEnv } from './agentShell';
@@ -26,6 +27,8 @@ export interface DshRuntimeRoute {
   envName: string;
   /** The model's effort choices; they become the reasoning levels of an OpenRouter or OpenCode Go model DSH's catalog lacks. */
   efforts?: string[];
+  /** The account's OpenAI-compatible base URL; required for the self-hosted provider. */
+  baseURL?: string;
 }
 
 export interface CursorRuntimeRoute {
@@ -96,7 +99,7 @@ export class AcpRuntime implements vscode.Disposable {
       const instructionsHome = process.env.DSH_HOME || join(homedir(), '.dsh');
       const dshBin = dshBinFrom(route.dshRoot);
       const piAi = isPiAiProvider(route.provider)
-        ? piAiPatch(route.provider, route.envName, route.model, await piAiCatalog(route.provider, dshBin), route.efforts) : '';
+        ? piAiPatch(route.provider, route.envName, route.model, route.provider === SELF_HOSTED ? undefined : await piAiCatalog(route.provider, dshBin), route.efforts, route.baseURL) : '';
       await writeFile(patch, `- id: acp\n  config:\n    provider: ${JSON.stringify(route.provider)}\n    model: ${JSON.stringify(route.model)}\n- id: agent-instructions\n  config:\n    maxBytes: 65536\n    dshHome: ${JSON.stringify(instructionsHome)}\n- id: skill-filesystem\n  config:\n    dshHome: ${JSON.stringify(instructionsHome)}\n${piAi}`, 'utf8');
       this.secrets = [route.apiKey, route.webSearchKey].filter((value): value is string => !!value);
       env = { ...env, DSH_HOME: route.home, [route.envName]: route.apiKey, ...(route.webSearchKey ? { DEEPSEEK_API_KEY: route.webSearchKey } : {}) };
