@@ -1224,7 +1224,8 @@
       const section = keyed(document.createElement('section'), 'group:' + group.provider); section.className = 'provider-group'; section.setAttribute('role', 'tabpanel');
       const heading = document.createElement('div'); heading.className = 'group-heading'; heading.appendChild(providerLogo(group.provider)); const title = document.createElement('h2'); title.textContent = group.title; heading.appendChild(title);
       const refresh = button('', 'Refresh usage', () => send({ type: 'refreshUsage' }), 'icon-button', 'refresh'); if (accounts.some(account => state.usage[account.id]?.loading) || group.provider === 'cursor-acp' && state.usage['cursor-login']?.loading) refresh.firstChild.classList.add('spinning'); heading.appendChild(refresh);
-      if (group.provider !== 'legacy') heading.appendChild(button('', 'View ' + providerNames[group.provider] + ' usage in your browser', () => send({ type: 'viewProviderUsage', provider: group.provider }), 'icon-button', 'open_in_new')); section.appendChild(heading);
+      // Self-hosted servers have no provider usage website.
+      if (group.provider !== 'legacy' && group.provider !== 'self-hosted') heading.appendChild(button('', 'View ' + providerNames[group.provider] + ' usage in your browser', () => send({ type: 'viewProviderUsage', provider: group.provider }), 'icon-button', 'open_in_new')); section.appendChild(heading);
       if (group.provider === 'cursor-acp') {
         const card = document.createElement('div'); card.className = 'account-card'; const line = document.createElement('div'); line.className = 'row-title'; line.textContent = state.cursor.connected ? state.cursor.label || 'Cursor account' : state.cursor.busy ? 'Complete sign-in in your browser…' : 'No Cursor account connected'; card.appendChild(line);
         if (state.cursor.connected) { card.appendChild(usageBlock(cursorUsageAccount(), previous)); } section.appendChild(card);
