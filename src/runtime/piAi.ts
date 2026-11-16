@@ -60,7 +60,11 @@ export function piAiPatch(provider: string, envName: string, model: string, cata
   if (provider === SELF_HOSTED && !baseURL) throw new Error('A self-hosted model needs a base URL.');
   let text = `- id: llm-pi-ai\n  config:\n    providers:\n      ${provider}:\n        apiKeyEnv: ${json(envName)}\n`;
   if ((provider !== SELF_HOSTED && catalog?.has(model)) || CATALOG_ONLY.has(provider)) return text;
-  text += `        api: "openai-completions"\n        baseURL: ${json(provider === SELF_HOSTED ? baseURL : PI_AI_BASE_URLS[provider])}\n        models:\n          - id: ${json(model)}\n`;
+  text += `        api: "openai-completions"\n        baseURL: ${json(provider === SELF_HOSTED ? baseURL : PI_AI_BASE_URLS[provider])}\n`;
+  // Mistral's OpenAI-compatible endpoint and generic servers (vLLM, llama.cpp, LM Studio, ...) reject the "developer"
+  // role with a 422; send the system prompt as "system".
+  if (provider === SELF_HOSTED || provider === 'mistral') text += `        compat:\n          supportsDeveloperRole: false\n`;
+  text += `        models:\n          - id: ${json(model)}\n`;
   const levels = efforts.filter(effort => PI_AI_LEVELS.has(effort));
   if (levels.length) text += `            reasoningEfforts:\n${levels.map(level => `              ${level}: ${level === 'off' ? 'null' : json(level)}\n`).join('')}`;
   return text;

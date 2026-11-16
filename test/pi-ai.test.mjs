@@ -66,6 +66,18 @@ test('self-hosted is declared by hand on openai-completions with the account bas
   assert.match(patch, /baseURL: "https:\/\/gw\.example\.com\/v1"/);
   assert.match(patch, /apiKeyEnv: "SELF_HOSTED_API_KEY"/);
   assert.match(patch, /id: "roblox-gui"/);
+  assert.match(patch, /compat:\n\s+supportsDeveloperRole: false/);
+});
+
+test('mistral fallback models send the system role, not developer', () => {
+  const patch = piAiPatch('mistral', 'MISTRAL_API_KEY', 'not-in-catalog', new Set());
+  assert.match(patch, /baseURL: "https:\/\/api\.mistral\.ai\/v1"/);
+  assert.match(patch, /compat:\n\s+supportsDeveloperRole: false/);
+});
+
+test('hosted providers keep pi-ai developer-role detection', () => {
+  const patch = piAiPatch('openrouter', 'OPENROUTER_API_KEY', 'not-in-catalog', new Set());
+  assert.doesNotMatch(patch, /supportsDeveloperRole/);
 });
 
 test('self-hosted needs a base URL', () => {

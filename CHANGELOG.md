@@ -1,5 +1,12 @@
 # Release notes
 
+## 1.1.5
+
+Fix Mistral and self-hosted models failing with `422 ... Input tag 'developer' found using 'role'`.
+
+- Mistral models that are not in pi-ai's built-in catalog, and all Self-hosted models, now send the system prompt with the `system` role instead of `developer`. Mistral's OpenAI-compatible endpoint and most self-hosted servers reject the `developer` role.
+- Catalog Mistral models, OpenRouter, and OpenCode Go are unchanged.
+
 ## 1.1.4
 
 Connect local and self-hosted models through any OpenAI-compatible server.
