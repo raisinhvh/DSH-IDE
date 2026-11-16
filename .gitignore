@@ -1,5 +1,7 @@
 node_modules/
 *.vsix
+dsh-ide-*-SHA256SUMS.txt
+scripts/__pycache__/
 .npm-cache/
 .smoke-home/
 debug.log

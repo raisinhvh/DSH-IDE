@@ -27,6 +27,10 @@ To publish an extension update, increase `package.json`'s version, run `npm run 
 - Applying a proposal checks the live file against its review base, rejects workspace escaping and symlink targets, and updates the mirror baseline only after VS Code accepts the `WorkspaceEdit`.
 - With `dsh.runtime.mirror` off, there is no private copy. At the start of each turn DSH snapshots the workspace's text files (skipping gitignored ones), and anything that changes during the turn is listed as already applied. Files you save in the editor during a turn count as your edits, not the agent's. Changes made between turns are never attributed to the agent.
 
+## Package a release
+
+Update the version in `package.json` and `package-lock.json`, then run `npm run package:all` (Node/npm and Python 3.10+ required). It runs type checking, tests, and the production build, then stages clean production dependencies for Windows x64, macOS Apple Silicon, and macOS Intel. The three VSIXs and `dsh-ide-<version>-SHA256SUMS.txt` are written to the repository root. macOS executable permissions are restored and each archive is verified. Commit the version and release notes, tag that commit `v<version>`, and attach these files to a stable GitHub release. The individual `package` and `package:mac` commands remain available.
+
 ## Requirements
 
 - Windows x64 or ARM64. On startup, DSH checks Node.js and npm; if a compatible installation is missing, it downloads a private Node 24 LTS distribution (including npm) into extension storage and verifies its SHA-256 checksum. Existing compatible installations are reused.
